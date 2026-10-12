@@ -86,8 +86,8 @@ class AesGcmCryptoSession:
     Thread-safe: ``cryptography``'s AESGCM keeps no per-operation state between calls, so one
     instance serves concurrent operations. An operation that started before close completes on the
     cipher it captured; one starting after close is refused. Plaintext is read from and written to
-    the caller's buffers directly (``encrypt_into``/``decrypt_into``), never through an immutable
-    copy that couldn't be zeroed.
+    the caller's buffers directly (``encrypt_into``/``decrypt_into``), so this code makes no
+    immutable copy of it. What the cipher library does with the bytes inside a call is its own.
     """
 
     def __init__(self, key: bytearray, budget: EncryptionBudget | None = None, logger: logging.Logger | None = None) -> None:

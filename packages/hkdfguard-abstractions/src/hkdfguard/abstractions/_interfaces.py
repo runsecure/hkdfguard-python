@@ -210,7 +210,9 @@ class DataProtector(ABC):
 
     @abstractmethod
     def encrypt(self, plaintext: str) -> str:
-        """Encrypts ``plaintext`` and formats the result. Its UTF-8 copy inside this call is zeroed."""
+        """Encrypts ``plaintext`` and formats the result. The ``bytearray`` this call encodes it into is
+        zeroed, but ``plaintext`` itself and the temporary ``bytes`` CPython makes while encoding it are
+        immutable and are not. Callers who need the secret erased should hold it in a buffer instead."""
 
     @abstractmethod
     def decrypt(self, encrypted: str, result: WritableBuffer) -> int:
@@ -300,7 +302,8 @@ class ProtectedCache(ProtectedReadOnlyCache):
     @abstractmethod
     def add(self, name: str, plaintext: WritableBuffer | str) -> None:
         """Encrypts ``plaintext`` and stores it under ``name``. A buffer is zeroed as a side effect;
-        a ``str`` can't be, but its UTF-8 copy is.
+        a ``str`` can't be, and neither can the temporary ``bytes`` made while encoding it; the
+        ``bytearray`` it is encoded into is.
 
         :raises ValueError: a value is already stored under this name
         """

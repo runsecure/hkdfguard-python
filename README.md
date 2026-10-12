@@ -97,7 +97,10 @@ silently fall back to a default.
   and writes the caller's buffers directly (`encrypt_into`/`decrypt_into`) rather than through
   immutable copies. The plaintext and result buffers of an encrypt must not overlap: it is refused
   with `ValueError`, since encrypting in place would destroy the plaintext. Decrypt writes UTF-8 bytes and returns the count; `decrypt_to_str` is a convenience
-  for when an immutable `str` is acceptable. AAD is the keyword-only argument `aad=`.
+  for when an immutable `str` is acceptable. AAD is the keyword-only argument `aad=`. A `str`
+  plaintext is encoded into a `bytearray` that is zeroed, but the `str` itself and the temporary
+  `bytes` CPython builds while encoding it can't be: hold a secret in a buffer from the start if
+  it must not linger.
 - **`TryGet...(out ...)`** becomes `find...` returning a value or `None`.
 - **Exceptions:**
   - `ArgumentException` -> `ValueError`, and `ArgumentNullException` -> `TypeError`.
@@ -110,7 +113,9 @@ silently fall back to a default.
   - `CryptographicException` and `AuthenticationTagMismatchException` become `CryptographicError`
     and `AuthenticationTagMismatchError`.
 - **Memory hygiene:** CPython has no pinned or stack allocation, so zeroing erases the live copy of
-  a secret but not copies the allocator may have left; `str` values can never be zeroed.
+  a secret but not copies the allocator may have left; `str` values can never be zeroed, and
+  encoding a `str` always passes through a temporary immutable `bytes`. What a library such as
+  `cryptography` keeps inside a call is outside this library's control.
 - **Logging:** a `None` logger means the package's own logger (e.g. `hkdfguard.cache`). The event id
   travels as the `hkdfguard_event_id` record attribute; .NET's Critical is `logging.CRITICAL`.
 - **Telemetry** goes to OpenTelemetry's global providers, or to those given to

@@ -152,7 +152,8 @@ class ProtectedCacheBase(ProtectedReadOnlyCache):
             ArrayUtility.zero_memory(plaintext)
 
     def _encrypt_text(self, name: str, plaintext: str) -> KeyTrackingValue:
-        """:meth:`_encrypt` for text, as UTF-8; the encoded copy is zeroed on every path."""
+        """:meth:`_encrypt` for text, as UTF-8; the ``bytearray`` it is encoded into is zeroed on every
+        path. ``plaintext`` and the temporary ``bytes`` made while encoding it are immutable and are not."""
         if not plaintext:
             raise ValueError("An empty value cannot be cached: decrypt reports a missing name as 0 bytes.")
         encoded = Utf8.encode(plaintext)

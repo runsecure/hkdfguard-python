@@ -58,7 +58,9 @@ def system_directory() -> str:
 
 @functools.cache
 def _system32(file_name: str) -> Any:
-    return ctypes.WinDLL(os.path.join(system_directory(), file_name), use_last_error=True)  # type: ignore[attr-defined,unused-ignore]
+    # Dependencies of these libraries resolve from System32 only, never the application directory or PATH.
+    return ctypes.WinDLL(os.path.join(system_directory(), file_name), use_last_error=True,  # type: ignore[attr-defined,unused-ignore]
+                         winmode=LOAD_LIBRARY_SEARCH_SYSTEM32)
 
 
 def _local_free(pointer: int | None) -> None:

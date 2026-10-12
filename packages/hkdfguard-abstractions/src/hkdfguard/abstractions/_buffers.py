@@ -18,8 +18,10 @@ class ArrayUtility:
 
     Python's ``bytes`` and ``str`` are immutable and can't be zeroed, so every secret HkdfGuard
     handles - keys, plaintext - travels in a ``bytearray`` (or a ``memoryview`` over one), which is
-    zeroed as soon as it is no longer needed. That erases the live copy of a secret; a ``str`` the
-    caller passed in, or a temporary the interpreter made while encoding one, is beyond reach.
+    zeroed as soon as it is no longer needed. That erases the live copy of a secret and nothing else.
+    Beyond reach, and left to the garbage collector and allocator: a ``str`` the caller passed in,
+    the temporary ``bytes`` CPython builds when it encodes a ``str`` (see :meth:`Utf8.encode`), and
+    any copy a library makes inside a call.
     """
 
     @staticmethod
@@ -69,7 +71,9 @@ class Utf8:
     @staticmethod
     def encode(text: str) -> bytearray:
         """``text`` as UTF-8, substituting U+FFFD for an unpaired surrogate. The caller owns the
-        result and should zero it once done."""
+        result and should zero it once done. Zeroing erases this buffer only: CPython encodes a
+        ``str`` through a temporary immutable ``bytes`` first, which can't be zeroed, and neither
+        can ``text`` itself."""
         return bytearray(Utf8._normalize(text, "replace"), "utf-8")
 
     @staticmethod
