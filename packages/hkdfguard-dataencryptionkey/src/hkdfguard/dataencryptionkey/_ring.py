@@ -18,6 +18,7 @@ from hkdfguard.abstractions import (
     EncryptedFormatProvider,
     KeyNotFoundError,
     KeyTrackingValue,
+    KeyVersions,
     ObjectClosedError,
     ProtectedCacheBase,
     Utf8,
@@ -178,11 +179,13 @@ class KeyRing(abstractions.KeyRing):
         """Registers ``key`` for ``version``; a version higher than every other becomes current. On
         success the ring owns the key; if add raises, ownership stays with the caller.
 
-        :raises ValueError: a key is already registered for this version
+        :raises ValueError: ``version`` is outside the signed 32-bit range, or a key is already
+            registered for it
         :raises ObjectClosedError: the ring has been closed
         """
         if key is None:
             raise TypeError("key must not be None.")
+        KeyVersions.require_valid(version)
         telemetry = HkdfGuardTelemetry.DATA_PROTECTION
         with telemetry.start_span(SpanNames.DataProtection.KEY_RING_ADD) as span, self._lock:
             if self._closed:
@@ -267,7 +270,7 @@ class KeyRing(abstractions.KeyRing):
         with telemetry.tracer.start_as_current_span(SpanNames.DataProtection.KEY_RING_ROTATE_EPHEMERAL, record_exception=False,
                                                     set_status_on_exception=False) as span:
             current = self.current_version
-            if current == 2**31 - 1:
+            if current == KeyVersions.MAX_VALUE:
                 exhausted = RuntimeError(f"Version {current} is current, so there is no higher version to rotate to; the current key stays in use.")
                 span.record_exception(exhausted)
                 HkdfGuardLog.ephemeral_key_rotation_failed(logger, current, exhausted)

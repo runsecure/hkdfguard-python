@@ -93,9 +93,10 @@ silently fall back to a default.
   never waits for a rotation blocked in the KMS: a key that rotation creates after the ring closed
   is closed instead of added.
 - **Buffers.** Secrets travel in writable buffers (`bytearray` or `memoryview`) so they can be
-  zeroed; immutable `bytes` are refused wherever a plaintext would need zeroing. AES-GCM encrypts
-  and decrypts in place (`encrypt_into`/`decrypt_into`), so plaintext never lands in an immutable
-  object. Decrypt writes UTF-8 bytes and returns the count; `decrypt_to_str` is a convenience
+  zeroed; immutable `bytes` are refused wherever a plaintext would need zeroing. AES-GCM reads
+  and writes the caller's buffers directly (`encrypt_into`/`decrypt_into`) rather than through
+  immutable copies. The plaintext and result buffers of an encrypt must not overlap: it is refused
+  with `ValueError`, since encrypting in place would destroy the plaintext. Decrypt writes UTF-8 bytes and returns the count; `decrypt_to_str` is a convenience
   for when an immutable `str` is acceptable. AAD is the keyword-only argument `aad=`.
 - **`TryGet...(out ...)`** becomes `find...` returning a value or `None`.
 - **Exceptions:**

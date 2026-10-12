@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import hmac
 import re
 from collections.abc import Buffer
@@ -29,6 +30,22 @@ class ArrayUtility:
             return True
         view = memoryview(data).cast("B")
         return len(view) == 0 or hmac.compare_digest(view, bytes(len(view)))
+
+    @staticmethod
+    def overlaps(first: WritableBuffer, second: WritableBuffer) -> bool:
+        """True if the two buffers share any memory - the same bytearray, or views over overlapping
+        parts of one. An empty buffer overlaps nothing."""
+        a = memoryview(first).cast("B")
+        b = memoryview(second).cast("B")
+        if len(a) == 0 or len(b) == 0:
+            return False
+        start_a, start_b = ArrayUtility._address(a), ArrayUtility._address(b)
+        return start_a < start_b + len(b) and start_b < start_a + len(a)
+
+    @staticmethod
+    def _address(view: memoryview) -> int:
+        # The ctypes object holds a buffer export only until it is released here.
+        return ctypes.addressof(ctypes.c_char.from_buffer(view))
 
     @staticmethod
     def zero_memory(buffer: WritableBuffer | None) -> None:

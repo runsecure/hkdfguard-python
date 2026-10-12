@@ -28,6 +28,24 @@ class WrappedKeyLimits:
     MAX_BYTES: Final = 512
 
 
+class KeyVersions:
+    """The range of a key ring version: a signed 32-bit integer, as in every port. The wire format
+    parses nothing outside it, so a key registered outside it could encrypt but never decrypt."""
+
+    MIN_VALUE: Final = -(2**31)
+    MAX_VALUE: Final = 2**31 - 1
+
+    @staticmethod
+    def is_valid(version: int) -> bool:
+        return KeyVersions.MIN_VALUE <= version <= KeyVersions.MAX_VALUE
+
+    @staticmethod
+    def require_valid(version: int, param_name: str = "version") -> None:
+        """:raises ValueError: ``version`` is outside the signed 32-bit range"""
+        if not KeyVersions.is_valid(version):
+            raise ValueError(f"{param_name} must be between {KeyVersions.MIN_VALUE} and {KeyVersions.MAX_VALUE}; it is {version}.")
+
+
 class ServiceNames:
     """The rule for a service name - the identity of a KEK in the native KMS library: 1 to
     :attr:`MAX_LENGTH` characters, each an ASCII letter, digit or '.', not starting with '.' and

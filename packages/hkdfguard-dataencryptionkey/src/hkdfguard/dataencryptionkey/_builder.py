@@ -12,12 +12,13 @@ from hkdfguard.abstractions import (
     CryptoProvider,
     CryptoProviderFactory,
     EncryptedFormatProvider,
+    KeyVersions,
     KeyWrapper,
     RefreshFailurePolicy,
     ServiceNames,
-    WrappedKeyLimits,
 )
 from hkdfguard.dataencryptionkey._format import DefaultFormatProvider
+from hkdfguard.dataencryptionkey._key_file import read_key_file
 from hkdfguard.dataencryptionkey._ring import DataEncryptionKey, KeyRing
 
 _DEFAULT_LOGGER: Final = logging.getLogger("hkdfguard.dataencryptionkey")
@@ -50,6 +51,7 @@ class KeyRingBuilder:
         self._key_wrapper: KeyWrapper | None = None
         self._factory: CryptoProviderFactory | None = None
         self._format_provider: EncryptedFormatProvider = DefaultFormatProvider()
+        self._verify_key_file_permissions = True
         self._logger: logging.Logger | None = None
         self.service_name: str | None = None
         """The service name identifying this ring's KEK, if one was given."""
@@ -145,15 +147,30 @@ class KeyRingBuilder:
     def with_key_file(self, version: int, path: str | os.PathLike[str]) -> Self:
         """Registers a version whose wrapped DEK is read from ``path`` at build.
 
-        :raises ValueError: a key file is already registered for this version
+        :raises ValueError: ``version`` is outside the signed 32-bit range, or a key file is already
+            registered for it
         """
+        KeyVersions.require_valid(version)
         if version in self._key_files:
             raise ValueError(f"A key file is already registered for version {version}.")
         self._key_files[version] = os.fspath(path)
         return self
 
+    def without_key_file_permission_checks(self) -> Self:
+        """Reads key files without checking who owns them and who can write them. By default, on a
+        POSIX system a key file, and every directory above its real path, must be owned by root or the
+        current user and writable by no one else (a sticky directory such as /tmp excepted), since
+        whoever can replace the file chooses the DEK the process encrypts under. Turn this off only
+        where permissions are enforced some other way. Windows is not checked either way yet."""
+        self._verify_key_file_permissions = False
+        return self
+
     def with_ephemeral_key(self, version: int) -> Self:
-        """Registers a version whose DEK is generated at build time and never written to disk."""
+        """Registers a version whose DEK is generated at build time and never written to disk.
+
+        :raises ValueError: ``version`` is outside the signed 32-bit range
+        """
+        KeyVersions.require_valid(version)
         self._ephemeral_versions.append(version)
         return self
 
@@ -162,6 +179,7 @@ class KeyRingBuilder:
         fails partway, every provider created so far is closed.
 
         :raises RuntimeError: no key wrapper, factory, key refresh interval, or keys were configured
+        :raises PermissionError: a key file, or a directory above it, fails the permission check
         :raises OSError: a key file can't be read, is empty, or is larger than WrappedKeyLimits.MAX_BYTES
         """
         if self._key_wrapper is None:
@@ -177,7 +195,8 @@ class KeyRingBuilder:
         ring = KeyRing(self._format_provider)
         try:
             for version in sorted(self._key_files):
-                provider = factory.create(wrapper, _read_key_file(self._key_files[version]), interval, failures)
+                provider = factory.create(wrapper, read_key_file(self._key_files[version], verify_permissions=self._verify_key_file_permissions,
+                                                       logger=self._logger or _DEFAULT_LOGGER), interval, failures)
                 _add_owned(ring, version, provider)
 
             for version in self._ephemeral_versions:
@@ -194,26 +213,6 @@ class KeyRingBuilder:
         except BaseException:
             ring.close()
             raise
-
-
-def _read_key_file(path: str) -> bytearray:
-    """Reads a wrapped DEK, refusing an empty file or one over WrappedKeyLimits.MAX_BYTES - never
-    reading more than one byte past the limit, so a wrong path can't make startup allocate without bound."""
-    buffer = bytearray(WrappedKeyLimits.MAX_BYTES + 1)
-    total = 0
-    with open(path, "rb") as file:
-        view = memoryview(buffer)
-        while total < len(buffer):
-            read = file.readinto(view[total:])
-            if not read:
-                break
-            total += read
-
-    if total == 0:
-        raise OSError(f"Key file '{path}' is empty.")
-    if total > WrappedKeyLimits.MAX_BYTES:
-        raise OSError(f"Key file '{path}' is larger than {WrappedKeyLimits.MAX_BYTES} bytes (WrappedKeyLimits.MAX_BYTES); a wrapped key never is.")
-    return buffer[:total]
 
 
 def _add_owned(ring: KeyRing, version: int, provider: CryptoProvider) -> None:

@@ -415,3 +415,13 @@ def test_from_mapping_rejects_bad_settings_naming_where(settings: dict[object, o
 def test_from_mapping_rejects_a_section_that_is_not_a_mapping(settings: object, message: str) -> None:
     with pytest.raises(TypeError, match=message):
         HkdfGuardOptions.from_mapping(settings)  # type: ignore[arg-type]
+
+
+def test_a_version_outside_the_signed_32_bit_range_is_reported() -> None:
+    options = HkdfGuardOptions(service_name="com.example.orders", ephemeral_keys=[2**31, 1], key_files=[KeyFileOptions(-(2**31) - 1, "a.bin")])
+
+    failures = options.validate()
+
+    assert any("Version 2147483648 is outside the signed 32-bit range" in f for f in failures)
+    assert any("Version -2147483649 is outside the signed 32-bit range" in f for f in failures)
+    assert not any("Version 1 " in f for f in failures)
