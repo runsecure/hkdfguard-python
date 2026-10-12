@@ -3,6 +3,8 @@ from __future__ import annotations
 import base64
 import logging
 import os
+import re
+import stat
 import sys
 import threading
 import time
@@ -30,6 +32,7 @@ from hkdfguard.abstractions import (
 )
 from hkdfguard.cryptoprovider.aesgcm256 import AesGcmCryptoProvider, AesGcmCryptoProviderFactory, AesGcmPipelineDataProtector
 from hkdfguard.dataencryptionkey import Base64ConversionUtility, DataEncryptionKey, DefaultFormatProvider, KeyRing, KeyRingBuilder
+from hkdfguard.dataencryptionkey._key_file import PathStatus
 from hkdfguard.diagnostics import AttributeNames, HkdfGuardLog, HkdfGuardTelemetry, SpanNames
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
@@ -892,3 +895,120 @@ def test_deployed_and_runtime_keys_together_and_refresh_against_the_real_kek(nat
         time.sleep(2.5)  # two background re-reveals through the native KEK
         assert protector.decrypt_to_str(before) == "written before the refreshes"
         assert protector.decrypt_to_str(protector.encrypt("written after")) == "written after"
+
+
+@pytest.mark.parametrize("version", [-(2**31) - 1, 2**31])
+def test_a_version_outside_the_signed_32_bit_range_is_refused_everywhere(version: int) -> None:
+    from hkdfguard.abstractions import KeyTrackingValue
+
+    with pytest.raises(ValueError, match="key_version must be between"):
+        DefaultFormatProvider().format(KeyTrackingValue(version, b"x"))
+    with KeyRing(DefaultFormatProvider()) as ring, pytest.raises(ValueError, match="version must be between"):
+        ring.add(version, TrackingKey())
+    with pytest.raises(ValueError, match="version must be between"):
+        KeyRingBuilder().with_key_file(version, "a.bin")
+    with pytest.raises(ValueError, match="version must be between"):
+        KeyRingBuilder().with_ephemeral_key(version)
+
+
+def _status(owner: int, mode: int) -> PathStatus:
+    return PathStatus(owner, mode)
+
+
+_FILE = stat.S_IFREG
+_DIR = stat.S_IFDIR
+
+
+@pytest.mark.parametrize(("owner", "mode"), [(1000, _FILE | 0o600), (1000, _FILE | 0o644), (0, _FILE | 0o644), (0, _FILE | 0o400)])
+def test_a_key_file_owned_by_root_or_the_user_and_writable_by_no_one_else_passes(owner: int, mode: int) -> None:
+    from hkdfguard.dataencryptionkey._key_file import KeyFilePermissions
+
+    KeyFilePermissions.verify_file("/etc/k.bin", _status(owner, mode), {0, 1000})
+
+
+@pytest.mark.parametrize(("owner", "mode", "message"), [
+    (1001, _FILE | 0o600, "owned by uid 1001"),
+    (1000, _FILE | 0o660, "writable by its group"),
+    (1000, _FILE | 0o666, "writable by its group or by every user"),
+    (1000, _FILE | 0o602, "writable by its group or by every user"),
+    (1000, _FILE | stat.S_ISVTX | 0o666, "writable"),  # the sticky exemption is for directories only
+    (1000, stat.S_IFLNK | 0o777, "not a regular file"),
+    (1000, _DIR | 0o700, "not a regular file"),
+])
+def test_a_key_file_that_someone_else_owns_or_can_write_is_refused(owner: int, mode: int, message: str) -> None:
+    from hkdfguard.dataencryptionkey._key_file import KeyFilePermissions
+
+    with pytest.raises(PermissionError, match=message):
+        KeyFilePermissions.verify_file("/etc/k.bin", _status(owner, mode), {0, 1000})
+
+
+def test_every_directory_above_a_key_file_is_checked_up_to_the_root() -> None:
+    from hkdfguard.dataencryptionkey._key_file import KeyFilePermissions
+
+    tree = {"/": _status(0, _DIR | 0o755), "/srv": _status(0, _DIR | 0o755), "/srv/app": _status(1000, _DIR | 0o700)}
+    seen: list[str] = []
+
+    def get(path: str) -> PathStatus:
+        seen.append(path)
+        return tree[path]
+
+    KeyFilePermissions.verify_directories("/srv/app/k.bin", get, {0, 1000})
+    assert seen == ["/srv/app", "/srv", "/"]
+
+    cases = (("/srv/app", _status(1000, _DIR | 0o770)), ("/srv", _status(1002, _DIR | 0o755)), ("/", _status(0, _DIR | 0o757)),
+             ("/srv", _status(0, stat.S_IFLNK | 0o777)))
+    for bad_path, bad_status in cases:
+        broken = {**tree, bad_path: bad_status}
+        with pytest.raises(PermissionError, match=re.escape(f"'{bad_path}'")):
+            KeyFilePermissions.verify_directories("/srv/app/k.bin", broken.__getitem__, {0, 1000})
+
+
+def test_a_sticky_world_writable_directory_such_as_tmp_is_allowed_above_a_key_file() -> None:
+    from hkdfguard.dataencryptionkey._key_file import KeyFilePermissions
+
+    tree = {"/": _status(0, _DIR | 0o755), "/tmp": _status(0, _DIR | stat.S_ISVTX | 0o777)}
+    KeyFilePermissions.verify_directories("/tmp/k.bin", tree.__getitem__, {0, 1000})
+    tree["/tmp"] = _status(0, _DIR | 0o777)
+    with pytest.raises(PermissionError, match="writable"):
+        KeyFilePermissions.verify_directories("/tmp/k.bin", tree.__getitem__, {0, 1000})
+
+
+@pytest.mark.skipif(not hasattr(os, "geteuid"), reason="POSIX ownership and permission bits")
+def test_a_group_writable_key_file_stops_the_build_unless_the_checks_are_turned_off(tmp_path: Path) -> None:
+    path = tmp_path / "k.bin"
+    path.write_bytes(b"wrapped")
+    path.chmod(0o664)
+    tmp_path.chmod(0o700)
+
+    with pytest.raises(PermissionError, match="writable by its group"):
+        builder().with_key_file(1, path).build()
+    with builder().with_key_file(1, path).without_key_file_permission_checks().build():
+        pass
+
+
+@pytest.mark.skipif(not hasattr(os, "geteuid"), reason="POSIX ownership and permission bits")
+def test_a_symlinked_key_file_is_judged_by_what_it_points_to(tmp_path: Path) -> None:
+    target = tmp_path / "real.bin"
+    target.write_bytes(b"wrapped")
+    target.chmod(0o666)
+    link = tmp_path / "link.bin"
+    link.symlink_to(target)
+
+    with pytest.raises(PermissionError, match=r"real\.bin"):
+        builder().with_key_file(1, link).build()
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid"), reason="only platforms without the POSIX checks warn")
+def test_a_platform_without_the_checks_warns_rather_than_pretending(tmp_path: Path) -> None:
+    from hkdfguard.dataencryptionkey._key_file import read_key_file
+
+    path = tmp_path / "k.bin"
+    path.write_bytes(b"wrapped")
+    logger, handler = recording_logger()
+
+    assert read_key_file(str(path), verify_permissions=True, logger=logger) == b"wrapped"
+    assert any("not permission-checked" in r.getMessage() for r in handler.records)
+
+    handler.records.clear()
+    read_key_file(str(path), verify_permissions=False, logger=logger)
+    assert handler.records == []

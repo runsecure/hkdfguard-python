@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ctypes
+import hmac
 import re
 from collections.abc import Buffer
 
@@ -16,8 +18,10 @@ class ArrayUtility:
 
     Python's ``bytes`` and ``str`` are immutable and can't be zeroed, so every secret HkdfGuard
     handles - keys, plaintext - travels in a ``bytearray`` (or a ``memoryview`` over one), which is
-    zeroed as soon as it is no longer needed. That erases the live copy of a secret; a ``str`` the
-    caller passed in, or a temporary the interpreter made while encoding one, is beyond reach.
+    zeroed as soon as it is no longer needed. That erases the live copy of a secret and nothing else.
+    Beyond reach, and left to the garbage collector and allocator: a ``str`` the caller passed in,
+    the temporary ``bytes`` CPython builds when it encodes a ``str`` (see :meth:`Utf8.encode`), and
+    any copy a library makes inside a call.
     """
 
     @staticmethod
@@ -27,7 +31,23 @@ class ArrayUtility:
         if data is None:
             return True
         view = memoryview(data).cast("B")
-        return len(view) == 0 or int.from_bytes(view, "big") == 0
+        return len(view) == 0 or hmac.compare_digest(view, bytes(len(view)))
+
+    @staticmethod
+    def overlaps(first: WritableBuffer, second: WritableBuffer) -> bool:
+        """True if the two buffers share any memory - the same bytearray, or views over overlapping
+        parts of one. An empty buffer overlaps nothing."""
+        a = memoryview(first).cast("B")
+        b = memoryview(second).cast("B")
+        if len(a) == 0 or len(b) == 0:
+            return False
+        start_a, start_b = ArrayUtility._address(a), ArrayUtility._address(b)
+        return start_a < start_b + len(b) and start_b < start_a + len(a)
+
+    @staticmethod
+    def _address(view: memoryview) -> int:
+        # The ctypes object holds a buffer export only until it is released here.
+        return ctypes.addressof(ctypes.c_char.from_buffer(view))
 
     @staticmethod
     def zero_memory(buffer: WritableBuffer | None) -> None:
@@ -51,7 +71,9 @@ class Utf8:
     @staticmethod
     def encode(text: str) -> bytearray:
         """``text`` as UTF-8, substituting U+FFFD for an unpaired surrogate. The caller owns the
-        result and should zero it once done."""
+        result and should zero it once done. Zeroing erases this buffer only: CPython encodes a
+        ``str`` through a temporary immutable ``bytes`` first, which can't be zeroed, and neither
+        can ``text`` itself."""
         return bytearray(Utf8._normalize(text, "replace"), "utf-8")
 
     @staticmethod

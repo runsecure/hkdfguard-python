@@ -891,3 +891,36 @@ def test_pipeline_close_zeroes_the_key_and_its_base64_and_refuses_later_use() ->
 def test_pipeline_requires_a_format_provider() -> None:
     with pytest.raises(TypeError):
         AesGcmPipelineDataProtector(None, VERSION)  # type: ignore[arg-type]
+
+
+def test_base64_into_matches_the_standard_encoding_for_every_padding_case() -> None:
+    from hkdfguard.cryptoprovider.aesgcm256._pipeline import _base64_into
+
+    for length in range(0, 70):
+        data = os.urandom(length)
+        assert bytes(_base64_into(bytearray(data))) == base64.b64encode(data)
+
+
+def test_encrypt_refuses_overlapping_plaintext_and_result_without_spending_the_budget() -> None:
+    budget = EncryptionBudget()
+    cipher = AesGcmCryptoSession(bytearray(os.urandom(32)), budget)
+    message = b"0123456789abcdefXYZ"
+    shared = bytearray(message + bytes(28))
+
+    with pytest.raises(ValueError, match="must not overlap"):
+        cipher.encrypt(memoryview(shared)[: len(message)], shared)
+
+    assert shared[: len(message)] == bytes(len(message))  # the plaintext is zeroed on failure, as promised
+    assert budget.count == 0
+
+
+def test_encrypt_accepts_adjacent_views_of_one_buffer() -> None:
+    cipher = AesGcmCryptoSession(bytearray(os.urandom(32)))
+    shared = bytearray(b"secret" + bytes(34))
+    view = memoryview(shared)
+
+    written = cipher.encrypt(view[:6], view[6:])
+
+    plaintext = bytearray(6)
+    assert cipher.decrypt(view[6 : 6 + written], plaintext) == 6
+    assert plaintext == b"secret"

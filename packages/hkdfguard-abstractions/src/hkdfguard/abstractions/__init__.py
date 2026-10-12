@@ -25,6 +25,7 @@ from hkdfguard.abstractions._interfaces import (
 )
 from hkdfguard.abstractions._protected_cache_base import ProtectedCacheBase
 from hkdfguard.abstractions._rules import (
+    KeyVersions,
     ProtectedConfigurationPurpose,
     RefreshFailurePolicy,
     ServiceNames,
@@ -45,6 +46,7 @@ __all__ = [
     "KeyNotFoundError",
     "KeyRing",
     "KeyTrackingValue",
+    "KeyVersions",
     "KeyWrapper",
     "ObjectClosedError",
     "PipelineDataProtector",

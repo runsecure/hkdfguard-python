@@ -8,7 +8,7 @@ import re
 from collections.abc import Buffer
 from typing import Final
 
-from hkdfguard.abstractions import EncryptedFormatError, EncryptedFormatProvider, KeyTrackingValue, WritableBuffer
+from hkdfguard.abstractions import EncryptedFormatError, EncryptedFormatProvider, KeyTrackingValue, KeyVersions, WritableBuffer
 from hkdfguard.diagnostics import AttributeNames, HkdfGuardTelemetry, SpanNames
 
 _BASE64: Final = re.compile(r"(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?", re.ASCII)
@@ -85,7 +85,7 @@ class DefaultFormatProvider(EncryptedFormatProvider):
         self.max_encrypted_length: Final = max_encrypted_length
 
     def format(self, value: KeyTrackingValue) -> str:
-        """:raises ValueError: the formatted value would exceed the limit"""
+        """:raises ValueError: the key version is outside the signed 32-bit range, or the formatted value would exceed the limit"""
         telemetry = HkdfGuardTelemetry.DATA_PROTECTION
         with telemetry.start_span(SpanNames.DataProtection.FORMAT_PROVIDER_FORMAT) as span:
             if value is None:
@@ -94,6 +94,7 @@ class DefaultFormatProvider(EncryptedFormatProvider):
                 telemetry.log_sensitive_operation(span, SpanNames.DataProtection.FORMAT_PROVIDER_FORMAT,
                                                   {AttributeNames.KEY_VERSION: value.key_version, AttributeNames.VALUE_LENGTH: len(value.value)})
 
+            KeyVersions.require_valid(value.key_version, "key_version")
             prefix = f"{self._PREFIX}{self._DELIMITER}v{value.key_version}{self._DELIMITER}"
             length = len(prefix) + Base64ConversionUtility.get_base64_length(value.value)
             if length > self.max_encrypted_length:
@@ -132,7 +133,7 @@ class DefaultFormatProvider(EncryptedFormatProvider):
             raise EncryptedFormatError(self._MALFORMED)
 
         digits = parts[1][1:]
-        if _VERSION.fullmatch(digits) is None or not -(2**31) <= int(digits) < 2**31:
+        if _VERSION.fullmatch(digits) is None or not KeyVersions.is_valid(int(digits)):
             raise EncryptedFormatError(self._MALFORMED)
 
         if not Base64ConversionUtility.is_base64(parts[2]):

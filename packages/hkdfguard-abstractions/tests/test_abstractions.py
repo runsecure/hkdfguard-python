@@ -434,3 +434,31 @@ def test_put_if_absent_stores_only_the_first_and_remove_drops_it() -> None:
 
     assert cache.remove("Item")
     assert cache.decrypt("item", bytearray(16)) == 0
+
+
+def test_overlaps_detects_shared_memory_between_buffers_and_views() -> None:
+    from hkdfguard.abstractions import ArrayUtility
+
+    buffer = bytearray(32)
+    view = memoryview(buffer)
+    assert ArrayUtility.overlaps(buffer, buffer)
+    assert ArrayUtility.overlaps(view[:16], view[15:])
+    assert ArrayUtility.overlaps(buffer, view[31:])
+    assert not ArrayUtility.overlaps(view[:16], view[16:])
+    assert not ArrayUtility.overlaps(buffer, bytearray(32))
+    assert not ArrayUtility.overlaps(bytearray(0), buffer)
+
+    fresh = bytearray(8)
+    assert ArrayUtility.overlaps(fresh, fresh)
+    fresh.extend(b"still resizable")  # no buffer export is left held by the check
+
+
+def test_key_versions_accept_exactly_the_signed_32_bit_range() -> None:
+    from hkdfguard.abstractions import KeyVersions
+
+    for version in (-(2**31), -1, 0, 2**31 - 1):
+        KeyVersions.require_valid(version)
+    for version in (-(2**31) - 1, 2**31):
+        assert not KeyVersions.is_valid(version)
+        with pytest.raises(ValueError, match="version must be between"):
+            KeyVersions.require_valid(version)

@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import ClassVar, Self
 
-from hkdfguard.abstractions import ServiceNames
+from hkdfguard.abstractions import KeyVersions, ServiceNames
 from hkdfguard.dataencryptionkey import KeyRingBuilder
 
 _INTEGER: re.Pattern[str] = re.compile(r"[+-]?\d+")
@@ -157,6 +157,10 @@ class HkdfGuardOptions:
 
         failures.extend(f"key_files version {key_file.version} is missing a path."
                         for key_file in self.key_files if not os.fspath(key_file.path).strip())
+
+        all_versions = [key_file.version for key_file in self.key_files] + list(self.ephemeral_keys)
+        failures.extend(f"Version {version} is outside the signed 32-bit range {KeyVersions.MIN_VALUE} to {KeyVersions.MAX_VALUE}."
+                        for version in sorted(set(all_versions)) if not KeyVersions.is_valid(version))
 
         versions = Counter([key_file.version for key_file in self.key_files] + list(self.ephemeral_keys))
         failures.extend(f"Version {version} is registered more than once across key_files/ephemeral_keys."

@@ -6,7 +6,7 @@ license = "MPL-2.0"
 requires-python = ">=3.12"
 dependencies = [
     "hkdfguard-abstractions",
-    "cryptography>=45",
+    "cryptography>=47",
 ]
 classifiers = [
     "Programming Language :: Python :: 3",

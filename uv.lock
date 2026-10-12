@@ -276,7 +276,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cryptography", specifier = ">=45" },
+    { name = "cryptography", specifier = ">=47" },
     { name = "hkdfguard-abstractions", editable = "packages/hkdfguard-abstractions" },
 ]
 

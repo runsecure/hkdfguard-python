@@ -86,8 +86,8 @@ class AesGcmCryptoSession:
     Thread-safe: ``cryptography``'s AESGCM keeps no per-operation state between calls, so one
     instance serves concurrent operations. An operation that started before close completes on the
     cipher it captured; one starting after close is refused. Plaintext is read from and written to
-    the caller's buffers directly (``encrypt_into``/``decrypt_into``), never through an immutable
-    copy that couldn't be zeroed.
+    the caller's buffers directly (``encrypt_into``/``decrypt_into``), so this code makes no
+    immutable copy of it. What the cipher library does with the bytes inside a call is its own.
     """
 
     def __init__(self, key: bytearray, budget: EncryptionBudget | None = None, logger: logging.Logger | None = None) -> None:
@@ -139,17 +139,21 @@ class AesGcmCryptoSession:
                     telemetry.log_sensitive_operation(span, SpanNames.CryptoProviderAesGcm256.ENCRYPT,
                                                       {AttributeNames.PLAINTEXT_LENGTH: len(source), AttributeNames.AAD_LENGTH: len(memoryview(aad))})
 
+                output = memoryview(result).cast("B")
+                if len(output) < NONCE_SIZE + len(source) + TAG_SIZE:
+                    raise ValueError("Result buffer too small.")
+                # The nonce is written to the result before the plaintext is read, and the ciphertext
+                # lands at an offset: sharing memory would destroy the plaintext and fail to authenticate.
+                if ArrayUtility.overlaps(plaintext, result):
+                    raise ValueError("The plaintext and result buffers must not overlap: encrypt cannot run in place.")
+
                 if self.budget.consume():
                     span.add_event(EventNames.ENCRYPTION_BUDGET_WARNING,
                                    {AttributeNames.ENCRYPTION_COUNT: self.budget.count, AttributeNames.ENCRYPTION_LIMIT: self.budget.limit})
                     # A span event alone is lost without a tracer; the log is not.
                     HkdfGuardLog.encryption_budget_warning(self._logger, self.budget.count, self.budget.limit)
 
-                output = memoryview(result).cast("B")
                 total = NONCE_SIZE + len(source) + TAG_SIZE
-                if len(output) < total:
-                    raise ValueError("Result buffer too small.")
-
                 nonce = os.urandom(NONCE_SIZE)
                 output[:NONCE_SIZE] = nonce
                 aes.encrypt_into(nonce, source, memoryview(aad), output[NONCE_SIZE:total])

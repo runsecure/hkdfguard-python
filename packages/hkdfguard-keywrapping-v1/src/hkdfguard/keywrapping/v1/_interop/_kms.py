@@ -83,7 +83,7 @@ class KmsFunctions:
         int hkdfguard_generate_and_wrap_dek(const char* service, uint8_t* out, int* out_len);
 
     Input is copied into a ctypes buffer that is zeroed after the call; output is written straight
-    into the caller's buffer, so no immutable copy of a revealed key is ever made.
+    into the caller's buffer, so this code makes no immutable copy of a revealed key.
     """
 
     def __init__(self, library: Any) -> None:
