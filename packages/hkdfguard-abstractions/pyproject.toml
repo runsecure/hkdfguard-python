@@ -3,6 +3,7 @@ name = "hkdfguard-abstractions"
 version = "1.0.0.dev0"
 description = "The interfaces, shared rules and base classes every HkdfGuard component builds on."
 license = "MPL-2.0"
+readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "hkdfguard-diagnostics",

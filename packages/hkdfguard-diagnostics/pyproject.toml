@@ -3,6 +3,7 @@ name = "hkdfguard-diagnostics"
 version = "1.0.0.dev0"
 description = "Shared OpenTelemetry spans, metrics and log messages for every HkdfGuard component."
 license = "MPL-2.0"
+readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "opentelemetry-api>=1.45",
