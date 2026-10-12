@@ -3,6 +3,7 @@ name = "hkdfguard-cache"
 version = "1.0.0.dev0"
 description = "Concurrent name-to-encrypted-value caches that follow key ring rotation and bind every value to its name."
 license = "MPL-2.0"
+readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "hkdfguard-abstractions",

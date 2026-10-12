@@ -140,6 +140,26 @@ uv run mypy packages    # strict
 uv build --all-packages # wheels and sdists into dist/
 ```
 
+## Releasing
+
+`.github/workflows/ci.yml` tests every push and pull request on Linux, Windows and macOS with Python
+3.12 to 3.14, lints, and builds and checks the packages. `.github/workflows/release.yml` publishes all
+seven distributions together to PyPI, with no stored token (PyPI trusted publishing).
+
+To release: set the same version in every `packages/*/pyproject.toml`, merge to `main`, then push a tag
+`v<version>` (for example `v1.0.0`). The workflow refuses a tag that is not on `main` or that differs
+from any package's version. Running it by hand from the Actions tab publishes to TestPyPI instead.
+
+`python scripts/check-dist.py dist --tag v1.0.0` runs the same checks locally after `uv build --all-packages`.
+
+One-time setup, before the first release:
+
+1. On PyPI and TestPyPI, add a trusted publisher to each of the seven projects (a *pending*
+   publisher, for a project that does not exist yet): owner `runsecure`, repository
+   `hkdfguard-python`, workflow `release.yml`, environment `pypi` (PyPI) or `testpypi` (TestPyPI).
+2. In the GitHub repository settings, create the environments `pypi` and `testpypi`. Add required
+   reviewers to `pypi`, so a pushed tag still waits for a person before anything is published.
+
 ## Native integration tests
 
 The native tests make real calls into this platform's KMS library: the integration tests in
