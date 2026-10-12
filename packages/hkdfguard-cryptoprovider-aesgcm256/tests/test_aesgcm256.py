@@ -891,3 +891,11 @@ def test_pipeline_close_zeroes_the_key_and_its_base64_and_refuses_later_use() ->
 def test_pipeline_requires_a_format_provider() -> None:
     with pytest.raises(TypeError):
         AesGcmPipelineDataProtector(None, VERSION)  # type: ignore[arg-type]
+
+
+def test_base64_into_matches_the_standard_encoding_for_every_padding_case() -> None:
+    from hkdfguard.cryptoprovider.aesgcm256._pipeline import _base64_into
+
+    for length in range(0, 70):
+        data = os.urandom(length)
+        assert bytes(_base64_into(bytearray(data))) == base64.b64encode(data)

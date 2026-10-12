@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import re
 from collections.abc import Buffer
 
@@ -27,7 +28,7 @@ class ArrayUtility:
         if data is None:
             return True
         view = memoryview(data).cast("B")
-        return len(view) == 0 or int.from_bytes(view, "big") == 0
+        return len(view) == 0 or hmac.compare_digest(view, bytes(len(view)))
 
     @staticmethod
     def zero_memory(buffer: WritableBuffer | None) -> None:

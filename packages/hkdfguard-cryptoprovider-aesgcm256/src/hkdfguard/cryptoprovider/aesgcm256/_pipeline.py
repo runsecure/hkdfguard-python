@@ -20,24 +20,25 @@ from hkdfguard.cryptoprovider.aesgcm256._session import KEY_LENGTH, NONCE_SIZE, 
 from hkdfguard.diagnostics import AttributeNames, HkdfGuardTelemetry, SpanNames
 
 _BASE64_ALPHABET = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+_PAD = ord("=")
 
 
 def _base64_into(data: bytearray) -> bytearray:
     """Standard padded base64 of ``data``, built directly into a ``bytearray`` - the library codecs
-    return an immutable ``bytes`` that could never be zeroed."""
+    return an immutable ``bytes`` that could never be zeroed. Only byte-sized values are ever
+    computed: CPython caches those, whereas a wider integer would be a freed, unzeroed heap copy."""
     output = bytearray((len(data) + 2) // 3 * 4)
     position = 0
     for i in range(0, len(data), 3):
-        chunk = data[i:i + 3]
-        padded = chunk + bytes(3 - len(chunk))
-        value = int.from_bytes(padded, "big")
-        ArrayUtility.zero_memory(chunk)
-        ArrayUtility.zero_memory(padded)
-        for shift in (18, 12, 6, 0):
-            output[position] = _BASE64_ALPHABET[(value >> shift) & 0x3F]
-            position += 1
-        if len(chunk) < 3:
-            output[position - (3 - len(chunk)):position] = b"=" * (3 - len(chunk))
+        count = min(3, len(data) - i)
+        b0 = data[i]
+        b1 = data[i + 1] if count > 1 else 0
+        b2 = data[i + 2] if count > 2 else 0
+        output[position] = _BASE64_ALPHABET[b0 >> 2]
+        output[position + 1] = _BASE64_ALPHABET[((b0 & 0x03) << 4) | (b1 >> 4)]
+        output[position + 2] = _BASE64_ALPHABET[((b1 & 0x0F) << 2) | (b2 >> 6)] if count > 1 else _PAD
+        output[position + 3] = _BASE64_ALPHABET[b2 & 0x3F] if count > 2 else _PAD
+        position += 4
     return output
 
 
