@@ -1,0 +1,74 @@
+# The workspace root: develops and tests the seven hkdfguard-* distributions in packages/ together.
+# It is not itself a published package.
+[project]
+name = "hkdfguard-workspace"
+version = "0"
+requires-python = ">=3.12"
+dependencies = [
+    "hkdfguard-diagnostics",
+    "hkdfguard-abstractions",
+    "hkdfguard-cryptoprovider-aesgcm256",
+    "hkdfguard-keywrapping-v1",
+    "hkdfguard-dataencryptionkey",
+    "hkdfguard-cache",
+    "hkdfguard-options",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1",
+    "opentelemetry-sdk>=1.45",
+    "ruff>=0.17",
+    "mypy>=2.4",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.uv.sources]
+hkdfguard-diagnostics = { workspace = true }
+hkdfguard-abstractions = { workspace = true }
+hkdfguard-cryptoprovider-aesgcm256 = { workspace = true }
+hkdfguard-keywrapping-v1 = { workspace = true }
+hkdfguard-dataencryptionkey = { workspace = true }
+hkdfguard-cache = { workspace = true }
+hkdfguard-options = { workspace = true }
+
+[tool.pytest.ini_options]
+testpaths = ["packages"]
+addopts = ["--import-mode=importlib", "-ra"]
+markers = ["native: calls the real native KMS library (skipped unless one is installed and provisioned)"]
+
+[tool.ruff]
+line-length = 160
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "SIM", "RUF", "PL", "N"]
+ignore = [
+    "PLR0913",  # constructors mirror the other ports' parameters
+    "PLR2004",  # protocol constants (status codes, sizes) read better inline
+    "S101",     # assert is fine in tests
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests deliberately use confusable characters and import platform-only modules lazily.
+"packages/*/tests/*" = ["S", "PLR", "N802", "B017", "SIM117", "RUF001", "PLC0415"]
+
+[tool.mypy]
+strict = true
+python_version = "3.12"
+mypy_path = [
+    "packages/hkdfguard-diagnostics/src",
+    "packages/hkdfguard-abstractions/src",
+    "packages/hkdfguard-cryptoprovider-aesgcm256/src",
+    "packages/hkdfguard-keywrapping-v1/src",
+    "packages/hkdfguard-dataencryptionkey/src",
+    "packages/hkdfguard-cache/src",
+    "packages/hkdfguard-options/src",
+]
+namespace_packages = true
+explicit_package_bases = true
