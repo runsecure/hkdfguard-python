@@ -3,7 +3,7 @@
     Provisions the KEK the native integration tests use on Windows.
 
 .DESCRIPTION
-    Runs the installed HkdfGuard tool's "provision" command for the test service name, which creates
+    Runs the installed HkdfGuard command-line tool's (hkdfguard.exe) "provision" command for the test service name, which creates
     a machine-wide KEK for it in the Platform Crypto Provider (TPM), or re-verifies it if it already
     exists. Safe to run repeatedly. It never wraps a DEK and never touches a key file.
 
@@ -35,7 +35,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 # The same publisher, root and Artifact Signing profile WindowsNativeLibraryLoader requires of
-# HkdfGuardV1.dll (EXPECTED_PUBLISHER, EXPECTED_ROOT_SHA256, EXPECTED_PROFILE_EKU). Only the root is
+# HkdfGuard.dll (EXPECTED_PUBLISHER, EXPECTED_ROOT_SHA256, EXPECTED_PROFILE_EKU). Only the root is
 # pinned: Artifact Signing reissues the leaf every few days and rotates its intermediates.
 $ExpectedPublisher = 'CN=Torin Blair, O=Torin Blair, L=Littleton, S=co, C=US'
 $ExpectedRootSha256 = '5367F20C7ADE0E2BCA790915056D086B720C33C1FA2A2661ACF787E3292E1270'
@@ -53,9 +53,9 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 
 # The known-folder location, not the ProgramFiles environment variable, which any process can change.
 $programFiles = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
-$tool = Join-Path $programFiles 'HkdfGuard\v1\hkdfguard-v1-initialize.exe'
+$tool = Join-Path $programFiles 'HkdfGuard\v1\hkdfguard.exe'
 if (-not (Test-Path -LiteralPath $tool -PathType Leaf)) {
-    throw "The HkdfGuard provisioning tool is not installed at '$tool'. Install the HkdfGuard native package first."
+    throw "The HkdfGuard command-line tool (hkdfguard.exe) is not installed at '$tool'. Install the HkdfGuard native package first."
 }
 
 $signature = Get-AuthenticodeSignature -LiteralPath $tool
@@ -102,7 +102,7 @@ if ($ekus -cnotcontains $CodeSigningEku -or $ekus -cnotcontains $ExpectedProfile
 Write-Host "Provisioning the KEK for service '$ServiceName'..."
 & $tool provision --service-name $ServiceName
 if ($LASTEXITCODE -ne 0) {
-    throw "hkdfguard-v1-initialize provision failed with exit code $LASTEXITCODE."
+    throw "hkdfguard provision failed with exit code $LASTEXITCODE."
 }
 
 Write-Host ''

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import ctypes
 import errno
 import functools
@@ -14,7 +15,7 @@ from pathlib import Path
 import pytest
 from cryptography import x509
 from cryptography.x509.oid import NameOID
-from hkdfguard.abstractions import ArrayUtility, CryptographicError, WritableBuffer
+from hkdfguard.abstractions import ArrayUtility, CryptographicError, InvalidKeyFileError, KeyWrapper, WrappedKeyLimits, WritableBuffer
 from hkdfguard.keywrapping.v1 import NativeHkdfKeyWrapperV1, NativeLibraryNotFoundError, native_library, resolve_library
 from hkdfguard.keywrapping.v1._interop._kms import OK, AbstractHkdfGuardKmsLibrary, CpuArchitecture, KmsResult
 from hkdfguard.keywrapping.v1._interop._linux import LinuxHkdfGuardKmsLibrary
@@ -47,9 +48,23 @@ class FakeKmsLibrary(AbstractHkdfGuardKmsLibrary):
         self.calls: list[str] = []
         self.last_service: str | None = None
         self.last_input: bytes | None = None
+        self.open_file_status = OK
+        self.open_file_payload: bytes = bytes(range(132))
+        self.last_open_file_path: str | None = None
+        self.last_open_file_capacity: int | None = None
 
     def describe_status(self, status: int) -> str | None:
-        return self.describe(status) if self.describe else None
+        return self.describe(status) if self.describe else super().describe_status(status)
+
+    def _open_file(self, path: str, destination: WritableBuffer) -> KmsResult:
+        self.calls.append("open_file")
+        self.last_open_file_path = path
+        self.last_open_file_capacity = len(memoryview(destination).cast("B"))
+        if self.throw_on_call is not None:
+            raise self.throw_on_call
+        if self.open_file_status != OK:
+            return KmsResult(self.open_file_status, 0)
+        return self._emit(destination, self.open_file_payload)
 
     def _record(self, name: str, service: str, data: Buffer | None) -> None:
         self.calls.append(name)
@@ -99,7 +114,7 @@ def provisioned_service() -> tuple[str | None, str]:
     if explicit:
         return explicit, ""
     if not IS_WINDOWS:
-        return None, "Set HKDFGUARD_TEST_SERVICE to a service provisioned with hkdfguard-v1-initialize to run native integration tests."
+        return None, "Set HKDFGUARD_TEST_SERVICE to a service provisioned with hkdfguard to run native integration tests."
     if not windows_library_installed():
         return None, f"The native KMS library is not installed at {WindowsNativeLibraryLoader.installed_path()}."
     try:
@@ -113,10 +128,10 @@ def provisioned_service() -> tuple[str | None, str]:
         return DEFAULT_WINDOWS_SERVICE, ""
     if status == 0 and exists.value:
         return DEFAULT_WINDOWS_SERVICE, ""
-    if status in (0, WindowsHkdfGuardKmsLibrary.ERR_KEK_NOT_FOUND):
+    if status in (0, AbstractHkdfGuardKmsLibrary.ERR_KEK_NOT_FOUND):
         return None, (f"The test KEK '{DEFAULT_WINDOWS_SERVICE}' is not provisioned. Run scripts/provision-windows-test-key.ps1 from an elevated PowerShell, "
                       "or set HKDFGUARD_TEST_SERVICE to a provisioned service.")
-    if status == WindowsHkdfGuardKmsLibrary.ERR_ACCESS_DENIED:
+    if status == AbstractHkdfGuardKmsLibrary.ERR_KEK_ACCESS_DENIED:
         return None, (f"The test KEK '{DEFAULT_WINDOWS_SERVICE}' exists, but this account may not use it. Add it to the HkdfGuardUsers group "
                       "(then sign out and in), or run the tests elevated.")
     return DEFAULT_WINDOWS_SERVICE, ""
@@ -144,7 +159,7 @@ def test_wrap_delegates_to_the_library() -> None:
     assert result[:4] == bytes([10, 20, 30, 40])
 
 
-@pytest.mark.parametrize("status", [-1, -2, -7])
+@pytest.mark.parametrize("status", [-7, -13, -40])  # reserved codes: no platform returns them, so there is no meaning to add
 def test_a_failing_wrap_raises_naming_the_status(status: int) -> None:
     library = FakeKmsLibrary()
     library.wrap_status = status
@@ -189,8 +204,8 @@ def test_generate_and_wrap_delegates_and_failures_raise() -> None:
     assert NativeHkdfKeyWrapperV1("service.e", library).generate_and_wrap(result) == 5
     assert result[:5] == bytes([11, 22, 33, 44, 55])
 
-    library.generate_status = -3
-    with pytest.raises(CryptographicError, match=r"generate-and-wrap failed for service 'service\.e' with status -3\."):
+    library.generate_status = -40
+    with pytest.raises(CryptographicError, match=r"generate-and-wrap failed for service 'service\.e' with status -40\."):
         NativeHkdfKeyWrapperV1("service.e", library).generate_and_wrap(bytearray(16))
 
 
@@ -227,31 +242,205 @@ def test_the_default_binding_is_this_platforms_and_is_resolved_once() -> None:
 # --- Status codes -----------------------------------------------------------------------------
 
 
-def test_status_constants_match_the_native_headers() -> None:
-    assert [getattr(WindowsHkdfGuardKmsLibrary, n) for n in (
-        "ERR_INVALID_ARG", "ERR_BUFFER_TOO_SMALL", "ERR_PROVIDER", "ERR_CRYPTO", "ERR_AUTH_FAILED", "ERR_MALFORMED", "ERR_INTERNAL",
-        "ERR_SERVICE_NAME_INVALID", "ERR_INVALID_POLICY", "ERR_GROUP_INVALID", "ERR_KEK_MISMATCH", "ERR_KEK_NOT_FOUND",
-        "ERR_ACCESS_DENIED", "ERR_KEK_ACL_INVALID")] == list(range(-1, -15, -1))
-    assert [getattr(LinuxHkdfGuardKmsLibrary, n) for n in (
-        "ERR_INVALID_ARGUMENT", "ERR_BUFFER_TOO_SMALL", "ERR_PROVIDER_UNAVAILABLE", "ERR_PROVIDER_ERROR", "ERR_CRYPTO_ERROR",
-        "ERR_INTERNAL_ERROR", "ERR_INVALID_UTF8", "ERR_MISSING_SERVICE_NAME")] == list(range(-1, -9, -1))
-    assert MacOsHkdfGuardKmsLibrary.ERR_KEYCHAIN_READ_FAILED == -18
-    assert MacOsHkdfGuardKmsLibrary.ERR_FINGERPRINT_MISMATCH == -16
+SHARED_STATUS_CODES = {
+    "ERR_INVALID_ARGUMENT": -1, "ERR_BUFFER_TOO_SMALL": -2, "ERR_PROVIDER_UNAVAILABLE": -3, "ERR_PROVIDER_ERROR": -4, "ERR_CRYPTO_ERROR": -5,
+    "ERR_INTERNAL_ERROR": -6, "ERR_INVALID_SERVICE_NAME": -8, "ERR_POLICY_INVALID": -9, "ERR_PAYLOAD_MALFORMED": -10,
+    "ERR_PAYLOAD_AUTH_FAILED": -11, "ERR_PAYLOAD_UNSUPPORTED": -12, "ERR_KEK_FINGERPRINT_MISMATCH": -16, "ERR_KEK_NOT_FOUND": -17,
+    "ERR_KEK_ACCESS_DENIED": -18, "ERR_KEK_INVALID": -19, "ERR_PROCESS_HARDENING_FAILED": -20, "ERR_FILE_NOT_FOUND": -32,
+    "ERR_FILE_ACCESS_DENIED": -33, "ERR_FILE_IO": -34, "ERR_FILE_TOO_SHORT": -35, "ERR_FILE_TOO_LONG": -36, "ERR_FILE_PLAINTEXT_KEY": -37,
+    "ERR_FILE_MALFORMED": -38, "ERR_FILE_UNTRUSTED": -39, "ERR_WIN_GROUP_INVALID": -64, "ERR_MAC_ACCESS_CONTROL_CREATION_FAILED": -96,
+    "ERR_MAC_KEY_GENERATION_FAILED": -97, "ERR_MAC_KEYCHAIN_WRITE_FAILED": -98, "ERR_MAC_KEK_VERIFICATION_FAILED": -99,
+    "ERR_MAC_KEYCHAIN_READ_FAILED": -100,
+}
+"""Every status code, exactly as every platform's hkdfguard.h defines it."""
+
+RESERVED_STATUS_CODES = [-7, -13, -14, -15, -21, -31, -40, -63, -65, -79, -80, -95, -101, -111, 1]
+
+PLATFORM_LIBRARIES: list[Callable[[], AbstractHkdfGuardKmsLibrary]] = [WindowsHkdfGuardKmsLibrary, LinuxHkdfGuardKmsLibrary, MacOsHkdfGuardKmsLibrary]
 
 
-def test_windows_describes_every_defined_status_and_nothing_else() -> None:
+def test_ok_is_zero() -> None:
+    assert OK == 0
+
+
+@pytest.mark.parametrize(("name", "value"), SHARED_STATUS_CODES.items())
+def test_the_status_codes_match_the_native_header_on_every_platform(name: str, value: int) -> None:
+    assert getattr(AbstractHkdfGuardKmsLibrary, name) == value
+    for library in PLATFORM_LIBRARIES:
+        assert getattr(library, name) == value
+
+
+@pytest.mark.parametrize("create", PLATFORM_LIBRARIES)
+def test_every_platform_describes_every_defined_status_and_nothing_else(create: Callable[[], AbstractHkdfGuardKmsLibrary]) -> None:
+    library = create()
+    for name, status in SHARED_STATUS_CODES.items():
+        assert library.describe_status(status), f"{type(library).__name__}: no description for {name} ({status})"
+    for reserved in RESERVED_STATUS_CODES:
+        assert library.describe_status(reserved) is None, f"{type(library).__name__} describes reserved status {reserved}"
+
+
+@pytest.mark.parametrize("create", PLATFORM_LIBRARIES)
+def test_every_platform_says_how_to_provision_a_missing_kek(create: Callable[[], AbstractHkdfGuardKmsLibrary]) -> None:
+    assert "provision" in (create().describe_status(AbstractHkdfGuardKmsLibrary.ERR_KEK_NOT_FOUND) or "")
+
+
+def test_the_shared_descriptions_match_the_other_ports() -> None:
+    library = FakeKmsLibrary()
+    assert library.describe_status(-17) == "no KEK is provisioned for this service; run hkdfguard provision"
+    assert library.describe_status(-18) == "the KEK exists, but this account is not authorized to use it"
+    assert "key exposure" in (library.describe_status(AbstractHkdfGuardKmsLibrary.ERR_FILE_PLAINTEXT_KEY) or "")
+    assert library.describe_status(-64) == ("an HKLM\\Software\\Policies\\HkdfGuard\\KeyUseGroups entry is unresolvable, not a group, "
+                                            "not host-local, or over-broad")
+
+
+def test_windows_adds_its_own_hints_and_names_the_current_command_line_tool() -> None:
     library = WindowsHkdfGuardKmsLibrary()
-    assert all(library.describe_status(s) for s in range(-14, 0))
-    assert library.describe_status(-15) is None and library.describe_status(1) is None
-    assert "HkdfGuardUsers" in (library.describe_status(-13) or "")
-    assert "provision" in (library.describe_status(-12) or "")
+    access_denied = library.describe_status(AbstractHkdfGuardKmsLibrary.ERR_KEK_ACCESS_DENIED) or ""
+    assert "not authorized" in access_denied and "HkdfGuardUsers" in access_denied and "KeyUseGroups" in access_denied
+    not_found = library.describe_status(AbstractHkdfGuardKmsLibrary.ERR_KEK_NOT_FOUND) or ""
+    assert "hkdfguard provision" in not_found and "v1-initialize" not in not_found
+    assert "HKLM\\Software\\Policies\\HkdfGuard" in (library.describe_status(AbstractHkdfGuardKmsLibrary.ERR_POLICY_INVALID) or "")
+    # Codes Windows has nothing to add to fall back to the shared meaning.
+    assert library.describe_status(-37) == FakeKmsLibrary().describe_status(-37)
 
 
-def test_macos_describes_every_returned_status_but_not_the_reserved_ones() -> None:
+def test_linux_adds_its_own_hints() -> None:
+    library = LinuxHkdfGuardKmsLibrary()
+    assert "/etc/hkdfguard/policy.toml" in (library.describe_status(AbstractHkdfGuardKmsLibrary.ERR_POLICY_INVALID) or "")
+    assert "different KEK" in (library.describe_status(AbstractHkdfGuardKmsLibrary.ERR_KEK_FINGERPRINT_MISMATCH) or "")
+    assert "hkdfguard provision" in (library.describe_status(AbstractHkdfGuardKmsLibrary.ERR_KEK_NOT_FOUND) or "")
+    assert library.describe_status(-1) == FakeKmsLibrary().describe_status(-1)
+
+
+def test_macos_adds_its_own_hints() -> None:
     library = MacOsHkdfGuardKmsLibrary()
-    assert all(library.describe_status(s) for s in (-1, -2, *range(-18, -4)))
-    assert library.describe_status(-3) is None and library.describe_status(-4) is None and library.describe_status(-19) is None
-    assert LinuxHkdfGuardKmsLibrary().describe_status(-1) is None
+    assert "keychain" in (library.describe_status(AbstractHkdfGuardKmsLibrary.ERR_KEK_ACCESS_DENIED) or "")
+    assert "Secure Enclave" in (library.describe_status(AbstractHkdfGuardKmsLibrary.ERR_PROVIDER_UNAVAILABLE) or "")
+    assert library.describe_status(-1) == FakeKmsLibrary().describe_status(-1)
+
+
+# --- open_file: the interop returns the file's bytes, or raises --------------------------------
+
+
+def test_open_file_returns_exactly_the_bytes_the_native_library_read() -> None:
+    library = FakeKmsLibrary()
+
+    data = library.open_file("C:\\keys\\dek.bin")
+
+    assert type(data) is bytes and data == bytes(range(132))
+    assert library.last_open_file_path == "C:\\keys\\dek.bin"
+
+
+def test_open_file_passes_a_buffer_large_enough_for_every_platforms_wrapped_dek() -> None:
+    library = FakeKmsLibrary()
+    library.open_file_payload = os.urandom(WrappedKeyLimits.MAX_BYTES)
+
+    assert library.open_file(Path("dek.bin")) == library.open_file_payload
+    assert library.last_open_file_capacity == WrappedKeyLimits.MAX_BYTES >= 276
+    assert library.last_open_file_path == "dek.bin"
+
+
+@pytest.mark.parametrize(("status", "expected"), [
+    (AbstractHkdfGuardKmsLibrary.ERR_FILE_NOT_FOUND, FileNotFoundError),
+    (AbstractHkdfGuardKmsLibrary.ERR_FILE_ACCESS_DENIED, PermissionError),
+    (AbstractHkdfGuardKmsLibrary.ERR_FILE_UNTRUSTED, PermissionError),
+    (AbstractHkdfGuardKmsLibrary.ERR_FILE_TOO_SHORT, InvalidKeyFileError),
+    (AbstractHkdfGuardKmsLibrary.ERR_FILE_TOO_LONG, InvalidKeyFileError),
+    (AbstractHkdfGuardKmsLibrary.ERR_FILE_PLAINTEXT_KEY, InvalidKeyFileError),
+    (AbstractHkdfGuardKmsLibrary.ERR_FILE_MALFORMED, InvalidKeyFileError),
+    (AbstractHkdfGuardKmsLibrary.ERR_FILE_IO, OSError),
+    (AbstractHkdfGuardKmsLibrary.ERR_INVALID_ARGUMENT, ValueError),
+    (AbstractHkdfGuardKmsLibrary.ERR_INTERNAL_ERROR, OSError),
+])
+def test_open_file_turns_each_refusal_into_the_matching_exception(status: int, expected: type[Exception]) -> None:
+    library = FakeKmsLibrary()
+    library.open_file_status = status
+
+    with pytest.raises(expected) as error:
+        library.open_file("C:\\keys\\dek.bin")
+
+    assert type(error.value) is expected
+    assert str(error.value) == (f"Key file 'C:\\keys\\dek.bin' was refused by the native library with status {status} "
+                                f"({library.describe_status(status)}).")
+
+
+def test_every_invalid_data_refusal_is_still_an_os_error() -> None:
+    assert issubclass(InvalidKeyFileError, OSError)
+
+
+def test_open_file_says_when_a_status_is_unknown() -> None:
+    library = FakeKmsLibrary()
+    library.open_file_status = -63
+
+    with pytest.raises(OSError) as error:
+        library.open_file("dek.bin")
+
+    assert type(error.value) is OSError
+    assert str(error.value) == "Key file 'dek.bin' was refused by the native library with status -63 (unknown status)."
+
+
+@pytest.mark.parametrize(("path", "expected"), [(None, TypeError), ("", ValueError), ("dek\0.bin", ValueError),
+                                                ("dek\ud800.bin", ValueError), (b"dek.bin", TypeError)])
+def test_open_file_refuses_a_missing_or_unusable_path_before_reaching_the_native_library(path: object, expected: type[Exception]) -> None:
+    library = FakeKmsLibrary()
+
+    with pytest.raises(expected):
+        library.open_file(path)  # type: ignore[arg-type]
+
+    assert library.calls == []
+
+
+def test_a_failure_names_the_status_and_its_shared_meaning() -> None:
+    library = FakeKmsLibrary()
+    library.unwrap_status = AbstractHkdfGuardKmsLibrary.ERR_KEK_NOT_FOUND
+
+    with pytest.raises(CryptographicError) as error:
+        NativeHkdfKeyWrapperV1("service.d", library).unwrap(b"\x01", bytearray(32))
+
+    assert str(error.value) == ("Native KMS unwrap failed for service 'service.d' with status -17 "
+                                "(no KEK is provisioned for this service; run hkdfguard provision).")
+
+
+# --- NativeHkdfKeyWrapperV1.read_key_file ------------------------------------------------------
+
+
+def test_read_key_file_reads_through_the_native_library_not_python_file_io() -> None:
+    library = FakeKmsLibrary()
+    wrapper = NativeHkdfKeyWrapperV1("service.h", library)
+
+    # The path doesn't exist: only the native library is asked about it.
+    read = wrapper.read_key_file("C:\\no\\such\\dek.bin")
+
+    assert type(read) is bytearray and read == bytes(range(132))
+    assert library.calls == ["open_file"]
+    assert library.last_open_file_path == "C:\\no\\such\\dek.bin"
+
+
+def test_read_key_file_through_the_abstract_type_reaches_the_native_library_whatever_the_permission_setting() -> None:
+    library = FakeKmsLibrary()
+    wrapper: KeyWrapper = NativeHkdfKeyWrapperV1("service.h", library)
+
+    wrapper.read_key_file("dek.bin", verify_permissions=False)
+
+    assert library.calls == ["open_file"]
+
+
+def test_read_key_file_surfaces_a_refusal() -> None:
+    library = FakeKmsLibrary()
+    library.open_file_status = AbstractHkdfGuardKmsLibrary.ERR_FILE_PLAINTEXT_KEY
+
+    with pytest.raises(InvalidKeyFileError, match="key exposure") as error:
+        NativeHkdfKeyWrapperV1("service.h", library).read_key_file("dek.bin")
+
+    assert "'dek.bin'" in str(error.value) and "status -37" in str(error.value)
+
+
+def test_read_key_file_surfaces_a_library_that_fails_to_load() -> None:
+    library = FakeKmsLibrary()
+    library.throw_on_call = PermissionError("not signed by the HkdfGuard publisher")
+
+    with pytest.raises(PermissionError, match="not signed"):
+        NativeHkdfKeyWrapperV1("service.h", library).read_key_file("dek.bin")
 
 
 # --- Windows loader: location ---------------------------------------------------------------
@@ -269,13 +458,14 @@ TRUSTED_INSTALLER = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478
 
 @windows_only
 def test_installed_path_is_under_program_files() -> None:
-    expected = Path(os.environ["PROGRAMFILES"], "HkdfGuard", "v1", "HkdfGuardV1.dll")
+    expected = Path(os.environ["PROGRAMFILES"], "HkdfGuard", "v1", "HkdfGuard.dll")
+    assert WindowsNativeLibraryLoader.FILE_NAME == "HkdfGuard.dll"
     assert Path(WindowsNativeLibraryLoader.installed_path()) == expected
 
 
 @windows_only
 def test_load_from_a_missing_file_names_the_only_supported_path() -> None:
-    missing = str(Path(tempfile.gettempdir(), f"hkdfguard-missing-{uuid.uuid4().hex}", "HkdfGuardV1.dll"))
+    missing = str(Path(tempfile.gettempdir(), f"hkdfguard-missing-{uuid.uuid4().hex}", "HkdfGuard.dll"))
     with pytest.raises(NativeLibraryNotFoundError, match=r"never loaded from anywhere else") as error:
         WindowsNativeLibraryLoader.load_from(missing, WindowsNativeLibraryLoader.EXPECTED_PUBLISHER)
     assert missing in str(error.value)
@@ -479,8 +669,8 @@ def test_the_installed_library_passes_every_check() -> None:
 
 
 @installed_windows_library
-def test_the_installed_provisioning_tool_passes_the_signer_checks_but_is_not_a_dll() -> None:
-    tool = str(Path(WindowsNativeLibraryLoader.installed_path()).with_name("hkdfguard-v1-initialize.exe"))
+def test_the_installed_command_line_tool_passes_the_signer_checks_but_is_not_a_dll() -> None:
+    tool = str(Path(WindowsNativeLibraryLoader.installed_path()).with_name("hkdfguard.exe"))
     assert os.path.isfile(tool)
 
     WindowsNativeLibraryLoader.verify_signature(tool, WindowsNativeLibraryLoader.EXPECTED_PUBLISHER)
@@ -506,6 +696,7 @@ def test_a_valid_signature_from_another_publisher_or_a_tampered_copy_is_refused(
 def test_the_windows_binding_calls_into_the_installed_library() -> None:
     # No KEK is provisioned for this name, so the library answers with an error - proving it ran.
     assert WindowsHkdfGuardKmsLibrary().wrap_dek(UNPROVISIONED_SERVICE, bytes(32), bytearray(512)).status < 0
+    assert WindowsHkdfGuardKmsLibrary()._open_file("no-such-dek.bin", bytearray(512)).status == AbstractHkdfGuardKmsLibrary.ERR_FILE_NOT_FOUND
 
 
 # --- macOS loader policy, on simulated filesystems (runs everywhere) --------------------------
@@ -757,3 +948,178 @@ def test_the_binding_reports_buffer_and_payload_errors(service: str) -> None:
     recovered = bytearray(32)
     assert library.unwrap_dek(service, corrupted, recovered).status < 0
     assert recovered == bytearray(32)
+
+
+# --- Key files read through the real native library (hkdfguard_open_file) -----------------------
+#
+# Refusals of a file's size, contents or location need no KEK, so they run wherever the Windows
+# library is installed; reading back a real wrapped key needs a provisioned service.
+
+
+def long_path(path: Path) -> Path:
+    """``path`` with every 8.3 short name expanded. hkdfguard_open_file refuses a short name anywhere
+    in a path, and Windows can hand out %TEMP% - and so pytest's tmp_path - in short form (for example
+    C:\\Users\\RUNNER~1\\... on GitHub-hosted runners)."""
+    if sys.platform == "win32":
+        buffer = ctypes.create_unicode_buffer(32_767)
+        length = ctypes.WinDLL("kernel32", use_last_error=True).GetLongPathNameW(str(path), buffer, len(buffer))
+        if 0 < length < len(buffer):
+            return Path(buffer.value)
+    return path
+
+
+@pytest.fixture
+def key_dir(tmp_path: Path) -> Path:
+    return long_path(tmp_path)
+
+
+def reader() -> NativeHkdfKeyWrapperV1:
+    # Any valid name: reading a file never touches a KEK.
+    return NativeHkdfKeyWrapperV1("hkdfguard.keyfile.reader")
+
+
+def write(directory: Path, name: str, contents: bytes) -> Path:
+    path = directory / name
+    path.write_bytes(contents)
+    return path
+
+
+def wrap_to_file(service: str, directory: Path) -> tuple[Path, bytes, bytes]:
+    dek = os.urandom(32)
+    buffer = bytearray(WrappedKeyLimits.MAX_BYTES)
+    length = NativeHkdfKeyWrapperV1(service).wrap(dek, buffer)
+    wrapped = bytes(buffer[:length])
+    return write(directory, "wrapped-dek.bin", wrapped), wrapped, dek
+
+
+def test_the_long_path_helper_expands_short_names(tmp_path: Path) -> None:
+    directory = long_path(tmp_path) / "a folder with a long name"
+    directory.mkdir()
+    short = directory
+    if sys.platform == "win32":
+        buffer = ctypes.create_unicode_buffer(32_767)
+        if 0 < ctypes.WinDLL("kernel32").GetShortPathNameW(str(directory), buffer, len(buffer)) < len(buffer):
+            short = Path(buffer.value)  # the same as directory where the volume has no 8.3 names
+
+    assert long_path(short) == directory
+
+
+@installed_windows_library
+def test_native_a_missing_key_file_is_not_found(key_dir: Path) -> None:
+    path = key_dir / "missing.bin"
+
+    with pytest.raises(FileNotFoundError) as error:
+        reader().read_key_file(path)
+
+    assert f"'{path}'" in str(error.value) and "status -32" in str(error.value)
+
+
+@installed_windows_library
+def test_native_a_key_file_in_a_missing_folder_is_not_found(key_dir: Path) -> None:
+    with pytest.raises(FileNotFoundError, match="status -32"):
+        reader().read_key_file(key_dir / "no-such-folder" / "dek.bin")
+
+
+PLAINTEXT_FORMS: dict[str, Callable[[bytes], bytes]] = {
+    "raw": lambda dek: dek,
+    "hex": lambda dek: dek.hex().upper().encode("ascii"),
+    "lower-hex": lambda dek: dek.hex().encode("ascii"),
+    "base64": base64.b64encode,
+    "base64-with-newline": lambda dek: base64.b64encode(dek) + b"\n",
+}
+
+
+@installed_windows_library
+@pytest.mark.parametrize("form", PLAINTEXT_FORMS)
+def test_native_a_key_file_holding_what_looks_like_an_unwrapped_key_is_refused_as_a_key_exposure(key_dir: Path, form: str) -> None:
+    path = write(key_dir, f"plaintext-{form}.bin", PLAINTEXT_FORMS[form](os.urandom(32)))
+
+    with pytest.raises(InvalidKeyFileError) as error:
+        reader().read_key_file(path)
+
+    assert "status -37" in str(error.value) and "key exposure" in str(error.value)
+
+
+@installed_windows_library
+@pytest.mark.parametrize(("size", "status"), [(0, -35), (100, -35), (131, -35), (133, -36), (4096, -36)])
+def test_native_a_key_file_of_the_wrong_size_is_refused(key_dir: Path, size: int, status: int) -> None:
+    contents = bytearray(size)
+    if size:
+        contents[0] = 0x7F  # never mistaken for text
+    path = write(key_dir, f"size-{size}.bin", bytes(contents))
+
+    with pytest.raises(InvalidKeyFileError) as error:
+        reader().read_key_file(path)
+
+    assert f"status {status}" in str(error.value) and f"'{path}'" in str(error.value)
+
+
+@installed_windows_library
+def test_native_a_folder_is_not_a_key_file(key_dir: Path) -> None:
+    with pytest.raises(OSError, match="was refused by the native library"):
+        reader().read_key_file(key_dir)
+
+
+@installed_windows_library
+def test_native_a_key_file_reached_through_a_junction_is_untrusted(key_dir: Path) -> None:
+    target = key_dir / "real"
+    target.mkdir()
+    (target / "dek.bin").write_bytes(bytes(132))
+    junction = key_dir / "junction"
+
+    # mklink /J needs no elevation, unlike a symbolic link.
+    subprocess.run(["cmd.exe", "/c", "mklink", "/J", str(junction), str(target)], check=True, capture_output=True)
+    try:
+        with pytest.raises(PermissionError) as error:
+            reader().read_key_file(junction / "dek.bin")
+
+        assert "status -39" in str(error.value)
+    finally:
+        os.rmdir(junction)  # removes the junction itself, not what it points at
+
+
+@installed_windows_library
+def test_native_a_key_ring_refuses_to_build_from_a_plaintext_key_file(key_dir: Path) -> None:
+    from hkdfguard.cryptoprovider.aesgcm256 import AesGcmCryptoProviderFactory
+    from hkdfguard.dataencryptionkey import KeyRingBuilder
+
+    path = write(key_dir, "plaintext.bin", os.urandom(32))
+
+    with pytest.raises(InvalidKeyFileError, match="status -37"):
+        (KeyRingBuilder().with_key_wrapper(reader()).with_crypto_provider_factory(AesGcmCryptoProviderFactory())
+         .with_key_refresh_interval(60).with_key_file(1, path).build())
+
+
+def test_native_a_key_file_the_wrapper_wrote_reads_back_still_wrapped_and_unwraps_to_its_dek(service: str, key_dir: Path) -> None:
+    path, wrapped, dek = wrap_to_file(service, key_dir)
+    wrapper = NativeHkdfKeyWrapperV1(service)
+
+    read = wrapper.read_key_file(path)
+
+    assert read == wrapped
+    recovered = bytearray(32)
+    assert wrapper.unwrap(read, recovered) == 32
+    assert recovered == dek
+
+
+def test_native_a_key_ring_built_from_a_key_file_reads_it_through_the_native_library(service: str, key_dir: Path) -> None:
+    from hkdfguard.cryptoprovider.aesgcm256 import AesGcmCryptoProviderFactory
+    from hkdfguard.dataencryptionkey import KeyRingBuilder
+
+    path, _, _ = wrap_to_file(service, key_dir)
+
+    with (KeyRingBuilder().with_key_wrapper(NativeHkdfKeyWrapperV1(service)).with_crypto_provider_factory(AesGcmCryptoProviderFactory())
+          .with_key_refresh_interval(60).with_key_file(4, path).build()) as ring:
+        assert ring.current_version == 4
+        protector = ring.create_protector("native-key-file")
+        assert protector.decrypt_to_str(protector.encrypt("value")) == "value"
+
+
+def test_native_a_key_file_of_the_right_size_with_an_unknown_version_is_malformed(service: str, key_dir: Path) -> None:
+    path, wrapped, _ = wrap_to_file(service, key_dir)
+    tampered = bytearray(wrapped)
+    tampered[0] ^= 0xFF  # the version byte
+    path.write_bytes(tampered)
+
+    with pytest.raises(InvalidKeyFileError, match="status -38"):
+        reader().read_key_file(path)

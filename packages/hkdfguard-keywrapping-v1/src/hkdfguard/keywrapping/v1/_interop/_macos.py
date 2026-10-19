@@ -332,46 +332,18 @@ class MacOsHkdfGuardKmsLibrary(NativeKmsLibrary):
     loaded only after the checks in :class:`MacOsNativeLibraryLoader`. No call creates a KEK: run
     ``hkdfguard-v1-initialize provision --service-name <name>`` first."""
 
-    ERR_INVALID_INPUT_LENGTH: Final = -1
-    ERR_OUTPUT_BUFFER_TOO_SMALL: Final = -2
-    ERR_KEY_UNAVAILABLE: Final = -3  # reserved; no longer returned
-    ERR_PUBLIC_KEY_UNAVAILABLE: Final = -4  # reserved; never returned
-    ERR_ENCRYPTION_FAILED: Final = -5
-    ERR_DECRYPTION_FAILED: Final = -6
-    ERR_UNEXPECTED_OUTPUT_LENGTH: Final = -7
-    ERR_INVALID_SERVICE_IDENTIFIER: Final = -8
-    ERR_ENCLAVE_UNAVAILABLE: Final = -9
-    ERR_KEK_NOT_FOUND: Final = -10
-    ERR_KEK_CORRUPTED: Final = -11
-    ERR_ACCESS_CONTROL_CREATION_FAILED: Final = -12
-    ERR_KEY_GENERATION_FAILED: Final = -13
-    ERR_KEYCHAIN_WRITE_FAILED: Final = -14
-    ERR_KEK_VERIFICATION_FAILED: Final = -15
-    ERR_FINGERPRINT_MISMATCH: Final = -16
-    ERR_KEYCHAIN_ACCESS_DENIED: Final = -17
-    ERR_KEYCHAIN_READ_FAILED: Final = -18
-
-    _DESCRIPTIONS: Final = {
-        -1: "invalid input length, or a null buffer",
-        -2: "the output buffer is too small for the result",
-        -5: "encryption failed",
-        -6: "AES-GCM authentication failed: the payload was altered, or wrapped for another service under this KEK",
-        -7: "the native library produced an unexpected output length",
-        -8: "the service name is null, empty, too long, or has a character other than an ASCII letter, digit or '.'",
-        -9: "this Mac has no Secure Enclave",
-        -10: "no KEK is provisioned for this service in this keychain mode; run hkdfguard-v1-initialize provision",
-        -11: "the keychain item for this service can't be reconstructed into a key",
-        -12: "the access policy for a new KEK could not be created",
-        -13: "the Secure Enclave refused to generate a key",
-        -14: "the new KEK could not be stored in the keychain",
-        -15: "the new KEK could not be reloaded after it was stored",
-        -16: "the payload was wrapped under a different KEK than this service's",
-        -17: "the keychain denied access: it is locked, there is no session to prompt in, or this process isn't allowed",
-        -18: "the keychain could not be read",
+    _PLATFORM_DESCRIPTIONS: Final[dict[int, str]] = {
+        NativeKmsLibrary.ERR_PROVIDER_UNAVAILABLE: "this Mac has no Secure Enclave",
+        NativeKmsLibrary.ERR_PAYLOAD_AUTH_FAILED:
+            "AES-GCM authentication failed: the payload was altered, or wrapped for another service under this KEK",
+        NativeKmsLibrary.ERR_KEK_NOT_FOUND: "no KEK is provisioned for this service in this keychain mode; run hkdfguard-v1-initialize provision",
+        NativeKmsLibrary.ERR_KEK_ACCESS_DENIED:
+            "the keychain denied access: it is locked, there is no session to prompt in, or this process isn't allowed",
+        NativeKmsLibrary.ERR_KEK_INVALID: "the keychain item for this service can't be reconstructed into a key",
     }
 
     def describe_status(self, status: int) -> str | None:
-        return self._DESCRIPTIONS.get(status)  # -3 and -4 are reserved and never returned
+        return self._PLATFORM_DESCRIPTIONS.get(status) or super().describe_status(status)
 
     def _bind(self) -> KmsFunctions:
         return KmsFunctions(MacOsNativeLibraryLoader.load())

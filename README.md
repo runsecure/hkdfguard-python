@@ -110,6 +110,14 @@ silently fall back to a default.
   - `FormatException` -> `EncryptedFormatError` (a `ValueError`).
   - A refused native library is a `PermissionError`, and a missing one is a
     `NativeLibraryNotFoundError` (an `OSError`).
+  - Reading a key file (`KeyWrapper.read_key_file`, .NET's `ReadKeyFileAsync`):
+    `FileNotFoundException` -> `FileNotFoundError`, `UnauthorizedAccessException` ->
+    `PermissionError`, `InvalidDataException` -> `InvalidKeyFileError` (an `OSError`, so code that
+    catches `OSError` for every way a key file can fail still catches it), `IOException` ->
+    `OSError`. The native library's refusals map by status: -32 `FileNotFoundError`; -33 and -39
+    `PermissionError`; -35, -36, -37 and -38 `InvalidKeyFileError`; -1 `ValueError`; -34 and any
+    other status `OSError`. An empty path is a `ValueError` (and `None` a `TypeError`) before
+    anything is read.
   - `CryptographicException` and `AuthenticationTagMismatchException` become `CryptographicError`
     and `AuthenticationTagMismatchError`.
 - **Memory hygiene:** CPython has no pinned or stack allocation, so zeroing erases the live copy of
@@ -127,6 +135,46 @@ silently fall back to a default.
 separately and loaded only from its verified location, exactly as in .NET and Java: path ACLs,
 Authenticode signer, root and EKU, and PE checks on Windows; ownership, code signature and dyld
 checks on macOS.
+
+| Platform | Library                                                                 | Command-line tool                              |
+|----------|-------------------------------------------------------------------------|------------------------------------------------|
+| Windows  | `%ProgramFiles%\HkdfGuard\v1\HkdfGuard.dll`                             | `%ProgramFiles%\HkdfGuard\v1\hkdfguard.exe`    |
+| Linux    | `libHkdfGuardKeyProtectionLinux.so`, by the dynamic linker's search     | `/usr/bin/hkdfguard`                           |
+| macOS    | `/Library/Application Support/HkdfGuard/v1/libhkdfguard_v1.dylib`, or `~/.hkdfguard/v1/libhkdfguard_v1.dylib` | `hkdfguard-v1-initialize` |
+
+**Status codes** are shared, number for number, by the Windows, Linux and macOS libraries (the
+`HKDFGUARD_ERR_*` table in each platform's `hkdfguard.h`), so they are defined once, on
+`AbstractHkdfGuardKmsLibrary`, with one shared description each; a platform adds only what to do
+about a code there (the `HkdfGuardUsers` group and HKLM policy on Windows,
+`/etc/hkdfguard/policy.toml` on Linux, the keychain and Secure Enclave on macOS). A failed call
+names the status and its meaning, e.g. `status -17 (no KEK is provisioned for this service; run
+hkdfguard provision)`.
+
+| Codes      | Meaning                                                                                       |
+|------------|-----------------------------------------------------------------------------------------------|
+| 0          | OK                                                                                            |
+| -1 .. -6   | invalid argument, buffer too small, provider unavailable, provider error, crypto error, internal error |
+| -8, -9     | invalid service name, invalid machine policy                                                  |
+| -10 .. -12 | wrapped payload malformed, failed authentication, unsupported version                         |
+| -16 .. -20 | KEK fingerprint mismatch, KEK not found, KEK access denied, KEK invalid, process hardening failed |
+| -32 .. -39 | key file not found, access denied, I/O, too short, too long, plaintext key, malformed, untrusted |
+| -64        | Windows: an invalid `KeyUseGroups` policy entry                                               |
+| -96 .. -100 | macOS: access control creation, key generation, keychain write, KEK verification, keychain read failed |
+
+Every other code (-7, -13 .. -15, -21 .. -31, -40 .. -63, ...) is reserved.
+
+**Key files are read through the key wrapper.** `KeyRingBuilder.build` reads every key file with
+`KeyWrapper.read_key_file`. `NativeHkdfKeyWrapperV1` reads it through the native library's
+`hkdfguard_open_file`, which returns the file's bytes still wrapped - it never unwraps or touches a
+KEK - after checks only the platform can make. It refuses a missing (-32) or unreadable (-33) file,
+anything but a regular file (-34), a file of the wrong size (-35, -36), one holding what looks like
+an unwrapped DEK - 32 raw bytes, or 64 hex digits or base64, with optional whitespace (-37, treat it
+as a key exposure) - a right-size file that isn't a valid wrapped payload (-38), and an untrusted
+path (-39): a symbolic link, junction or other reparse point, an 8.3 short name, a UNC, mapped or
+SUBST path, or a file or folder another account could write or replace. These checks can't be
+turned off; `without_key_file_permission_checks()` only affects a key wrapper that keeps the default
+`read_key_file`, `WrappedKeyFile.read` (ordinary file I/O, refusing empty files and files over
+`WrappedKeyLimits.MAX_BYTES`, plus the POSIX ownership rule).
 
 ## Building
 
@@ -166,7 +214,10 @@ The native tests make real calls into this platform's KMS library: the integrati
 `test_keywrapping.py` and the end-to-end tests in `test_dataencryptionkey.py`. Every platform's
 library refuses to create a KEK while wrapping or unwrapping, so these tests run only
 against a service provisioned beforehand. Without one they are reported as skipped, never as
-passed. Once a service is chosen, a missing or failing library is a test failure.
+passed. Once a service is chosen, a missing or failing library is a test failure. The tests of the
+native library's key-file refusals need no KEK, so on Windows they run wherever the library is
+installed; they make their files under the long form of the temporary folder, since
+`hkdfguard_open_file` refuses an 8.3 short name and `%TEMP%` can be one (`C:\Users\RUNNER~1\...`).
 
 **Windows.** Install the HkdfGuard native package, then provision the test KEK
 `com.hkdfguard.native.windows.test` once, from an elevated PowerShell at the repository root:
@@ -175,7 +226,7 @@ passed. Once a service is chosen, a missing or failing library is a test failure
 ./scripts/provision-windows-test-key.ps1
 ```
 
-The script runs the installed `hkdfguard-v1-initialize provision`, after checking it is the signed
+The script runs the installed `hkdfguard.exe provision`, after checking it is the signed
 tool from its fixed install location (the same publisher, pinned root and Artifact Signing profile
 the library's own loader requires). It is safe to re-run: an existing KEK is re-verified, not
 replaced. Afterwards the tests find the KEK on their own:
@@ -193,7 +244,7 @@ to a second provisioned service to test cross-service isolation against a differ
 that test uses a service that is never provisioned):
 
 ```bash
-hkdfguard-v1-initialize provision --service-name hkdfguard.integrationtest   # elevated on Windows
+hkdfguard provision --service-name hkdfguard.integrationtest   # elevated on Windows; hkdfguard-v1-initialize on macOS
 HKDFGUARD_TEST_SERVICE=hkdfguard.integrationtest uv run pytest
 ```
 
