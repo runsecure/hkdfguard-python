@@ -28,7 +28,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^(?!\.)(?!.*\.\.)[A-Za-z0-9.]{1,128}$')]
-    [string] $ServiceName = 'com.hkdfguard.native.windows.test'
+    [string] $ServiceName = 'com.hkdfguard.integration.test.221'
 )
 
 $ErrorActionPreference = 'Stop'

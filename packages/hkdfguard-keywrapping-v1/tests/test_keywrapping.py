@@ -100,7 +100,7 @@ class FakeKmsLibrary(AbstractHkdfGuardKmsLibrary):
         return KmsResult(self.generate_status, 0) if self.generate_status != OK else self._emit(destination, self.generate_payload or bytes(64))
 
 
-DEFAULT_WINDOWS_SERVICE = "com.hkdfguard.native.windows.test"
+DEFAULT_WINDOWS_SERVICE = "com.hkdfguard.integration.test.221"
 UNPROVISIONED_SERVICE = "hkdfguard.integrationtest.unprovisioned"
 
 

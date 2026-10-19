@@ -829,7 +829,7 @@ def native_service() -> str:
         pytest.skip("Set HKDFGUARD_TEST_SERVICE to a provisioned service to run native end-to-end tests.")
     from hkdfguard.keywrapping.v1 import NativeHkdfKeyWrapperV1, NativeLibraryNotFoundError
 
-    candidate = "com.hkdfguard.native.windows.test"
+    candidate = "com.hkdfguard.integration.test.221"
     try:
         NativeHkdfKeyWrapperV1(candidate).generate_and_wrap(bytearray(WrappedKeyLimits.MAX_BYTES))
     except NativeLibraryNotFoundError as error:

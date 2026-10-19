@@ -2,8 +2,8 @@
 KEK provider - on a TPM host, provisioned by hkdfguard-dotnet's scripts/provision-linux-test-key.sh::
 
     sudo scripts/provision-linux-test-key.sh
-    HKDFGUARD_TEST_SERVICE=com.hkdfguard.native.linux.test \\
-    HKDFGUARD_TEST_SERVICE_OTHER=com.hkdfguard.native.linux.test.other \\
+    HKDFGUARD_TEST_SERVICE=com.hkdfguard.integration.test.221 \\
+    HKDFGUARD_TEST_SERVICE_OTHER=com.hkdfguard.integration.test.221.other \\
     uv run pytest packages/hkdfguard-keywrapping-v1/tests/test_linux_native.py
 
 The integration tests in test_keywrapping.py cover what every platform shares; these pin down the exact
@@ -35,7 +35,7 @@ IS_LINUX = sys.platform.startswith("linux")
 SERVICE_VARIABLE = "HKDFGUARD_TEST_SERVICE"
 OTHER_SERVICE_VARIABLE = "HKDFGUARD_TEST_SERVICE_OTHER"
 UNPROVISIONED_SERVICE = "hkdfguard.integrationtest.unprovisioned"
-DEFAULT_LINUX_SERVICE = "com.hkdfguard.native.linux.test"
+DEFAULT_LINUX_SERVICE = "com.hkdfguard.integration.test.221"
 POLICY_PATH = "/etc/hkdfguard/policy.toml"
 CLI = "/usr/bin/hkdfguard"
 

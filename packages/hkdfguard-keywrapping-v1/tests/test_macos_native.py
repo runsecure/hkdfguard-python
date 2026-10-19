@@ -26,7 +26,7 @@ pytestmark = pytest.mark.skipif(not IS_MACOS, reason="macOS only.")
 Loader = MacOsNativeLibraryLoader
 
 PROVISIONING_TOOL = "hkdfguard-v1-initialize"
-DEFAULT_MACOS_SERVICE = "com.hkdfguard.native.macos.test"
+DEFAULT_MACOS_SERVICE = "com.hkdfguard.integration.test.221"
 UNPROVISIONED_SERVICE = "hkdfguard.integrationtest.unprovisioned"
 SERVICE_VARIABLE = "HKDFGUARD_TEST_SERVICE"
 

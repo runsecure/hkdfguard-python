@@ -312,12 +312,12 @@ On a Linux TPM host, provision the test services with hkdfguard-dotnet's
 `scripts/provision-linux-test-key.sh` (sudo), then run with the variables it prints:
 
 ```bash
-HKDFGUARD_TEST_SERVICE=com.hkdfguard.native.linux.test \
-HKDFGUARD_TEST_SERVICE_OTHER=com.hkdfguard.native.linux.test.other uv run pytest
+HKDFGUARD_TEST_SERVICE=com.hkdfguard.integration.test.221 \
+HKDFGUARD_TEST_SERVICE_OTHER=com.hkdfguard.integration.test.221.other uv run pytest
 ```
 
 **Windows.** Install the HkdfGuard native package, then provision the test KEK
-`com.hkdfguard.native.windows.test` once, from an elevated PowerShell at the repository root:
+`com.hkdfguard.integration.test.221` once, from an elevated PowerShell at the repository root:
 
 ```powershell
 ./scripts/provision-windows-test-key.ps1
