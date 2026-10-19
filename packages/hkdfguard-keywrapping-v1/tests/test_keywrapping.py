@@ -111,6 +111,17 @@ def windows_library_installed() -> bool:
 installed_windows_library = pytest.mark.skipif(not windows_library_installed(), reason="The Windows native KMS library is not installed.")
 
 
+def kek_exists(service: str) -> tuple[int, bool]:
+    """hkdfguard_kek_exists(const char* service, int32_t* out_exists) on the library the verified
+    Windows loader loaded: the library's status, and whether the KEK exists when it is 0."""
+    function = WindowsNativeLibraryLoader.load().hkdfguard_kek_exists
+    function.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_int32)]
+    function.restype = ctypes.c_int
+    exists = ctypes.c_int32()
+    status = int(function(service.encode("utf-8"), ctypes.byref(exists)))
+    return status, status == OK and exists.value != 0
+
+
 @functools.cache
 def provisioned_service() -> tuple[str | None, str]:
     """The service native integration tests run against: HKDFGUARD_TEST_SERVICE if set; otherwise on
@@ -123,15 +134,10 @@ def provisioned_service() -> tuple[str | None, str]:
     if not windows_library_installed():
         return None, f"The native KMS library is not installed at {WindowsNativeLibraryLoader.installed_path()}."
     try:
-        library = WindowsNativeLibraryLoader.load()
-        kek_exists = library.hkdfguard_kek_exists
-        kek_exists.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_int32)]
-        kek_exists.restype = ctypes.c_int
-        exists = ctypes.c_int32()
-        status = kek_exists(DEFAULT_WINDOWS_SERVICE.encode(), ctypes.byref(exists))
+        status, exists = kek_exists(DEFAULT_WINDOWS_SERVICE)
     except Exception:
         return DEFAULT_WINDOWS_SERVICE, ""
-    if status == 0 and exists.value:
+    if status == 0 and exists:
         return DEFAULT_WINDOWS_SERVICE, ""
     if status in (0, AbstractHkdfGuardKmsLibrary.ERR_KEK_NOT_FOUND):
         return None, (f"The test KEK '{DEFAULT_WINDOWS_SERVICE}' is not provisioned. Run scripts/provision-windows-test-key.ps1 from an elevated PowerShell, "
@@ -237,6 +243,9 @@ def test_an_invalid_service_name_is_refused_before_any_native_call(name: str) ->
 
 def test_the_default_binding_is_this_platforms_and_is_resolved_once() -> None:
     assert native_library() is native_library()
+    expected = {"win32": WindowsHkdfGuardKmsLibrary, "linux": LinuxHkdfGuardKmsLibrary, "darwin": MacOsHkdfGuardKmsLibrary}.get(sys.platform)
+    if expected is not None:
+        assert type(native_library()) is expected
     assert isinstance(resolve_library("win32"), WindowsHkdfGuardKmsLibrary)
     assert isinstance(resolve_library("linux"), LinuxHkdfGuardKmsLibrary)
     assert isinstance(resolve_library("darwin"), MacOsHkdfGuardKmsLibrary)
@@ -704,6 +713,36 @@ def test_the_windows_binding_calls_into_the_installed_library() -> None:
     assert WindowsHkdfGuardKmsLibrary()._open_file("no-such-dek.bin", bytearray(512)).status == AbstractHkdfGuardKmsLibrary.ERR_FILE_NOT_FOUND
 
 
+@installed_windows_library
+def test_the_module_windows_mapped_is_the_installed_library() -> None:
+    # Worked out independently of the loader: %ProgramFiles%\HkdfGuard\v1\HkdfGuard.dll.
+    expected = os.path.join(os.environ["PROGRAMFILES"], "HkdfGuard", "v1", "HkdfGuard.dll")
+    library = WindowsNativeLibraryLoader.load()
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined,unused-ignore]
+    kernel32.GetModuleFileNameW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint32]
+    kernel32.GetModuleFileNameW.restype = ctypes.c_uint32
+    buffer = ctypes.create_unicode_buffer(32_767)
+    length = kernel32.GetModuleFileNameW(library._handle, buffer, len(buffer))
+
+    assert 0 < length < len(buffer)
+    assert buffer.value.lower() == expected.lower()
+    assert WindowsNativeLibraryLoader.load()._handle == library._handle
+
+
+@installed_windows_library
+def test_the_installed_library_is_validly_signed_by_the_expected_publisher() -> None:
+    WindowsNativeLibraryLoader.verify_signature(WindowsNativeLibraryLoader.installed_path(), WindowsNativeLibraryLoader.EXPECTED_PUBLISHER)
+
+
+@installed_windows_library
+def test_kek_exists_answers_for_an_unprovisioned_service() -> None:
+    status, exists = kek_exists(UNPROVISIONED_SERVICE)
+
+    assert not exists
+    assert status == OK or WindowsHkdfGuardKmsLibrary().describe_status(status) is not None, f"undescribed status {status}"
+
+
 # --- macOS loader policy, on simulated filesystems (runs everywhere) --------------------------
 
 ROOT, USER, OTHER_USER, WHEEL, ADMIN, STAFF = 0, 501, 502, 0, 80, 20
@@ -953,6 +992,81 @@ def test_the_binding_reports_buffer_and_payload_errors(service: str) -> None:
     recovered = bytearray(32)
     assert library.unwrap_dek(service, corrupted, recovered).status < 0
     assert recovered == bytearray(32)
+
+
+def test_multiple_keys_under_one_service_wrap_and_unwrap_independently(service: str) -> None:
+    wrapper = NativeHkdfKeyWrapperV1(service)
+    deks = [os.urandom(32), os.urandom(32)]
+    payloads: list[bytes] = []
+    for dek in deks:
+        wrapped = bytearray(WrappedKeyLimits.MAX_BYTES)
+        payloads.append(bytes(wrapped[: wrapper.wrap(dek, wrapped)]))
+    assert payloads[0] != payloads[1]
+
+    for dek, payload in zip(deks, payloads, strict=True):
+        recovered = bytearray(32)
+        assert wrapper.unwrap(payload, recovered) == 32
+        assert recovered == dek
+
+
+def test_the_library_directly_wraps_unwraps_and_generates_with_ok_statuses(service: str) -> None:
+    library = native_library()
+    dek = os.urandom(32)
+
+    wrapped = bytearray(WrappedKeyLimits.MAX_BYTES)
+    status, written = library.wrap_dek(service, dek, wrapped)
+    assert status == OK and written > 0
+    recovered = bytearray(32)
+    assert library.unwrap_dek(service, wrapped[:written], recovered) == (OK, 32)
+    assert recovered == dek
+
+    generated = bytearray(WrappedKeyLimits.MAX_BYTES)
+    status, written = library.generate_and_wrap_dek(service, generated)
+    assert status == OK and written > 0
+    fresh = bytearray(32)
+    assert library.unwrap_dek(service, generated[:written], fresh) == (OK, 32)
+    assert not ArrayUtility.is_null_or_empty(fresh) and any(fresh)
+
+
+def test_the_library_directly_refuses_too_small_buffers_and_corrupt_payloads(service: str) -> None:
+    # The binding's own answers, without the wrapper's checks and zeroing in between.
+    library = native_library()
+
+    status, required = library.wrap_dek(service, os.urandom(32), bytearray(1))
+    assert status < 0 and 32 < required <= WrappedKeyLimits.MAX_BYTES  # an error, and a capacity that suffices
+    exact = bytearray(required)
+    status, written = library.wrap_dek(service, os.urandom(32), exact)
+    assert status == OK and 0 < written <= required
+    assert library.generate_and_wrap_dek(service, bytearray(1)).status < 0
+
+    payload = bytearray(exact[:written])
+    assert library.unwrap_dek(service, payload, bytearray(1)).status < 0
+
+    payload[0] ^= 0xFF
+    payload[len(payload) // 2] ^= 0xFF
+    recovered = bytearray(32)
+    assert library.unwrap_dek(service, payload, recovered).status < 0
+    assert recovered == bytearray(32), "the native library wrote into the destination of a failed unwrap"
+
+
+def test_too_small_buffers_and_corrupt_payloads_fail_through_the_wrapper(service: str) -> None:
+    wrapper = NativeHkdfKeyWrapperV1(service)
+    with pytest.raises(CryptographicError):
+        wrapper.wrap(bytes(32), bytearray(8))
+    with pytest.raises(CryptographicError):
+        wrapper.generate_and_wrap(bytearray(8))
+
+    wrapped = bytearray(WrappedKeyLimits.MAX_BYTES)
+    length = wrapper.generate_and_wrap(wrapped)
+    with pytest.raises(CryptographicError):
+        wrapper.unwrap(wrapped[:length], bytearray(8))
+
+    wrapped[0] ^= 0xFF
+    wrapped[length // 2] ^= 0xFF
+    destination = bytearray(32)
+    with pytest.raises(CryptographicError):
+        wrapper.unwrap(wrapped[:length], destination)
+    assert destination == bytearray(32)
 
 
 # --- Key files read through the real native library (hkdfguard_open_file) -----------------------

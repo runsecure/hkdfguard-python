@@ -894,10 +894,20 @@ def test_a_deployment_decrypts_through_its_natively_wrapped_key_file(native_serv
         read(ring, configuration, "Api:Key")
 
 
+def test_a_restart_reading_the_same_key_file_reveals_the_same_key(native_service: str, key_dir: Path) -> None:
+    key_file, configuration = run_pipeline(native_service, key_dir, {"Secret": "survives a restart"})
+
+    with native_builder(native_service).with_key_file(3, key_file).build() as first:
+        assert read(first, configuration, "Secret") == "survives a restart"
+    with native_builder(native_service).with_key_file(3, key_file).build() as second:
+        assert read(second, configuration, "Secret") == "survives a restart"
+
+
 def test_a_key_file_for_another_service_or_tampered_refuses_to_build(native_service: str, key_dir: Path) -> None:
     key_file, _ = run_pipeline(native_service, key_dir, {"Secret": "value"})
+    other = os.environ.get("HKDFGUARD_TEST_SERVICE_OTHER") or "hkdfguard.integrationtest.unprovisioned"
     with pytest.raises(CryptographicError):
-        native_builder("hkdfguard.integrationtest.unprovisioned").with_key_file(3, key_file).build()
+        native_builder(other).with_key_file(3, key_file).build()
 
     data = bytearray(key_file.read_bytes())
     data[len(data) // 2] ^= 0x01
@@ -905,6 +915,20 @@ def test_a_key_file_for_another_service_or_tampered_refuses_to_build(native_serv
     # Refused when the key file is read (a structural byte) or when it is unwrapped (anything else).
     with pytest.raises((CryptographicError, InvalidKeyFileError)):
         native_builder(native_service).with_key_file(3, key_file).build()
+
+
+def test_runtime_keys_generated_through_the_native_kek_protect_values_and_the_cache(native_service: str) -> None:
+    from hkdfguard.cache import ProtectedCache
+
+    with native_builder(native_service).with_ephemeral_key(100).build() as ring:
+        protector = ring.create_protector("session")
+        formatted = protector.encrypt("runtime value")
+        assert formatted.startswith("enc::v100::")
+        assert protector.decrypt_to_str(formatted) == "runtime value"
+
+        cache = ProtectedCache(ring)
+        cache.add("token", "cached secret")
+        assert cache.decrypt_to_str("token") == "cached secret"
 
 
 def test_deployed_and_runtime_keys_together_and_refresh_against_the_real_kek(native_service: str, key_dir: Path) -> None:

@@ -7,6 +7,7 @@ import ctypes
 import os
 import sys
 from collections.abc import Buffer, Callable
+from typing import Any
 
 import pytest
 from hkdfguard.abstractions import WritableBuffer
@@ -194,6 +195,52 @@ def _open_own_process(access: int) -> tuple[int | None, int]:
     return handle, error
 
 
+THREAD_GET_CONTEXT = 0x0008
+CREATE_SUSPENDED = 0x4
+INFINITE = 0xFFFFFFFF
+
+
+def _kernel32() -> Any:
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined,unused-ignore]
+    kernel32.OpenThread.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+    kernel32.OpenThread.restype = ctypes.c_void_p
+    kernel32.CreateThread.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32,
+                                      ctypes.POINTER(ctypes.c_uint32)]
+    kernel32.CreateThread.restype = ctypes.c_void_p
+    kernel32.ResumeThread.argtypes = [ctypes.c_void_p]
+    kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.GetCurrentThreadId.restype = ctypes.c_uint32
+    return kernel32
+
+
+def _open_thread_context(thread_id: int) -> tuple[int | None, int]:
+    """OpenThread(THREAD_GET_CONTEXT) on a thread of this process: the handle (closed again) or
+    ``None``, and the last error."""
+    kernel32 = _kernel32()
+    handle = kernel32.OpenThread(THREAD_GET_CONTEXT, 0, thread_id)
+    error = ctypes.get_last_error()  # type: ignore[attr-defined,unused-ignore]
+    if handle:
+        kernel32.CloseHandle(handle)
+    return handle, error
+
+
+def _with_new_thread(check: Callable[[int], None]) -> None:
+    """Starts a fresh OS thread - created suspended, running Sleep(0) only once resumed to exit - and
+    calls ``check`` with its id: a thread certainly created after whatever ran before."""
+    kernel32 = _kernel32()
+    thread_id = ctypes.c_uint32()
+    sleep = ctypes.cast(kernel32.Sleep, ctypes.c_void_p)
+    handle = kernel32.CreateThread(None, 0, sleep, None, CREATE_SUSPENDED, ctypes.byref(thread_id))
+    assert handle, f"CreateThread failed with error {ctypes.get_last_error()}"  # type: ignore[attr-defined,unused-ignore]
+    try:
+        check(thread_id.value)
+    finally:
+        kernel32.ResumeThread(handle)
+        kernel32.WaitForSingleObject(handle, INFINITE)
+        kernel32.CloseHandle(handle)
+
+
 @process_hardening("Linux")
 def test_apply_on_linux_disables_core_dumps_and_clears_the_dumpable_flag() -> None:
     pr_get_dumpable, rlimit_core = 3, 4
@@ -226,6 +273,18 @@ def test_apply_on_windows_closes_the_process_to_its_own_account() -> None:
     queryable, _ = _open_own_process(PROCESS_QUERY_LIMITED_INFORMATION)
     assert queryable is not None
 
+    # This thread existed when the hardening ran, so it is closed too.
+    existing, error = _open_thread_context(_kernel32().GetCurrentThreadId())
+    assert existing is None
+    assert error == ERROR_ACCESS_DENIED
+
+    # What the plain call leaves open: a thread started afterwards keeps the default access. Not
+    # asserted either way, as in the other ports - only that asking about one works.
+    def ask(thread_id: int) -> None:
+        _open_thread_context(thread_id)
+
+    _with_new_thread(ask)
+
     # Idempotent: hardening an already hardened process succeeds.
     NativeProcessHardening.apply()
 
@@ -238,3 +297,10 @@ def test_apply_on_windows_with_require_protected_signature_succeeds() -> None:
 
     readable, _ = _open_own_process(PROCESS_VM_READ)
     assert readable is None
+
+    def closed(thread_id: int) -> None:
+        handle, error = _open_thread_context(thread_id)
+        assert handle is None, "a thread started after the hardening is still open to this account"
+        assert error == ERROR_ACCESS_DENIED
+
+    _with_new_thread(closed)

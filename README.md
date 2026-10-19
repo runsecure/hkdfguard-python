@@ -299,6 +299,23 @@ native library's key-file refusals need no KEK, so on Windows they run wherever 
 installed; they make their files under the long form of the temporary folder, since
 `hkdfguard_open_file` refuses an 8.3 short name and `%TEMP%` can be one (`C:\Users\RUNNER~1\...`).
 
+Each platform also has its own native suite, matching the other HkdfGuard ports. Every test in them
+is skipped, with the reason, where its platform, library or service isn't there:
+
+| Suite | Runs on | Gated on |
+| --- | --- | --- |
+| Windows: the installed-library, `hkdfguard_kek_exists`, key-file and process-hardening tests in `test_keywrapping.py` and `test_process_hardening.py` | Windows | `%ProgramFiles%\HkdfGuard\v1\HkdfGuard.dll` (and `hkdfguard.exe`) installed; the KEK round trips also need the provisioned test KEK or `HKDFGUARD_TEST_SERVICE` |
+| Linux: `test_linux_loader.py` (loader against the real filesystem and dynamic linker) and `test_linux_native.py` (the library's contract against the real KEK provider) | Linux | the system tests need only Linux; the installed-library tests need the `libhkdfguard1` package; `test_linux_native.py` also needs `HKDFGUARD_TEST_SERVICE`, and some tests `HKDFGUARD_TEST_SERVICE_OTHER`, `tpm.require_pinned_names = true` in `/etc/hkdfguard/policy.toml`, or `/usr/bin/hkdfguard` |
+| macOS: `test_macos_native.py` (loader against the real filesystem and Security framework, and the provisioning tool) | macOS | the installed `libhkdfguard_v1.dylib` (system-wide or per user) and `hkdfguard-v1-initialize` beside it, where a test needs them |
+
+On a Linux TPM host, provision the test services with hkdfguard-dotnet's
+`scripts/provision-linux-test-key.sh` (sudo), then run with the variables it prints:
+
+```bash
+HKDFGUARD_TEST_SERVICE=com.hkdfguard.native.linux.test \
+HKDFGUARD_TEST_SERVICE_OTHER=com.hkdfguard.native.linux.test.other uv run pytest
+```
+
 **Windows.** Install the HkdfGuard native package, then provision the test KEK
 `com.hkdfguard.native.windows.test` once, from an elevated PowerShell at the repository root:
 

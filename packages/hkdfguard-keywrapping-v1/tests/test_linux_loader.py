@@ -25,7 +25,7 @@ from hkdfguard.keywrapping.v1._interop import _linux
 from hkdfguard.keywrapping.v1._interop._elf import ElfDependencies
 from hkdfguard.keywrapping.v1._interop._kms import OK, CpuArchitecture
 from hkdfguard.keywrapping.v1._interop._linux import LinuxHkdfGuardKmsLibrary, LinuxNativeLibraryLoader
-from hkdfguard.keywrapping.v1._interop._unix import UnixFileStatus, UnixFileType
+from hkdfguard.keywrapping.v1._interop._unix import UnixFileStatus, UnixFileType, probe
 
 Loader = LinuxNativeLibraryLoader
 
@@ -704,6 +704,50 @@ def test_the_root_directory_and_this_processs_libc_are_trusted() -> None:
 
 
 @linux_only
+def test_the_root_and_system_library_directories_are_trusted() -> None:
+    for directory in ("/", "/usr/lib"):
+        assert resolve(directory, UnixFileType.DIRECTORY) == directory
+
+
+@linux_only
+def test_probe_distinguishes_missing_from_present() -> None:
+    assert probe("/") == 0
+    assert probe("/definitely/not/here") == errno.ENOENT
+
+
+@linux_only
+def test_status_and_read_link_describe_this_users_files() -> None:
+    directory = tempfile.mkdtemp(prefix="hkdfguard-status-")
+    file = os.path.join(directory, "file")
+    link = os.path.join(directory, "link")
+    try:
+        with open(file, "wb") as stream:
+            stream.write(b"x")
+        os.chmod(file, 0o640)
+        os.symlink("file", link)
+        uid = os.geteuid()  # type: ignore[attr-defined,unused-ignore]
+
+        status = _linux.get_status_or_none(file)
+        assert status is not None
+        assert (status.type, status.owner_id, status.mode & 0o777) == (UnixFileType.REGULAR_FILE, uid, 0o640)
+        status = _linux.get_status_or_none(link)
+        assert status is not None
+        assert (status.type, status.owner_id) == (UnixFileType.SYMBOLIC_LINK, uid)
+        assert _linux.read_link(link) == "file"
+        assert _linux.get_status_or_none(os.path.join(directory, "missing")) is None
+
+        # Owned by this user, so the loader refuses it - however it is reached. (As root, the owner
+        # is trusted, but the temporary directory above it is world-writable.)
+        with pytest.raises(PermissionError):
+            resolve(file)
+    finally:
+        for path in (link, file):
+            if os.path.lexists(path):
+                os.remove(path)
+        os.rmdir(directory)
+
+
+@linux_only
 def test_a_name_nothing_is_loaded_under_has_no_loaded_path() -> None:
     assert _linux.loaded_path("libhkdfguard-never-loaded.so.0") is None
 
@@ -794,6 +838,27 @@ def test_the_installed_library_loads_through_the_verified_loader_and_answers_the
     # And the dynamic linker places the export in the verified file.
     export = getattr(library, Loader.PROBE_EXPORT)
     assert resolve(_linux.image_path(ctypes.cast(export, ctypes.c_void_p).value) or "") == installed_linux_library()
+
+
+@installed_linux_library_only
+def test_the_installed_library_loads_through_the_verified_loader_and_its_dependencies_are_trusted() -> None:
+    # What the dynamic linker mapped is the verified file, and every dependency it pulled in came
+    # from a trusted file - checked again from outside the loader, against the loaded process.
+    path = installed_linux_library()
+    assert path is not None
+    library = Loader.load()
+
+    expected = resolve(path)
+    assert expected is not None
+    export = getattr(library, Loader.PROBE_EXPORT)
+    assert resolve(_linux.image_path(ctypes.cast(export, ctypes.c_void_p).value) or "") == expected
+
+    def trusted(dependency: str) -> str:
+        resolved = resolve(dependency)
+        assert resolved is not None
+        return resolved
+
+    Loader.verify_dependencies(expected, ElfDependencies.read_needed, _linux.loaded_path, trusted)
 
 
 @installed_linux_library_only
