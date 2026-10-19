@@ -4,6 +4,7 @@ provider on Linux - called through ctypes."""
 
 from __future__ import annotations
 
+import enum
 import logging
 import os
 import sys
@@ -13,7 +14,7 @@ from collections.abc import Buffer, Callable
 from hkdfguard.abstractions import ArrayUtility, CryptographicError, KeyWrapper, ServiceNames, WritableBuffer
 from hkdfguard.keywrapping.v1._interop._kms import OK, AbstractHkdfGuardKmsLibrary, KmsResult, NativeLibraryNotFoundError
 
-__all__ = ["NativeHkdfKeyWrapperV1", "NativeLibraryNotFoundError"]
+__all__ = ["NativeHkdfKeyWrapperV1", "NativeLibraryNotFoundError", "NativeProcessHardening", "ProcessHardeningOptions"]
 
 _library_lock = threading.Lock()
 _library: AbstractHkdfGuardKmsLibrary | None = None
@@ -111,3 +112,82 @@ class NativeHkdfKeyWrapperV1(KeyWrapper):
         description = self._library.describe_status(status)
         meaning = f" ({description})" if description else ""
         raise CryptographicError(f"Native KMS {operation} failed for service '{self._service_name}' with status {status}{meaning}.")
+
+
+class ProcessHardeningOptions(enum.IntFlag):
+    """How strict :meth:`NativeProcessHardening.apply` is."""
+
+    NONE = 0
+    """Harden as far as this process allows; on macOS a weak code signature is only logged."""
+
+    REQUIRE_PROTECTED_SIGNATURE = 1
+    """Fail unless no other process of the same user can attach a debugger to, or inject code into,
+    this process - what the native command-line tools themselves require. On Windows it also closes
+    everything the process creates afterwards (threads, child processes, named pipes and other named
+    objects) to its own user, so use it in a service that shares no objects with other processes by
+    name. On macOS it fails unless the host executable is signed with the Hardened Runtime and
+    without the get-task-allow or DYLD_* entitlements, so unsigned hosts (python itself, a virtual
+    environment's interpreter) can't use it. On Linux it adds nothing: the plain call already
+    guarantees it."""
+
+
+class NativeProcessHardening:
+    """Opt-in hardening of the whole process, through the native KMS library's
+    hkdfguard_harden_process_with_flags. DEKs pass through this process's memory, so a crash dump,
+    or another process of the same user attaching a debugger or reading its memory, could recover
+    them. The native library never does this on its own: it changes process-wide state the
+    application owns. What it does:
+
+    - **Windows:** crash reports leave out the heap (WerSetFlags NOHEAP), and the process's and its
+      existing threads' access lists are replaced so that only SYSTEM may read or write its memory,
+      inject threads or duplicate its handles - the account it runs as keeps only query, synchronize
+      and terminate. Threads started later keep the default access unless
+      :attr:`ProcessHardeningOptions.REQUIRE_PROTECTED_SIGNATURE` is passed; call it early, before
+      starting worker threads.
+    - **Linux:** the core dump limit is set to zero (hard limit included) and the process's dumpable
+      flag is cleared, which also stops ptrace and /proc/<pid>/mem access by other processes of the
+      same user.
+    - **macOS:** core dumps are disabled and debugger attachment is denied; the host executable's
+      code signature decides whether code injection is possible, which the library can check but
+      not change.
+
+    It is opt-in because it is process-wide: debuggers, py-spy and crash dumps stop working for the
+    application. Call it once, early, and after any privilege drop (on Linux the kernel resets the
+    dumpable flag when a process's credentials change). It is a same-user barrier: it does not stop
+    administrators, root, SYSTEM, a process with CAP_SYS_PTRACE or SeDebugPrivilege, or the kernel,
+    and it does not keep memory out of swap, the page file or hibernation files; those are host
+    settings.
+    """
+
+    @staticmethod
+    def apply(options: ProcessHardeningOptions | int = ProcessHardeningOptions.NONE, *,
+              library: AbstractHkdfGuardKmsLibrary | None = None) -> None:
+        """Applies the hardening with ``options``, loading the native KMS library if it isn't already.
+
+        :param options: :attr:`ProcessHardeningOptions.NONE` (the default), or
+            :attr:`ProcessHardeningOptions.REQUIRE_PROTECTED_SIGNATURE`
+        :param library: tests only - the binding to call instead of this platform's
+        :raises TypeError: ``options`` is not an int or :class:`ProcessHardeningOptions`
+        :raises ValueError: ``options`` has a flag this library doesn't define - refused before the
+            native call
+        :raises RuntimeError: the hardening failed, or the process can't meet
+            :attr:`ProcessHardeningOptions.REQUIRE_PROTECTED_SIGNATURE`; treat it as a reason not to start
+        :raises NativeLibraryNotFoundError: the native KMS library is not installed
+        :raises NotImplementedError: there is no native KMS library for this platform
+        """
+        if isinstance(options, bool) or not isinstance(options, int):
+            raise TypeError("options must be a ProcessHardeningOptions.")
+        # Checked here so an unknown flag never reaches native code, which would refuse it anyway.
+        value = int(options)
+        if value & ~int(ProcessHardeningOptions.REQUIRE_PROTECTED_SIGNATURE):
+            raise ValueError(f"Unknown process hardening option: {value}.")
+
+        flags = AbstractHkdfGuardKmsLibrary.HARDEN_REQUIRE_PROTECTED_SIGNATURE if value & ProcessHardeningOptions.REQUIRE_PROTECTED_SIGNATURE else 0
+        native = library if library is not None else native_library()
+        status = native.harden_process(flags)
+        if status == OK:
+            return
+
+        description = native.describe_status(status)
+        meaning = f" ({description})" if description else ""
+        raise RuntimeError(f"Native process hardening failed with status {status}{meaning}.")

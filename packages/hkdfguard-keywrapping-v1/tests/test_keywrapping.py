@@ -57,6 +57,10 @@ class FakeKmsLibrary(AbstractHkdfGuardKmsLibrary):
     def describe_status(self, status: int) -> str | None:
         return self.describe(status) if self.describe else super().describe_status(status)
 
+    def harden_process(self, flags: int) -> int:
+        self.calls.append("harden")
+        return OK
+
     def _open_file(self, path: str, destination: WritableBuffer) -> KmsResult:
         self.calls.append("open_file")
         self.last_open_file_path = path

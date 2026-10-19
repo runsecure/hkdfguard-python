@@ -208,6 +208,54 @@ turned off; `without_key_file_permission_checks()` only affects a key wrapper th
 `read_key_file`, `WrappedKeyFile.read` (ordinary file I/O, refusing empty files and files over
 `WrappedKeyLimits.MAX_BYTES`, plus the POSIX ownership rule).
 
+### Process hardening
+
+DEKs pass through your process's memory, so a crash dump, or another process of the same user
+attaching a debugger or reading that memory, could recover them. `NativeProcessHardening.apply()`
+calls the native library's `hkdfguard_harden_process_with_flags` to close that off, on every
+platform:
+
+| Platform | What it does |
+|---|---|
+| Windows | Crash reports leave out the heap, and the process's and its threads' access lists are replaced so only SYSTEM can read or write its memory, inject threads or duplicate its handles. Its own account keeps only query, synchronize and terminate. |
+| Linux | Core dumps off (hard limit included), and the process marked non-dumpable, which also stops ptrace and `/proc/<pid>/mem` access by the same user. |
+| macOS | Core dumps off and debugger attachment denied. Whether code can be injected depends on the host executable's code signature, which the library checks but can't change. |
+
+Neither the native library nor any machine policy does this for you: it changes process-wide
+state your application owns, so it is opt-in. Call it once, early in startup - before starting
+worker threads on Windows, and after any privilege drop on Linux:
+
+```python
+from hkdfguard.keywrapping.v1 import NativeProcessHardening
+
+NativeProcessHardening.apply()   # raises RuntimeError if it fails: don't start
+```
+
+Debuggers, `py-spy` and crash dumps stop working for the process. It is a same-user barrier: it
+does not stop administrators, root, SYSTEM, `SeDebugPrivilege`, `CAP_SYS_PTRACE` or the kernel, and
+it does not keep memory out of swap, the page file or hibernation files. An option the library
+doesn't define raises `ValueError` before the native call.
+
+`NativeProcessHardening.apply(ProcessHardeningOptions.REQUIRE_PROTECTED_SIGNATURE)` is the strict
+form the native command-line tools use: it fails unless no other process of the same user can
+debug or inject into this one.
+
+- **Windows:** it also closes threads started later, and everything else the process creates
+  afterwards without its own security descriptor (child processes, named pipes, named events), to
+  its own account. Use it in a service that shares no objects with other processes by name.
+- **macOS:** it fails unless the host executable is signed with the Hardened Runtime and without
+  the `get-task-allow` or `DYLD_*` entitlements, so unsigned hosts - a python.org, Homebrew or
+  virtual-environment `python` - can't use it. Without it, a weak signature is only logged.
+- **Linux:** it adds nothing; the plain call already guarantees it.
+
+**Python on Windows:** the plain call closes the threads that exist when it runs, and threads
+started later keep the default access, which lets other processes of the same user read and change
+their registers. CPython starts no threads of its own, so calling it first thing covers the
+process, until something starts one: `threading`, `concurrent.futures`, asyncio's default executor
+(`run_in_executor`, `asyncio.to_thread`), or a library's background thread (a metrics exporter, a
+gRPC or database driver). A long-running program almost always does, so **use
+`REQUIRE_PROTECTED_SIGNATURE` for a Windows service**: it closes later threads too.
+
 ## Building
 
 Uses a [uv](https://docs.astral.sh/uv/) workspace:
@@ -281,3 +329,11 @@ HKDFGUARD_TEST_SERVICE=hkdfguard.integrationtest uv run pytest
 ```
 
 The tests only ever use a provisioned KEK: they never create or delete one.
+
+**Process hardening.** `NativeProcessHardening.apply()` hardens the whole test process, so its tests
+in `test_process_hardening.py` (Windows and Linux) run only with `HKDFGUARD_TEST_PROCESS_HARDENING=1`,
+and only where the platform's native library is installed. Run them in their own pytest process:
+
+```bash
+HKDFGUARD_TEST_PROCESS_HARDENING=1 uv run pytest -k "apply_on_windows or apply_on_linux"
+```

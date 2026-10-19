@@ -109,6 +109,10 @@ class AbstractHkdfGuardKmsLibrary(ABC):
     ERR_MAC_KEK_VERIFICATION_FAILED: Final = -99
     ERR_MAC_KEYCHAIN_READ_FAILED: Final = -100
 
+    HARDEN_REQUIRE_PROTECTED_SIGNATURE: Final = 0x1
+    """hkdfguard_harden_process_with_flags' HKDFGUARD_HARDEN_REQUIRE_PROTECTED_SIGNATURE: fail unless
+    no other process of the same user can debug or inject into this one. Same bit on every platform."""
+
     _SHARED_DESCRIPTIONS: Final[dict[int, str]] = {
         ERR_INVALID_ARGUMENT: "invalid argument: a null pointer, wrong DEK length, negative buffer capacity, or bad path",
         ERR_BUFFER_TOO_SMALL: "the output buffer is too small for the result",
@@ -217,6 +221,18 @@ class AbstractHkdfGuardKmsLibrary(ABC):
         """The raw hkdfguard_open_file call: reads ``path`` into ``destination`` without unwrapping
         it, returning the status and, on success, the number of bytes read."""
 
+    @abstractmethod
+    def harden_process(self, flags: int) -> int:
+        """Makes this process's memory harder to recover, through hkdfguard_harden_process_with_flags -
+        on every platform: no crash dumps of its memory, and no debugger attach or memory reads by
+        other processes of the same user. What that takes differs per platform; see
+        ``NativeProcessHardening``.
+
+        :param flags: a bitwise OR of the HARDEN_* flags, or 0
+        :returns: :data:`OK` on success, or a negative error code: :attr:`ERR_PROCESS_HARDENING_FAILED`,
+            or :attr:`ERR_INVALID_ARGUMENT` for an unknown flag
+        """
+
 
 class KmsFunctions:
     """The native functions, bound through ctypes - identical on every platform::
@@ -225,6 +241,7 @@ class KmsFunctions:
         int hkdfguard_unwrap_dek(const char* service, const uint8_t* wrapped, int wrapped_len, uint8_t* out, int* out_len);
         int hkdfguard_generate_and_wrap_dek(const char* service, uint8_t* out, int* out_len);
         int hkdfguard_open_file(const char* path, uint8_t* out, int* out_len);
+        int hkdfguard_harden_process_with_flags(unsigned int flags);
 
     Input is copied into a ctypes buffer that is zeroed after the call; output is written straight
     into the caller's buffer, so this code makes no immutable copy of a revealed key.
@@ -235,14 +252,17 @@ class KmsFunctions:
         self._unwrap = self._bind(library, "hkdfguard_unwrap_dek", with_input=True)
         self._generate = self._bind(library, "hkdfguard_generate_and_wrap_dek", with_input=False)
         self._open = self._bind(library, "hkdfguard_open_file", with_input=False)
+        self._harden = self._bind(library, "hkdfguard_harden_process_with_flags", argtypes=[ctypes.c_uint])
 
     @staticmethod
-    def _bind(library: Any, name: str, *, with_input: bool) -> Callable[..., int]:
+    def _bind(library: Any, name: str, *, with_input: bool = False, argtypes: list[Any] | None = None) -> Callable[..., int]:
         try:
             function = getattr(library, name)
         except AttributeError:
             raise RuntimeError(f"The HkdfGuard native KMS library has no '{name}' export.") from None
-        if with_input:
+        if argtypes is not None:
+            function.argtypes = argtypes
+        elif with_input:
             function.argtypes = [ctypes.c_char_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]
         else:
             function.argtypes = [ctypes.c_char_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]
@@ -261,6 +281,9 @@ class KmsFunctions:
     def open_file(self, path: str, destination: WritableBuffer) -> KmsResult:
         """``path`` travels as UTF-8, exactly as a service name does."""
         return self._call(self._open, path, None, destination)
+
+    def harden_process(self, flags: int) -> int:
+        return self._harden(ctypes.c_uint(flags))
 
     @staticmethod
     def _call(function: Callable[..., int], service: str, data: Buffer | None, destination: WritableBuffer) -> KmsResult:
@@ -312,3 +335,6 @@ class NativeKmsLibrary(AbstractHkdfGuardKmsLibrary):
 
     def _open_file(self, path: str, destination: WritableBuffer) -> KmsResult:
         return self._bound().open_file(path, destination)
+
+    def harden_process(self, flags: int) -> int:
+        return self._bound().harden_process(flags)

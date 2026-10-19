@@ -313,6 +313,9 @@ class WindowsHkdfGuardKmsLibrary(NativeKmsLibrary):
             "the KEK exists, but this account is not authorized to use it (or, for a new KEK, the process is not elevated); "
             "add it to the HkdfGuardUsers group or a KeyUseGroups group",
         NativeKmsLibrary.ERR_KEK_INVALID: "the existing KEK's ACL is missing, lacks SYSTEM/Administrators, or grants an over-broad principal",
+        NativeKmsLibrary.ERR_PROCESS_HARDENING_FAILED:
+            "process hardening failed: the crash-report heap exclusion or the process and thread access lists could not be set, "
+            "or (with REQUIRE_PROTECTED_SIGNATURE) the process could not be closed to its own user",
     }
 
     def describe_status(self, status: int) -> str | None:
