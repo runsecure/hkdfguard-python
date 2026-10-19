@@ -10,38 +10,10 @@ import stat
 import threading
 from collections.abc import Callable, Collection
 from dataclasses import dataclass
-from enum import Enum
 from typing import Any, ClassVar, Final
 
 from hkdfguard.keywrapping.v1._interop._kms import CpuArchitecture, KmsFunctions, NativeKmsLibrary, NativeLibraryNotFoundError
-
-
-class UnixFileType(Enum):
-    OTHER = "special file"
-    REGULAR_FILE = "regular file"
-    DIRECTORY = "directory"
-    SYMBOLIC_LINK = "symbolic link"
-
-
-@dataclass(frozen=True)
-class UnixFileStatus:
-    """What lstat reports about one path: its owner, group, permission bits, and type."""
-
-    owner_id: int
-    group_id: int
-    mode: int
-    type: UnixFileType
-
-    @staticmethod
-    def of(path: str) -> UnixFileStatus:
-        """lstat: describes the path itself, never what a symbolic link points to.
-
-        :raises OSError: lstat failed
-        """
-        info = os.lstat(path)
-        kind = (UnixFileType.REGULAR_FILE if stat.S_ISREG(info.st_mode) else UnixFileType.DIRECTORY if stat.S_ISDIR(info.st_mode)
-                else UnixFileType.SYMBOLIC_LINK if stat.S_ISLNK(info.st_mode) else UnixFileType.OTHER)
-        return UnixFileStatus(info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode), kind)
+from hkdfguard.keywrapping.v1._interop._unix import UnixFileStatus, UnixFileType, probe
 
 
 @dataclass(frozen=True)
@@ -106,7 +78,7 @@ class MacOsNativeLibraryLoader:
                 return cls._library
 
             cls.require_supported_platform(CpuArchitecture.current(), platform.mac_ver()[0])
-            choice = cls.choose_path(_probe, os.path.expanduser("~"))
+            choice = cls.choose_path(probe, os.path.expanduser("~"))
             owners = [0] if choice.is_system else [0, os.geteuid()]  # type: ignore[attr-defined,unused-ignore]
             cls.verify_location(choice.path, UnixFileStatus.of, owners)
             cls.verify_signature(choice.path, _check_code_signature)
@@ -114,8 +86,8 @@ class MacOsNativeLibraryLoader:
 
             library = ctypes.CDLL(choice.path, mode=os.RTLD_NOW | os.RTLD_LOCAL)  # type: ignore[attr-defined,unused-ignore]
             try:
-                probe = getattr(library, cls.PROBE_EXPORT, None)
-                cls.verify_loaded_image(choice.path, _image_path(ctypes.cast(probe, ctypes.c_void_p).value) if probe else None)
+                export = getattr(library, cls.PROBE_EXPORT, None)
+                cls.verify_loaded_image(choice.path, _image_path(ctypes.cast(export, ctypes.c_void_p).value) if export else None)
             except BaseException:
                 _dlclose(library._handle)
                 raise
@@ -245,14 +217,6 @@ class MacOsNativeLibraryLoader:
 
 
 # --- macOS system calls (bound on first use) ------------------------------------------------------
-
-def _probe(path: str) -> int:
-    try:
-        os.lstat(path)
-        return 0
-    except OSError as error:
-        return error.errno or errno.EIO
-
 
 def _lib_system() -> Any:
     return ctypes.CDLL("/usr/lib/libSystem.B.dylib")

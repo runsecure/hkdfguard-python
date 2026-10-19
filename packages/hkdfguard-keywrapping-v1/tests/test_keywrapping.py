@@ -19,7 +19,8 @@ from hkdfguard.abstractions import ArrayUtility, CryptographicError, InvalidKeyF
 from hkdfguard.keywrapping.v1 import NativeHkdfKeyWrapperV1, NativeLibraryNotFoundError, native_library, resolve_library
 from hkdfguard.keywrapping.v1._interop._kms import OK, AbstractHkdfGuardKmsLibrary, CpuArchitecture, KmsResult
 from hkdfguard.keywrapping.v1._interop._linux import LinuxHkdfGuardKmsLibrary
-from hkdfguard.keywrapping.v1._interop._macos import MacOsHkdfGuardKmsLibrary, MacOsNativeLibraryLoader, UnixFileStatus, UnixFileType
+from hkdfguard.keywrapping.v1._interop._macos import MacOsHkdfGuardKmsLibrary, MacOsNativeLibraryLoader
+from hkdfguard.keywrapping.v1._interop._unix import UnixFileStatus, UnixFileType
 from hkdfguard.keywrapping.v1._interop._windows import (
     VerifiedSigner,
     WindowsHkdfGuardKmsLibrary,
