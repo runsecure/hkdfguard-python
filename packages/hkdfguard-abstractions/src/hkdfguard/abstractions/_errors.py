@@ -19,6 +19,13 @@ class EncryptedFormatError(ValueError):
     """A formatted encrypted value is malformed - raised by EncryptedFormatProvider implementations."""
 
 
+class InvalidKeyFileError(OSError):
+    """A key file was read, but does not hold a wrapped key: it is empty, too short or too long, holds
+    what looks like an unwrapped key, or is the right size but not a valid wrapped payload - .NET's
+    ``InvalidDataException`` from ``ReadKeyFileAsync``. An ``OSError``, so code that handles every way
+    a key file can fail to load still catches it."""
+
+
 class ObjectClosedError(RuntimeError):
     """The object has been closed; it can't be used any more."""
 

@@ -18,7 +18,6 @@ from hkdfguard.abstractions import (
     ServiceNames,
 )
 from hkdfguard.dataencryptionkey._format import DefaultFormatProvider
-from hkdfguard.dataencryptionkey._key_file import read_key_file
 from hkdfguard.dataencryptionkey._ring import DataEncryptionKey, KeyRing
 
 _DEFAULT_LOGGER: Final = logging.getLogger("hkdfguard.dataencryptionkey")
@@ -157,11 +156,14 @@ class KeyRingBuilder:
         return self
 
     def without_key_file_permission_checks(self) -> Self:
-        """Reads key files without checking who owns them and who can write them. By default, on a
-        POSIX system a key file, and every directory above its real path, must be owned by root or the
+        """Reads key files without checking who owns them and who can write them. Key files are read
+        through the key wrapper (:meth:`KeyWrapper.read_key_file`), and this only reaches a wrapper
+        that reads with ordinary file I/O (the default, :meth:`WrappedKeyFile.read`): there, on a POSIX
+        system, a key file and every directory above its real path must be owned by root or the
         current user and writable by no one else (a sticky directory such as /tmp excepted), since
-        whoever can replace the file chooses the DEK the process encrypts under. Turn this off only
-        where permissions are enforced some other way. Windows is not checked either way yet."""
+        whoever can replace the file chooses the DEK the process encrypts under; Windows is not checked
+        that way. Turn this off only where permissions are enforced some other way. The native key
+        wrapper reads through the native library's own checks, which can't be turned off."""
         self._verify_key_file_permissions = False
         return self
 
@@ -178,9 +180,16 @@ class KeyRingBuilder:
         """Reads every key file, creates every ephemeral key, and returns a populated ring. If anything
         fails partway, every provider created so far is closed.
 
+        Every key file is read through the key wrapper (:meth:`KeyWrapper.read_key_file`), so a native
+        KMS reads its own key files, with its own checks on who could have written them.
+
         :raises RuntimeError: no key wrapper, factory, key refresh interval, or keys were configured
-        :raises PermissionError: a key file, or a directory above it, fails the permission check
-        :raises OSError: a key file can't be read, is empty, or is larger than WrappedKeyLimits.MAX_BYTES
+        :raises FileNotFoundError: a key file, or a folder in its path, does not exist
+        :raises PermissionError: a key file may not be read, or it or a directory above it fails the
+            key wrapper's permission check
+        :raises InvalidKeyFileError: a key file is not a wrapped key - empty, larger than
+            WrappedKeyLimits.MAX_BYTES, or (read natively) the wrong size, a plaintext key, or malformed
+        :raises OSError: a key file can't be read for another reason
         """
         if self._key_wrapper is None:
             raise RuntimeError("A key wrapper is required - call with_key_wrapper first.")
@@ -195,8 +204,11 @@ class KeyRingBuilder:
         ring = KeyRing(self._format_provider)
         try:
             for version in sorted(self._key_files):
-                provider = factory.create(wrapper, read_key_file(self._key_files[version], verify_permissions=self._verify_key_file_permissions,
-                                                       logger=self._logger or _DEFAULT_LOGGER), interval, failures)
+                # Read through the key wrapper: a native KMS reads its own key files, with its own
+                # checks on who could have written them.
+                wrapped = wrapper.read_key_file(self._key_files[version], verify_permissions=self._verify_key_file_permissions,
+                                                logger=self._logger or _DEFAULT_LOGGER)
+                provider = factory.create(wrapper, wrapped, interval, failures)
                 _add_owned(ring, version, provider)
 
             for version in self._ephemeral_versions:

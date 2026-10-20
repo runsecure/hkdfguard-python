@@ -3,7 +3,7 @@
     Provisions the KEK the native integration tests use on Windows.
 
 .DESCRIPTION
-    Runs the installed HkdfGuard tool's "provision" command for the test service name, which creates
+    Runs the installed HkdfGuard command-line tool's (hkdfguard.exe) "provision" command for the test service name, which creates
     a machine-wide KEK for it in the Platform Crypto Provider (TPM), or re-verifies it if it already
     exists. Safe to run repeatedly. It never wraps a DEK and never touches a key file.
 
@@ -21,21 +21,47 @@
 .PARAMETER ServiceName
     The service whose KEK to provision. Defaults to the name the tests use.
 
+.PARAMETER Remove
+    Retires (deletes) the test KEK instead of provisioning it, and the legacy test KEK
+    com.hkdfguard.native.windows.test too if this machine still has it. Each KEK is deleted only
+    after "hkdfguard status" reports its fingerprint, which "hkdfguard retire" must match; a key
+    status reports as corrupt is retired with --corrupt. Asks before deleting each one (pass
+    -Confirm:$false to skip the prompt, or -WhatIf to see what would be deleted).
+
+.PARAMETER KeepLegacyKey
+    Leaves the legacy test KEK com.hkdfguard.native.windows.test in place. By default a provisioning
+    run retires it, after asking: every HkdfGuard port now shares com.hkdfguard.integration.test.221,
+    so the old one is no longer used.
+
 .EXAMPLE
     # From an elevated PowerShell at the repository root:
     ./scripts/provision-windows-test-key.ps1
+.EXAMPLE
+    # Remove this machine's test KEKs - the current one and, if present, the legacy one:
+    ./provision-windows-test-key.ps1 -Remove
+
+.EXAMPLE
+    # Provision without retiring the legacy test KEK:
+    ./provision-windows-test-key.ps1 -KeepLegacyKey
 #>
-[CmdletBinding()]
+[CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
 param(
     [ValidatePattern('^(?!\.)(?!.*\.\.)[A-Za-z0-9.]{1,128}$')]
-    [string] $ServiceName = 'com.hkdfguard.native.windows.test'
+    [string] $ServiceName = 'com.hkdfguard.integration.test.221',
+
+    [switch] $Remove,
+
+    [switch] $KeepLegacyKey
 )
+
+# The per-platform test KEK every port used before they shared com.hkdfguard.integration.test.221.
+$LegacyServiceName = 'com.hkdfguard.native.windows.test'
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 # The same publisher, root and Artifact Signing profile WindowsNativeLibraryLoader requires of
-# HkdfGuardV1.dll (EXPECTED_PUBLISHER, EXPECTED_ROOT_SHA256, EXPECTED_PROFILE_EKU). Only the root is
+# HkdfGuard.dll (EXPECTED_PUBLISHER, EXPECTED_ROOT_SHA256, EXPECTED_PROFILE_EKU). Only the root is
 # pinned: Artifact Signing reissues the leaf every few days and rotates its intermediates.
 $ExpectedPublisher = 'CN=Torin Blair, O=Torin Blair, L=Littleton, S=co, C=US'
 $ExpectedRootSha256 = '5367F20C7ADE0E2BCA790915056D086B720C33C1FA2A2661ACF787E3292E1270'
@@ -53,9 +79,9 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 
 # The known-folder location, not the ProgramFiles environment variable, which any process can change.
 $programFiles = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
-$tool = Join-Path $programFiles 'HkdfGuard\v1\hkdfguard-v1-initialize.exe'
+$tool = Join-Path $programFiles 'HkdfGuard\v1\hkdfguard.exe'
 if (-not (Test-Path -LiteralPath $tool -PathType Leaf)) {
-    throw "The HkdfGuard provisioning tool is not installed at '$tool'. Install the HkdfGuard native package first."
+    throw "The HkdfGuard command-line tool (hkdfguard.exe) is not installed at '$tool'. Install the HkdfGuard native package first."
 }
 
 $signature = Get-AuthenticodeSignature -LiteralPath $tool
@@ -99,12 +125,76 @@ if ($ekus -cnotcontains $CodeSigningEku -or $ekus -cnotcontains $ExpectedProfile
     throw "'$tool' is not signed for code signing under HkdfGuard's Artifact Signing profile (EKUs: $($ekus -join ', ')). Refusing to run it elevated."
 }
 
+# What "hkdfguard status" reports for a service: State is present, absent, corrupt or unusable,
+# and Fingerprint the 64 hex characters retire needs (when the KEK has one). Read-only.
+function Get-KekStatus([string] $Service) {
+    $output = @(& $tool status --service-name $Service 2>&1 | ForEach-Object { "$_" })
+    if ($LASTEXITCODE -ne 0) {
+        throw "hkdfguard status could not tell whether '$Service' has a KEK (exit code $LASTEXITCODE):`n$($output -join "`n")"
+    }
+    $state = ($output | Where-Object { $_ -match '^kek:\s*(\S+)' } | Select-Object -First 1) -replace '^kek:\s*', ''
+    $fingerprint = ($output | Where-Object { $_ -match '^fingerprint:\s*[0-9a-fA-F]{64}\s*$' } | Select-Object -First 1) -replace '^fingerprint:\s*', ''
+    if (-not $state) {
+        throw "Could not read the KEK state for '$Service' from hkdfguard status:`n$($output -join "`n")"
+    }
+    [pscustomobject]@{ State = $state.Trim(); Fingerprint = "$fingerprint".Trim(); Output = $output }
+}
+
+# Retires a service's KEK after checking which key it is, asking first (ShouldProcess). Returns
+# whether a KEK was deleted.
+function Remove-TestKek([string] $Service) {
+    $status = Get-KekStatus $Service
+    switch ($status.State) {
+        'absent' {
+            Write-Host "Service '$Service' has no KEK; nothing to remove."
+            return $false
+        }
+        'corrupt' {
+            $arguments = @('retire', '--service-name', $Service, '--corrupt')
+            $what = "the corrupt key under '$Service'"
+        }
+        default {
+            if ($status.Fingerprint -notmatch '^[0-9a-fA-F]{64}$') {
+                throw "hkdfguard status reported '$Service' as $($status.State) without a fingerprint; retire it by hand:`n$($status.Output -join "`n")"
+            }
+            $arguments = @('retire', '--service-name', $Service, '--fingerprint', $status.Fingerprint)
+            $what = "the KEK for '$Service' (fingerprint $($status.Fingerprint))"
+        }
+    }
+
+    if (-not $PSCmdlet.ShouldProcess($what, 'Retire (permanently delete)')) {
+        return $false
+    }
+    & $tool @arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "hkdfguard retire failed for '$Service' with exit code $LASTEXITCODE. If both key stores hold a key for it, run hkdfguard status and retire it by hand with --provider tpm or --provider software."
+    }
+    Write-Host "Retired $what."
+    return $true
+}
+
+if ($Remove) {
+    $null = Remove-TestKek $ServiceName
+    if ($ServiceName -ne $LegacyServiceName) {
+        $null = Remove-TestKek $LegacyServiceName
+    }
+    return
+}
+
 Write-Host "Provisioning the KEK for service '$ServiceName'..."
 & $tool provision --service-name $ServiceName
 if ($LASTEXITCODE -ne 0) {
-    throw "hkdfguard-v1-initialize provision failed with exit code $LASTEXITCODE."
+    throw "hkdfguard provision failed with exit code $LASTEXITCODE."
 }
 
 Write-Host ''
 Write-Host "Service '$ServiceName' is provisioned. The native integration tests now run on this machine:"
 Write-Host '    uv run pytest'
+
+# Every port now shares one test KEK; retire the per-platform one an earlier version of this script
+# provisioned, unless asked to keep it. Nothing is said when it isn't there.
+if (-not $KeepLegacyKey -and $ServiceName -ne $LegacyServiceName -and (Get-KekStatus $LegacyServiceName).State -ne 'absent') {
+    Write-Host ''
+    Write-Host "This machine still has the legacy test KEK '$LegacyServiceName', which no test uses any more."
+    $null = Remove-TestKek $LegacyServiceName
+}
