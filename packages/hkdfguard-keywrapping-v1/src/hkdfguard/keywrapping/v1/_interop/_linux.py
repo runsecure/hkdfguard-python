@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import ctypes
 import errno
-import hashlib
 import os
 import re
 import threading
@@ -31,22 +30,22 @@ class LinuxNativeLibraryLoader:
        file itself must be owned by root, and no directory or file may be writable by its group or
        by others. Symbolic links are followed component by component, each one checked where it
        lies, so a link can only lead somewhere root chose (/lib to usr/lib, say).
-    3. **Content.** The file's SHA-256 must be one of :attr:`KNOWN_RELEASES`. Linux has no platform
-       code signature to check, so this pin is what tells a genuine release from any other ELF file
-       root may have put at that path.
-    4. **Environment.** An absolute path is never searched for, but the library's dependencies are
+    3. **Environment.** An absolute path is never searched for, but the library's dependencies are
        found by name: through LD_LIBRARY_PATH, and after LD_PRELOAD and LD_AUDIT objects that can
        interpose on any symbol. So every directory on LD_LIBRARY_PATH and every path-named
        LD_PRELOAD or LD_AUDIT object must pass the same path checks, and none may be relative, empty
        (the working directory) or use $ORIGIN-style substitutions. Both the environment the process
        started with (/proc/self/environ, what the dynamic linker read) and the current one
        (``os.environ``) are checked.
-    5. **What was loaded.** After dlopen, dladdr must place the library's export in the verified
+    4. **What was loaded.** After dlopen, dladdr must place the library's export in the verified
        file, and every object in its dependency closure (read from each file's DT_NEEDED entries)
        must be bound to a file that passes the path checks. This catches a dependency the process
        had already loaded from somewhere else under the same name. On failure the library is
        unloaded - though, as on macOS, any initializer an impostor had has already run; the
        environment check exists so that it never gets that far in practice.
+
+    The file is not content-pinned: a release's authenticity is verified with Sigstore/cosign when
+    the package is installed, so path integrity is what this loader enforces.
 
     Any failed check raises ``PermissionError``; there is deliberately no fallback and no override.
     The policy methods take the system calls as arguments, so they are tested on every platform.
@@ -65,15 +64,6 @@ class LinuxNativeLibraryLoader:
 
     PROBE_EXPORT: Final = "hkdfguard_wrap_dek"
     """An export every genuine build has; its address tells dladdr which file was loaded."""
-
-    # Keep in sync with LinuxNativeLibraryLoader.KnownReleases in hkdfguard-dotnet (and the Java
-    # port's list): every port accepts exactly the same native releases.
-    KNOWN_RELEASES: Final[Mapping[str, str]] = {
-        "a3a9312fd2d603a62e6a5b1ed46ba5e4a51adcba321aa5a1014a762ff07ca064": "libhkdfguard1 0.1.0-1~ubuntu24.04.1 (amd64)",
-    }
-    """The SHA-256 of every native release this package accepts, with what it is. Each distribution
-    and architecture gets its own build, so each needs its own entry; a release whose hash is not
-    here is refused until this package is updated to list it."""
 
     # The dynamic-linker variables that decide where, or what, it loads.
     LIBRARY_PATH_VARIABLE: Final = "LD_LIBRARY_PATH"
@@ -109,7 +99,6 @@ class LinuxNativeLibraryLoader:
 
             candidates = cls.candidate_paths(CpuArchitecture.current())
             path = trusted(cls.choose_path(candidates, probe))
-            cls.verify_content(path, _sha256_hex, cls.KNOWN_RELEASES)
 
             environment = cls.read_environment(os.environ.get, read_initial_environment())
             cls.verify_environment(environment, lambda p, kind: cls.resolve_trusted(p, kind, get_status_or_none, read_link, allow_missing=True))
@@ -261,18 +250,6 @@ class LinuxNativeLibraryLoader:
     def _describe(kind: UnixFileType) -> str:
         # Never a symbolic link: resolve_trusted always follows them.
         return kind.value
-
-    @staticmethod
-    def verify_content(path: str, sha256_hex: Callable[[str], str], known_releases: Mapping[str, str]) -> None:
-        """Requires the file's SHA-256 to be a known release.
-
-        :raises PermissionError: it isn't
-        """
-        digest = sha256_hex(path)
-        if digest not in known_releases:
-            raise PermissionError(f"'{path}' has SHA-256 {digest}, which is not a HkdfGuard native release this version of "
-                                  "hkdfguard-keywrapping-v1 recognizes; refusing to load it. If it is a newer genuine release, update "
-                                  "hkdfguard-keywrapping-v1.")
 
     @classmethod
     def read_environment(cls, current: Callable[[str], str | None], initial_environment: bytes | None) -> dict[str, list[str]]:
@@ -433,11 +410,6 @@ def read_initial_environment() -> bytes | None:
             return environ.read()
     except OSError:
         return None
-
-
-def _sha256_hex(path: str) -> str:
-    with open(path, "rb") as file:
-        return hashlib.file_digest(file, "sha256").hexdigest()
 
 
 def _libc() -> Any:

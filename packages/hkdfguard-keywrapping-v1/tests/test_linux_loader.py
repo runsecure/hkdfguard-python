@@ -1,17 +1,15 @@
 """The Linux loader's decisions - where the library is, whether every path to it and to its
-dependencies can be trusted, whether it is a known release, and whether the dynamic linker's
-environment could substitute anything - checked against simulated filesystems, so they run on every
-platform; DT_NEEDED parsing against synthetic ELF images; and, on Linux only, the same checks against
-the real filesystem, dynamic linker and (where installed) the libhkdfguard1 package. Ported from
-hkdfguard-dotnet's LinuxNativeLibraryLoaderTests, ElfDependenciesTests and
-LinuxNativeLibraryLoaderSystemTests."""
+dependencies can be trusted, and whether the dynamic linker's environment could substitute anything
+- checked against simulated filesystems, so they run on every platform; DT_NEEDED parsing against
+synthetic ELF images; and, on Linux only, the same checks against the real filesystem, dynamic
+linker and (where installed) the libhkdfguard1 package. Ported from hkdfguard-dotnet's
+LinuxNativeLibraryLoaderTests, ElfDependenciesTests and LinuxNativeLibraryLoaderSystemTests."""
 
 from __future__ import annotations
 
 import ctypes
 import dataclasses
 import errno
-import hashlib
 import os
 import re
 import struct
@@ -285,37 +283,6 @@ def test_a_component_that_cannot_be_examined_raises_os_error() -> None:
 @pytest.mark.parametrize(("path", "parent"), [("/", "/"), ("/usr", "/"), ("/usr/lib", "/usr")])
 def test_parent_of_walks_up_to_root(path: str, parent: str) -> None:
     assert Loader.parent_of(path) == parent
-
-
-# --- Content --------------------------------------------------------------------------------------
-
-RELEASES = {"a" * 64: "test release"}
-
-
-def test_verify_content_accepts_a_known_release() -> None:
-    Loader.verify_content(LIBRARY, lambda p: "a" * 64, RELEASES)
-
-
-def test_verify_content_refuses_anything_else_naming_its_hash() -> None:
-    other = "b" * 64
-    with pytest.raises(PermissionError) as error:
-        Loader.verify_content(LIBRARY, lambda p: other, RELEASES)
-    assert other in str(error.value)
-    assert LIBRARY in str(error.value)
-
-
-def test_every_known_release_is_a_lowercase_sha256() -> None:
-    assert Loader.KNOWN_RELEASES
-    for digest, description in Loader.KNOWN_RELEASES.items():
-        assert re.fullmatch("[0-9a-f]{64}", digest)
-        assert description.strip()
-
-
-def test_the_known_releases_match_the_dotnet_port() -> None:
-    # Every port pins exactly the same releases; update hkdfguard-dotnet and hkdfguard-java together.
-    assert dict(Loader.KNOWN_RELEASES) == {
-        "a3a9312fd2d603a62e6a5b1ed46ba5e4a51adcba321aa5a1014a762ff07ca064": "libhkdfguard1 0.1.0-1~ubuntu24.04.1 (amd64)",
-    }
 
 
 # --- Environment ----------------------------------------------------------------------------------
@@ -813,14 +780,11 @@ def test_without_the_package_the_loader_and_the_binding_report_it_not_installed(
 
 
 @installed_linux_library_only
-def test_the_installed_library_is_a_known_release_in_a_trusted_location() -> None:
+def test_the_installed_library_is_in_a_trusted_location() -> None:
     path = installed_linux_library()
     assert path is not None
 
     assert resolve(path) == path
-    with open(path, "rb") as file:
-        digest = hashlib.sha256(file.read()).hexdigest()
-    Loader.verify_content(path, lambda p: digest, Loader.KNOWN_RELEASES)
 
 
 @installed_linux_library_only

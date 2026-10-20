@@ -134,8 +134,9 @@ silently fall back to a default.
 `hkdfguard-keywrapping-v1` calls the native KMS library through `ctypes`. The library is installed
 separately and loaded only from its verified location, exactly as in .NET and Java: path ACLs,
 Authenticode signer, root and EKU, and PE checks on Windows; ownership, code signature and dyld
-checks on macOS; root ownership, a pinned SHA-256, dynamic-linker environment and dependency checks
-on Linux.
+checks on macOS; root ownership, dynamic-linker environment and dependency checks on Linux, where
+the library is not content-pinned and a release's authenticity is verified with Sigstore/cosign when
+the package is installed.
 
 | Platform | Library                                                                 | Command-line tool                              |
 |----------|-------------------------------------------------------------------------|------------------------------------------------|
@@ -152,10 +153,6 @@ name. Before loading, it requires all of the following:
   and no directory or file is writable by its group or by others. Links are followed one component
   at a time and each target is checked where it lies, so `/lib -> usr/lib` passes and a link into a
   user's directory does not.
-- The file's SHA-256 is a release this version of `hkdfguard-keywrapping-v1` lists (the same list as
-  the .NET and Java ports). Linux has no platform code signature, so this pin is the content check.
-  Each distribution and architecture has its own build, and a release that isn't listed is refused
-  until the package lists it.
 - The dynamic linker's environment can't substitute anything. `dlopen` of an absolute path is
   never searched for, but the library's dependencies are found by name - and `libtss2-esys`
   receives every ECDH shared secret. So every `LD_LIBRARY_PATH` directory, and every path-named
