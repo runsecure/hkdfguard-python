@@ -1,5 +1,5 @@
 """The Linux native library's contract, through the verified loader and the binding, against the real
-KEK provider - on a TPM host, provisioned by hkdfguard-dotnet's scripts/provision-linux-test-key.sh::
+KEK provider - on a TPM host, provisioned by this repository's scripts/provision-linux-test-key.sh::
 
     sudo scripts/provision-linux-test-key.sh
     HKDFGUARD_TEST_SERVICE=com.hkdfguard.integration.test.221 \\

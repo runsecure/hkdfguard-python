@@ -308,8 +308,9 @@ is skipped, with the reason, where its platform, library or service isn't there:
 | Linux: `test_linux_loader.py` (loader against the real filesystem and dynamic linker) and `test_linux_native.py` (the library's contract against the real KEK provider) | Linux | the system tests need only Linux; the installed-library tests need the `libhkdfguard1` package; `test_linux_native.py` also needs `HKDFGUARD_TEST_SERVICE`, and some tests `HKDFGUARD_TEST_SERVICE_OTHER`, `tpm.require_pinned_names = true` in `/etc/hkdfguard/policy.toml`, or `/usr/bin/hkdfguard` |
 | macOS: `test_macos_native.py` (loader against the real filesystem and Security framework, and the provisioning tool) | macOS | the installed `libhkdfguard_v1.dylib` (system-wide or per user) and `hkdfguard-v1-initialize` beside it, where a test needs them |
 
-On a Linux TPM host, provision the test services with hkdfguard-dotnet's
-`scripts/provision-linux-test-key.sh` (sudo), then run with the variables it prints:
+On a Linux TPM host, provision the test services once with `sudo scripts/provision-linux-test-key.sh`,
+run from the account that runs the tests (`--remove` removes the policy it wrote), then run with the
+variables it prints:
 
 ```bash
 HKDFGUARD_TEST_SERVICE=com.hkdfguard.integration.test.221 \
@@ -326,7 +327,10 @@ HKDFGUARD_TEST_SERVICE_OTHER=com.hkdfguard.integration.test.221.other uv run pyt
 The script runs the installed `hkdfguard.exe provision`, after checking it is the signed
 tool from its fixed install location (the same publisher, pinned root and Artifact Signing profile
 the library's own loader requires). It is safe to re-run: an existing KEK is re-verified, not
-replaced. Afterwards the tests find the KEK on their own:
+replaced. It also retires the legacy per-platform test KEK `com.hkdfguard.native.windows.test`,
+which no test uses any more, after asking (`-KeepLegacyKey` keeps it). `-Remove` retires the test
+KEKs instead, each only after `hkdfguard status` confirms its fingerprint; `-WhatIf` shows what
+either would delete. Afterwards the tests find the KEK on their own:
 
 ```powershell
 uv run pytest
