@@ -1,4 +1,5 @@
-"""Reads a wrapped DEK from a key file, after checking that only a trusted account can have written it."""
+"""Reads a wrapped DEK from a key file with ordinary file I/O, after checking that only a trusted
+account can have written it - the default :meth:`KeyWrapper.read_key_file`."""
 
 from __future__ import annotations
 
@@ -8,8 +9,12 @@ import posixpath
 import stat
 from collections.abc import Callable, Collection
 from dataclasses import dataclass
+from typing import Final
 
-from hkdfguard.abstractions import WrappedKeyLimits
+from hkdfguard.abstractions._errors import InvalidKeyFileError
+from hkdfguard.abstractions._rules import WrappedKeyLimits
+
+_DEFAULT_LOGGER: Final = logging.getLogger("hkdfguard.abstractions")
 
 
 @dataclass(frozen=True)
@@ -34,7 +39,8 @@ class KeyFilePermissions:
        directory's) can replace it, and the file's owner is already trusted.
 
     A wrapped DEK is not secret, but whoever can replace it chooses which key the process encrypts
-    under; this keeps that to the account that runs the process, and root.
+    under; this keeps that to the account that runs the process, and root. Applied by
+    :meth:`WrappedKeyFile.read`; the native key wrapper reads through the native library's own checks.
     """
 
     @staticmethod
@@ -71,18 +77,40 @@ class KeyFilePermissions:
                                   "without_key_file_permission_checks().")
 
 
-def read_key_file(path: str, *, verify_permissions: bool, logger: logging.Logger) -> bytearray:
-    """Reads a wrapped DEK, refusing an empty file or one over WrappedKeyLimits.MAX_BYTES - never
-    reading more than one byte past the limit, so a wrong path can't make startup allocate without bound.
+class WrappedKeyFile:
+    """Reads a wrapped-DEK key file with ordinary file I/O - the default
+    :meth:`KeyWrapper.read_key_file`, for key wrappers with no native library of their own to read
+    through (a remote KMS, say, or a test double). A wrapper backed by the native KMS library reads
+    through that library instead, which also checks who could have written the file."""
 
-    With ``verify_permissions`` on a POSIX system the file is first checked against
-    :class:`KeyFilePermissions`: the file's status is read from the descriptor it is then read through,
-    so it cannot be swapped between the check and the read. Windows has no check here yet; a warning is
-    logged instead of pretending there is one.
+    @staticmethod
+    def read(path: str | os.PathLike[str], *, verify_permissions: bool = True, logger: logging.Logger | None = None) -> bytearray:
+        """Reads a wrapped DEK, refusing an empty file or one over WrappedKeyLimits.MAX_BYTES - never
+        reading more than one byte past the limit, whatever the file's size, so a wrong path (a log, a
+        device) or a file still growing can't make startup allocate without bound.
 
-    :raises PermissionError: the file or a directory above it fails the permission rule
-    :raises OSError: the file can't be read, is empty, or is larger than the limit
-    """
+        With ``verify_permissions`` on a POSIX system the file is first checked against
+        :class:`KeyFilePermissions`: the file's status is read from the descriptor it is then read
+        through, so it cannot be swapped between the check and the read. Windows has no check here; a
+        warning is logged to ``logger`` (``None``: the ``hkdfguard.abstractions`` logger) instead of
+        pretending there is one.
+
+        :returns: the file's contents, still wrapped
+        :raises TypeError: ``path`` is ``None``
+        :raises ValueError: ``path`` is empty
+        :raises PermissionError: the file or a directory above it fails the permission rule
+        :raises InvalidKeyFileError: the file is empty or larger than the limit (an ``OSError``)
+        :raises OSError: the file can't be opened or read
+        """
+        if path is None:
+            raise TypeError("path must not be None.")
+        text = os.fspath(path)
+        if not text:
+            raise ValueError("A key file path is required.")
+        return _read(text, verify_permissions=verify_permissions, logger=logger or _DEFAULT_LOGGER)
+
+
+def _read(path: str, *, verify_permissions: bool, logger: logging.Logger) -> bytearray:
     geteuid = getattr(os, "geteuid", None)
     if verify_permissions and geteuid is None:
         logger.warning("Key file '%s' was not permission-checked: ownership and write-permission checks are not implemented on this platform.",
@@ -113,7 +141,7 @@ def read_key_file(path: str, *, verify_permissions: bool, logger: logging.Logger
             total += read
 
     if total == 0:
-        raise OSError(f"Key file '{path}' is empty.")
+        raise InvalidKeyFileError(f"Key file '{path}' is empty.")
     if total > WrappedKeyLimits.MAX_BYTES:
-        raise OSError(f"Key file '{path}' is larger than {WrappedKeyLimits.MAX_BYTES} bytes (WrappedKeyLimits.MAX_BYTES); a wrapped key never is.")
+        raise InvalidKeyFileError(f"Key file '{path}' is larger than {WrappedKeyLimits.MAX_BYTES} bytes (WrappedKeyLimits.MAX_BYTES); a wrapped key never is.")
     return buffer[:total]

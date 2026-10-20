@@ -1,4 +1,4 @@
-"""The macOS native KMS binding, and the loader that verifies libhkdfguard_v1.dylib before mapping it."""
+"""The macOS native KMS binding, and the loader that verifies libhkdfguard.dylib before mapping it."""
 
 from __future__ import annotations
 
@@ -10,38 +10,10 @@ import stat
 import threading
 from collections.abc import Callable, Collection
 from dataclasses import dataclass
-from enum import Enum
 from typing import Any, ClassVar, Final
 
 from hkdfguard.keywrapping.v1._interop._kms import CpuArchitecture, KmsFunctions, NativeKmsLibrary, NativeLibraryNotFoundError
-
-
-class UnixFileType(Enum):
-    OTHER = "special file"
-    REGULAR_FILE = "regular file"
-    DIRECTORY = "directory"
-    SYMBOLIC_LINK = "symbolic link"
-
-
-@dataclass(frozen=True)
-class UnixFileStatus:
-    """What lstat reports about one path: its owner, group, permission bits, and type."""
-
-    owner_id: int
-    group_id: int
-    mode: int
-    type: UnixFileType
-
-    @staticmethod
-    def of(path: str) -> UnixFileStatus:
-        """lstat: describes the path itself, never what a symbolic link points to.
-
-        :raises OSError: lstat failed
-        """
-        info = os.lstat(path)
-        kind = (UnixFileType.REGULAR_FILE if stat.S_ISREG(info.st_mode) else UnixFileType.DIRECTORY if stat.S_ISDIR(info.st_mode)
-                else UnixFileType.SYMBOLIC_LINK if stat.S_ISLNK(info.st_mode) else UnixFileType.OTHER)
-        return UnixFileStatus(info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode), kind)
+from hkdfguard.keywrapping.v1._interop._unix import UnixFileStatus, UnixFileType, probe
 
 
 @dataclass(frozen=True)
@@ -67,12 +39,12 @@ class MacOsNativeLibraryLoader:
     Any failed check raises ``PermissionError``; there is no other fallback and no override.
     """
 
-    FILE_NAME: Final = "libhkdfguard_v1.dylib"
+    FILE_NAME: Final = "libhkdfguard.dylib"
     SYSTEM_DIRECTORY: Final = "/Library/Application Support/HkdfGuard/v1"
     USER_DIRECTORY_UNDER_HOME: Final = ".hkdfguard/v1"
     TEAM_ID: Final = "MFW3T8R8J3"
     CODE_REQUIREMENT: Final = (
-        'identifier "libhkdfguard_v1" and anchor apple generic'
+        'identifier "libhkdfguard" and anchor apple generic'
         " and certificate 1[field.1.2.840.113635.100.6.2.6] exists"  # Developer ID CA
         " and certificate leaf[field.1.2.840.113635.100.6.1.13] exists"  # Developer ID Application leaf
         f' and certificate leaf[subject.OU] = "{TEAM_ID}"')
@@ -106,7 +78,7 @@ class MacOsNativeLibraryLoader:
                 return cls._library
 
             cls.require_supported_platform(CpuArchitecture.current(), platform.mac_ver()[0])
-            choice = cls.choose_path(_probe, os.path.expanduser("~"))
+            choice = cls.choose_path(probe, os.path.expanduser("~"))
             owners = [0] if choice.is_system else [0, os.geteuid()]  # type: ignore[attr-defined,unused-ignore]
             cls.verify_location(choice.path, UnixFileStatus.of, owners)
             cls.verify_signature(choice.path, _check_code_signature)
@@ -114,8 +86,8 @@ class MacOsNativeLibraryLoader:
 
             library = ctypes.CDLL(choice.path, mode=os.RTLD_NOW | os.RTLD_LOCAL)  # type: ignore[attr-defined,unused-ignore]
             try:
-                probe = getattr(library, cls.PROBE_EXPORT, None)
-                cls.verify_loaded_image(choice.path, _image_path(ctypes.cast(probe, ctypes.c_void_p).value) if probe else None)
+                export = getattr(library, cls.PROBE_EXPORT, None)
+                cls.verify_loaded_image(choice.path, _image_path(ctypes.cast(export, ctypes.c_void_p).value) if export else None)
             except BaseException:
                 _dlclose(library._handle)
                 raise
@@ -246,14 +218,6 @@ class MacOsNativeLibraryLoader:
 
 # --- macOS system calls (bound on first use) ------------------------------------------------------
 
-def _probe(path: str) -> int:
-    try:
-        os.lstat(path)
-        return 0
-    except OSError as error:
-        return error.errno or errno.EIO
-
-
 def _lib_system() -> Any:
     return ctypes.CDLL("/usr/lib/libSystem.B.dylib")
 
@@ -328,50 +292,25 @@ def _check_code_signature(path: str, requirement_text: str) -> int:
 
 
 class MacOsHkdfGuardKmsLibrary(NativeKmsLibrary):
-    """Binds libhkdfguard_v1.dylib, which holds each service's KEK as its own Secure Enclave key,
+    """Binds libhkdfguard.dylib, which holds each service's KEK as its own Secure Enclave key,
     loaded only after the checks in :class:`MacOsNativeLibraryLoader`. No call creates a KEK: run
-    ``hkdfguard-v1-initialize provision --service-name <name>`` first."""
+    ``hkdfguard provision --service-name <name>`` first."""
 
-    ERR_INVALID_INPUT_LENGTH: Final = -1
-    ERR_OUTPUT_BUFFER_TOO_SMALL: Final = -2
-    ERR_KEY_UNAVAILABLE: Final = -3  # reserved; no longer returned
-    ERR_PUBLIC_KEY_UNAVAILABLE: Final = -4  # reserved; never returned
-    ERR_ENCRYPTION_FAILED: Final = -5
-    ERR_DECRYPTION_FAILED: Final = -6
-    ERR_UNEXPECTED_OUTPUT_LENGTH: Final = -7
-    ERR_INVALID_SERVICE_IDENTIFIER: Final = -8
-    ERR_ENCLAVE_UNAVAILABLE: Final = -9
-    ERR_KEK_NOT_FOUND: Final = -10
-    ERR_KEK_CORRUPTED: Final = -11
-    ERR_ACCESS_CONTROL_CREATION_FAILED: Final = -12
-    ERR_KEY_GENERATION_FAILED: Final = -13
-    ERR_KEYCHAIN_WRITE_FAILED: Final = -14
-    ERR_KEK_VERIFICATION_FAILED: Final = -15
-    ERR_FINGERPRINT_MISMATCH: Final = -16
-    ERR_KEYCHAIN_ACCESS_DENIED: Final = -17
-    ERR_KEYCHAIN_READ_FAILED: Final = -18
-
-    _DESCRIPTIONS: Final = {
-        -1: "invalid input length, or a null buffer",
-        -2: "the output buffer is too small for the result",
-        -5: "encryption failed",
-        -6: "AES-GCM authentication failed: the payload was altered, or wrapped for another service under this KEK",
-        -7: "the native library produced an unexpected output length",
-        -8: "the service name is null, empty, too long, or has a character other than an ASCII letter, digit or '.'",
-        -9: "this Mac has no Secure Enclave",
-        -10: "no KEK is provisioned for this service in this keychain mode; run hkdfguard-v1-initialize provision",
-        -11: "the keychain item for this service can't be reconstructed into a key",
-        -12: "the access policy for a new KEK could not be created",
-        -13: "the Secure Enclave refused to generate a key",
-        -14: "the new KEK could not be stored in the keychain",
-        -15: "the new KEK could not be reloaded after it was stored",
-        -16: "the payload was wrapped under a different KEK than this service's",
-        -17: "the keychain denied access: it is locked, there is no session to prompt in, or this process isn't allowed",
-        -18: "the keychain could not be read",
+    _PLATFORM_DESCRIPTIONS: Final[dict[int, str]] = {
+        NativeKmsLibrary.ERR_PROVIDER_UNAVAILABLE: "this Mac has no Secure Enclave",
+        NativeKmsLibrary.ERR_PAYLOAD_AUTH_FAILED:
+            "AES-GCM authentication failed: the payload was altered, or wrapped for another service under this KEK",
+        NativeKmsLibrary.ERR_KEK_NOT_FOUND: "no KEK is provisioned for this service in this keychain mode; run hkdfguard provision",
+        NativeKmsLibrary.ERR_KEK_ACCESS_DENIED:
+            "the keychain denied access: it is locked, there is no session to prompt in, or this process isn't allowed",
+        NativeKmsLibrary.ERR_KEK_INVALID: "the keychain item for this service can't be reconstructed into a key",
+        NativeKmsLibrary.ERR_PROCESS_HARDENING_FAILED:
+            "process hardening failed: core dumps or debugger attachment could not be denied, or (with REQUIRE_PROTECTED_SIGNATURE) the host "
+            "executable's code signature still allows it - it needs the Hardened Runtime, without get-task-allow or DYLD_* entitlements",
     }
 
     def describe_status(self, status: int) -> str | None:
-        return self._DESCRIPTIONS.get(status)  # -3 and -4 are reserved and never returned
+        return self._PLATFORM_DESCRIPTIONS.get(status) or super().describe_status(status)
 
     def _bind(self) -> KmsFunctions:
         return KmsFunctions(MacOsNativeLibraryLoader.load())

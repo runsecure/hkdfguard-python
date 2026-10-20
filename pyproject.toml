@@ -40,6 +40,8 @@ hkdfguard-options = { workspace = true }
 [tool.pytest.ini_options]
 testpaths = ["packages"]
 addopts = ["--import-mode=importlib", "-ra"]
+# hkdfguard_test_support.py, beside the native tests: what the native integration tests in every package share.
+pythonpath = ["packages/hkdfguard-keywrapping-v1/tests"]
 markers = ["native: calls the real native KMS library (skipped unless one is installed and provisioned)"]
 
 [tool.ruff]
@@ -69,6 +71,7 @@ mypy_path = [
     "packages/hkdfguard-dataencryptionkey/src",
     "packages/hkdfguard-cache/src",
     "packages/hkdfguard-options/src",
+    "packages/hkdfguard-keywrapping-v1/tests",  # hkdfguard_test_support.py
 ]
 namespace_packages = true
 explicit_package_bases = true

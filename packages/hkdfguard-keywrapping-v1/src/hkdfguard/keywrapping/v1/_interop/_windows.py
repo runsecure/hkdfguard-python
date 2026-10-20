@@ -1,4 +1,4 @@
-"""The Windows native KMS binding, and the loader that verifies HkdfGuardV1.dll before mapping it."""
+"""The Windows native KMS binding, and the loader that verifies HkdfGuard.dll before mapping it."""
 
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ class WindowsNativeLibraryLoader:
     generate-and-wrap, so loading an impostor would hand over every key. Five checks, all of which
     must pass before the file is mapped:
 
-    1. The file exists at ``%ProgramFiles%\\HkdfGuard\\v1\\HkdfGuardV1.dll``, with Program Files read
+    1. The file exists at ``%ProgramFiles%\\HkdfGuard\\v1\\HkdfGuard.dll``, with Program Files read
        from the known-folder registry setting, never the environment.
     2. No component of that path below the drive root is a reparse point (symlink or junction).
     3. Every one of those components is owned by, and writable only by, SYSTEM, Administrators, or
@@ -43,13 +43,13 @@ class WindowsNativeLibraryLoader:
        HkdfGuard's Artifact Signing profile (:attr:`EXPECTED_PROFILE_EKU`), whose chain - as
        WinVerifyTrust validated it - ends at the pinned root :attr:`EXPECTED_ROOT_SHA256`.
     5. Its PE header marks it a DLL for this process's architecture, refusing the profile's other
-       binaries renamed into place.
+       binaries (such as hkdfguard.exe) renamed into place.
 
     The library's own dependencies are then resolved from System32 only. Any failed check raises
     ``PermissionError``; there is no fallback and no override of the path.
     """
 
-    FILE_NAME: Final = "HkdfGuardV1.dll"
+    FILE_NAME: Final = "HkdfGuard.dll"
 
     EXPECTED_PUBLISHER: Final = "CN=Torin Blair, O=Torin Blair, L=Littleton, S=co, C=US"
     """The Authenticode signer subject, as Windows formats it. The certificate is reissued frequently,
@@ -298,46 +298,28 @@ def windows_subject_name(name: x509.Name) -> str:
 
 
 class WindowsHkdfGuardKmsLibrary(NativeKmsLibrary):
-    """Binds HkdfGuardV1.dll, loaded only from %ProgramFiles%\\HkdfGuard\\v1 after the checks in
+    """Binds HkdfGuard.dll, loaded only from %ProgramFiles%\\HkdfGuard\\v1 after the checks in
     :class:`WindowsNativeLibraryLoader`. It holds the per-service KEK as a persistent, machine-wide,
     non-exportable P-256 key in the Microsoft Platform Crypto Provider (TPM) when available, or the
     Software Key Storage Provider otherwise. No call creates a KEK: an elevated
-    ``hkdfguard-v1-initialize provision`` must create it first."""
+    ``hkdfguard provision`` must create it first. A service name is 1-128 ASCII letters, digits or '.'."""
 
-    ERR_INVALID_ARG: Final = -1
-    ERR_BUFFER_TOO_SMALL: Final = -2
-    ERR_PROVIDER: Final = -3
-    ERR_CRYPTO: Final = -4
-    ERR_AUTH_FAILED: Final = -5
-    ERR_MALFORMED: Final = -6
-    ERR_INTERNAL: Final = -7
-    ERR_SERVICE_NAME_INVALID: Final = -8
-    ERR_INVALID_POLICY: Final = -9
-    ERR_GROUP_INVALID: Final = -10
-    ERR_KEK_MISMATCH: Final = -11
-    ERR_KEK_NOT_FOUND: Final = -12
-    ERR_ACCESS_DENIED: Final = -13
-    ERR_KEK_ACL_INVALID: Final = -14
-
-    _DESCRIPTIONS: Final = {
-        -1: "invalid argument: a null pointer, wrong DEK length, or bad service",
-        -2: "the output buffer is too small for the result",
-        -3: "the KEK provider or key could not be opened or created",
-        -4: "an ECDH, HKDF or AES operation failed",
-        -5: "AES-GCM authentication failed: the wrapped payload was altered",
-        -6: "the wrapped payload is not a valid WrappedDekV1",
-        -7: "an unexpected internal failure in the native library",
-        -8: "the service name is malformed or invalid",
-        -9: "HKLM\\Software\\Policies\\HkdfGuard\\KeyStoragePolicy is invalid",
-        -10: "an HKLM\\Software\\Policies\\HkdfGuard\\KeyUseGroups entry is unresolvable, not a group, or over-broad",
-        -11: "the payload was wrapped under a different KEK than this service's",
-        -12: "no KEK is provisioned for this service; run hkdfguard-v1-initialize provision",
-        -13: "the KEK exists, but this account is not authorized to use it; add it to the HkdfGuardUsers group or a KeyUseGroups group",
-        -14: "the existing KEK's ACL is missing, lacks SYSTEM/Administrators, or grants an over-broad principal",
+    _PLATFORM_DESCRIPTIONS: Final[dict[int, str]] = {
+        NativeKmsLibrary.ERR_PROVIDER_ERROR:
+            "the KEK's key storage provider (Platform Crypto Provider or Software KSP) could not open or create the key",
+        NativeKmsLibrary.ERR_POLICY_INVALID: r"a machine policy value under HKLM\Software\Policies\HkdfGuard is invalid",
+        NativeKmsLibrary.ERR_KEK_NOT_FOUND: "no KEK is provisioned for this service; run hkdfguard provision from an elevated prompt",
+        NativeKmsLibrary.ERR_KEK_ACCESS_DENIED:
+            "the KEK exists, but this account is not authorized to use it (or, for a new KEK, the process is not elevated); "
+            "add it to the HkdfGuardUsers group or a KeyUseGroups group",
+        NativeKmsLibrary.ERR_KEK_INVALID: "the existing KEK's ACL is missing, lacks SYSTEM/Administrators, or grants an over-broad principal",
+        NativeKmsLibrary.ERR_PROCESS_HARDENING_FAILED:
+            "process hardening failed: the crash-report heap exclusion or the process and thread access lists could not be set, "
+            "or (with REQUIRE_PROTECTED_SIGNATURE) the process could not be closed to its own user",
     }
 
     def describe_status(self, status: int) -> str | None:
-        return self._DESCRIPTIONS.get(status)
+        return self._PLATFORM_DESCRIPTIONS.get(status) or super().describe_status(status)
 
     def _bind(self) -> KmsFunctions:
         return KmsFunctions(WindowsNativeLibraryLoader.load())

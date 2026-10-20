@@ -5,7 +5,6 @@ import logging
 import os
 import re
 import stat
-import sys
 import threading
 import time
 from collections.abc import Buffer, Iterator
@@ -21,19 +20,22 @@ from hkdfguard.abstractions import (
     CryptoProviderFactory,
     EncryptedFormatError,
     EncryptedFormatProvider,
+    InvalidKeyFileError,
     KeyNotFoundError,
     KeyTrackingValue,
     KeyWrapper,
     ObjectClosedError,
     ProtectedCacheBase,
     ProtectedConfigurationPurpose,
+    WrappedKeyFile,
     WrappedKeyLimits,
     WritableBuffer,
 )
+from hkdfguard.abstractions._wrapped_key_file import KeyFilePermissions, PathStatus
 from hkdfguard.cryptoprovider.aesgcm256 import AesGcmCryptoProvider, AesGcmCryptoProviderFactory, AesGcmPipelineDataProtector
 from hkdfguard.dataencryptionkey import Base64ConversionUtility, DataEncryptionKey, DefaultFormatProvider, KeyRing, KeyRingBuilder
-from hkdfguard.dataencryptionkey._key_file import PathStatus
 from hkdfguard.diagnostics import AttributeNames, HkdfGuardLog, HkdfGuardTelemetry, SpanNames
+from hkdfguard_test_support import key_directory, native_test_service
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -535,8 +537,17 @@ def test_key_files_up_to_the_limit_are_read_whole(tmp_path: Path, length: int) -
 def test_empty_or_oversized_key_files_are_refused(tmp_path: Path, length: int, message: str) -> None:
     path = tmp_path / "v1.bin"
     path.write_bytes(bytes(length))
-    with pytest.raises(OSError, match=message):
+    with pytest.raises(InvalidKeyFileError, match=message):
         builder().with_key_file(1, path).build()
+    with pytest.raises(OSError, match=message):  # still an OSError, as it always was
+        WrappedKeyFile.read(path)
+
+
+def test_the_default_read_refuses_a_missing_path_before_opening_anything() -> None:
+    with pytest.raises(TypeError):
+        WrappedKeyFile.read(None)  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        WrappedKeyFile.read("")
 
 
 # --- Ephemeral key rotation -------------------------------------------------------------------
@@ -568,8 +579,11 @@ def test_a_ring_with_an_ephemeral_key_rotates_and_old_values_still_decrypt() -> 
 
         time.sleep(FAST.total_seconds() * 4)
 
-        assert ring.current_version >= 3
-        assert protector.encrypt("now").split("::")[1] == f"v{ring.current_version}"
+        before = ring.current_version
+        assert before >= 3
+        # Rotation keeps running in the background, so the version can advance around the encrypt.
+        written = int(protector.encrypt("now").split("::")[1].removeprefix("v"))
+        assert before <= written <= ring.current_version
         assert protector.decrypt_to_str(under_v1) == "written under v1"
         assert any(r.levelno == logging.INFO for r in handler.with_event_id(HkdfGuardLog.EPHEMERAL_KEY_ROTATED))
 
@@ -811,24 +825,19 @@ def test_pipeline_values_decrypt_through_a_ring_protector_for_the_identifiers_pu
 
 @pytest.fixture(scope="module")
 def native_service() -> str:
-    explicit = os.environ.get("HKDFGUARD_TEST_SERVICE")
-    if explicit:
-        return explicit
-    if sys.platform != "win32":
-        pytest.skip("Set HKDFGUARD_TEST_SERVICE to a provisioned service to run native end-to-end tests.")
-    from hkdfguard.keywrapping.v1 import NativeHkdfKeyWrapperV1, NativeLibraryNotFoundError
+    """HKDFGUARD_TEST_SERVICE, or the shared default test service where Windows or macOS reports it
+    provisioned, after its first native call has answered in time (on macOS that call can wait on a
+    keychain dialog); skips the tests when there is none."""
+    return native_test_service()
 
-    candidate = "com.hkdfguard.native.windows.test"
-    try:
-        NativeHkdfKeyWrapperV1(candidate).generate_and_wrap(bytearray(WrappedKeyLimits.MAX_BYTES))
-    except NativeLibraryNotFoundError as error:
-        pytest.skip(str(error))
-    except CryptographicError as error:
-        if "status -12" in str(error) or "status -13" in str(error):
-            pytest.skip(f"The Windows test KEK is unavailable: {error} Run scripts/provision-windows-test-key.ps1 from an elevated PowerShell, "
-                        "or set HKDFGUARD_TEST_SERVICE to a provisioned service.")
-        raise
-    return candidate
+
+@pytest.fixture
+def key_dir(tmp_path: Path) -> Iterator[Path]:
+    """Where the release's key file is written: tmp_path in long form on Windows (the native library
+    refuses an 8.3 short name, and %TEMP% can be one), and on Linux a private 0700 directory outside
+    /tmp, which the library refuses as untrusted."""
+    with key_directory(tmp_path) as directory:
+        yield directory
 
 
 def native_builder(service: str) -> KeyRingBuilder:
@@ -857,8 +866,8 @@ def read(ring: KeyRing, configuration: dict[str, str], key: str) -> str:
     return ring.create_protector(ProtectedConfigurationPurpose.for_key(key)).decrypt_to_str(configuration[key])
 
 
-def test_a_deployment_decrypts_through_its_natively_wrapped_key_file(native_service: str, tmp_path: Path) -> None:
-    key_file, configuration = run_pipeline(native_service, tmp_path, {"ConnectionStrings:Admin": "Server=db;Password=s3cret", "Api:Key": "k-0123"})
+def test_a_deployment_decrypts_through_its_natively_wrapped_key_file(native_service: str, key_dir: Path) -> None:
+    key_file, configuration = run_pipeline(native_service, key_dir, {"ConnectionStrings:Admin": "Server=db;Password=s3cret", "Api:Key": "k-0123"})
 
     with native_builder(native_service).with_key_file(3, key_file).build() as ring:
         assert read(ring, configuration, "ConnectionStrings:Admin") == "Server=db;Password=s3cret"
@@ -869,20 +878,45 @@ def test_a_deployment_decrypts_through_its_natively_wrapped_key_file(native_serv
         read(ring, configuration, "Api:Key")
 
 
-def test_a_key_file_for_another_service_or_tampered_refuses_to_build(native_service: str, tmp_path: Path) -> None:
-    key_file, _ = run_pipeline(native_service, tmp_path, {"Secret": "value"})
+def test_a_restart_reading_the_same_key_file_reveals_the_same_key(native_service: str, key_dir: Path) -> None:
+    key_file, configuration = run_pipeline(native_service, key_dir, {"Secret": "survives a restart"})
+
+    with native_builder(native_service).with_key_file(3, key_file).build() as first:
+        assert read(first, configuration, "Secret") == "survives a restart"
+    with native_builder(native_service).with_key_file(3, key_file).build() as second:
+        assert read(second, configuration, "Secret") == "survives a restart"
+
+
+def test_a_key_file_for_another_service_or_tampered_refuses_to_build(native_service: str, key_dir: Path) -> None:
+    key_file, _ = run_pipeline(native_service, key_dir, {"Secret": "value"})
+    other = os.environ.get("HKDFGUARD_TEST_SERVICE_OTHER") or "hkdfguard.integrationtest.unprovisioned"
     with pytest.raises(CryptographicError):
-        native_builder("hkdfguard.integrationtest.unprovisioned").with_key_file(3, key_file).build()
+        native_builder(other).with_key_file(3, key_file).build()
 
     data = bytearray(key_file.read_bytes())
     data[len(data) // 2] ^= 0x01
     key_file.write_bytes(data)
-    with pytest.raises(CryptographicError):
+    # Refused when the key file is read (a structural byte) or when it is unwrapped (anything else).
+    with pytest.raises((CryptographicError, InvalidKeyFileError)):
         native_builder(native_service).with_key_file(3, key_file).build()
 
 
-def test_deployed_and_runtime_keys_together_and_refresh_against_the_real_kek(native_service: str, tmp_path: Path) -> None:
-    key_file, configuration = run_pipeline(native_service, tmp_path, {"Secret": "from the release"})
+def test_runtime_keys_generated_through_the_native_kek_protect_values_and_the_cache(native_service: str) -> None:
+    from hkdfguard.cache import ProtectedCache
+
+    with native_builder(native_service).with_ephemeral_key(100).build() as ring:
+        protector = ring.create_protector("session")
+        formatted = protector.encrypt("runtime value")
+        assert formatted.startswith("enc::v100::")
+        assert protector.decrypt_to_str(formatted) == "runtime value"
+
+        cache = ProtectedCache(ring)
+        cache.add("token", "cached secret")
+        assert cache.decrypt_to_str("token") == "cached secret"
+
+
+def test_deployed_and_runtime_keys_together_and_refresh_against_the_real_kek(native_service: str, key_dir: Path) -> None:
+    key_file, configuration = run_pipeline(native_service, key_dir, {"Secret": "from the release"})
 
     with native_builder(native_service).with_key_file(3, key_file).with_ephemeral_key(100).build() as ring:
         assert read(ring, configuration, "Secret") == "from the release"
@@ -921,8 +955,6 @@ _DIR = stat.S_IFDIR
 
 @pytest.mark.parametrize(("owner", "mode"), [(1000, _FILE | 0o600), (1000, _FILE | 0o644), (0, _FILE | 0o644), (0, _FILE | 0o400)])
 def test_a_key_file_owned_by_root_or_the_user_and_writable_by_no_one_else_passes(owner: int, mode: int) -> None:
-    from hkdfguard.dataencryptionkey._key_file import KeyFilePermissions
-
     KeyFilePermissions.verify_file("/etc/k.bin", _status(owner, mode), {0, 1000})
 
 
@@ -936,15 +968,11 @@ def test_a_key_file_owned_by_root_or_the_user_and_writable_by_no_one_else_passes
     (1000, _DIR | 0o700, "not a regular file"),
 ])
 def test_a_key_file_that_someone_else_owns_or_can_write_is_refused(owner: int, mode: int, message: str) -> None:
-    from hkdfguard.dataencryptionkey._key_file import KeyFilePermissions
-
     with pytest.raises(PermissionError, match=message):
         KeyFilePermissions.verify_file("/etc/k.bin", _status(owner, mode), {0, 1000})
 
 
 def test_every_directory_above_a_key_file_is_checked_up_to_the_root() -> None:
-    from hkdfguard.dataencryptionkey._key_file import KeyFilePermissions
-
     tree = {"/": _status(0, _DIR | 0o755), "/srv": _status(0, _DIR | 0o755), "/srv/app": _status(1000, _DIR | 0o700)}
     seen: list[str] = []
 
@@ -964,8 +992,6 @@ def test_every_directory_above_a_key_file_is_checked_up_to_the_root() -> None:
 
 
 def test_a_sticky_world_writable_directory_such_as_tmp_is_allowed_above_a_key_file() -> None:
-    from hkdfguard.dataencryptionkey._key_file import KeyFilePermissions
-
     tree = {"/": _status(0, _DIR | 0o755), "/tmp": _status(0, _DIR | stat.S_ISVTX | 0o777)}
     KeyFilePermissions.verify_directories("/tmp/k.bin", tree.__getitem__, {0, 1000})
     tree["/tmp"] = _status(0, _DIR | 0o777)
@@ -1000,15 +1026,88 @@ def test_a_symlinked_key_file_is_judged_by_what_it_points_to(tmp_path: Path) -> 
 
 @pytest.mark.skipif(hasattr(os, "geteuid"), reason="only platforms without the POSIX checks warn")
 def test_a_platform_without_the_checks_warns_rather_than_pretending(tmp_path: Path) -> None:
-    from hkdfguard.dataencryptionkey._key_file import read_key_file
-
     path = tmp_path / "k.bin"
     path.write_bytes(b"wrapped")
     logger, handler = recording_logger()
 
-    assert read_key_file(str(path), verify_permissions=True, logger=logger) == b"wrapped"
+    assert WrappedKeyFile.read(path, verify_permissions=True, logger=logger) == b"wrapped"
     assert any("not permission-checked" in r.getMessage() for r in handler.records)
 
     handler.records.clear()
-    read_key_file(str(path), verify_permissions=False, logger=logger)
+    WrappedKeyFile.read(str(path), verify_permissions=False, logger=logger)
     assert handler.records == []
+
+    # The builder hands its own logger to the key wrapper's read.
+    handler.records.clear()
+    with builder().with_logger(logger).with_key_file(1, path).build():
+        assert any("not permission-checked" in r.getMessage() for r in handler.records)
+
+
+# --- Key files are read through the key wrapper ----------------------------------------------------
+
+
+class FileReadingKeyWrapper(FixedKeyWrapper):
+    """A key wrapper with its own way of reading key files, recording every read."""
+
+    def __init__(self, payload: bytes = b"read-by-the-wrapper", error: BaseException | None = None) -> None:
+        super().__init__()
+        self.payload = payload
+        self.error = error
+        self.reads: list[tuple[str, bool]] = []
+
+    def read_key_file(self, path: str | os.PathLike[str], *, verify_permissions: bool = True,
+                      logger: logging.Logger | None = None) -> bytearray:
+        self.reads.append((os.fspath(path), verify_permissions))
+        if self.error is not None:
+            raise self.error
+        return bytearray(self.payload)
+
+
+def wrapper_builder(wrapper: KeyWrapper, factory: CryptoProviderFactory | None = None) -> KeyRingBuilder:
+    return (KeyRingBuilder().with_key_wrapper(wrapper).with_crypto_provider_factory(factory or AesGcmCryptoProviderFactory())
+            .with_key_refresh_interval(60))
+
+
+def test_build_reads_every_key_file_through_the_key_wrapper(tmp_path: Path) -> None:
+    wrapper = FileReadingKeyWrapper()
+    factory = RecordingFactory()
+
+    # Neither file exists: only the key wrapper is asked about them.
+    with wrapper_builder(wrapper, factory).with_key_file(2, tmp_path / "v2.bin").with_key_file(1, tmp_path / "v1.bin").build() as ring:
+        assert ring.current_version == 2
+
+    assert wrapper.reads == [(str(tmp_path / "v1.bin"), True), (str(tmp_path / "v2.bin"), True)]
+    assert factory.wrapped == [b"read-by-the-wrapper", b"read-by-the-wrapper"]
+
+
+def test_build_passes_the_permission_setting_to_the_key_wrapper(tmp_path: Path) -> None:
+    wrapper = FileReadingKeyWrapper()
+
+    with wrapper_builder(wrapper).with_key_file(1, tmp_path / "v1.bin").without_key_file_permission_checks().build():
+        pass
+
+    assert wrapper.reads == [(str(tmp_path / "v1.bin"), False)]
+
+
+@pytest.mark.parametrize("error", [InvalidKeyFileError("Key file 'v1.bin' was refused with status -37."), PermissionError("untrusted"),
+                                   FileNotFoundError("missing")])
+def test_a_key_wrapper_refusing_a_key_file_stops_the_build_before_any_key_is_created(tmp_path: Path, error: OSError) -> None:
+    factory = RecordingFactory()
+    wrapper = FileReadingKeyWrapper(error=error)
+
+    with pytest.raises(type(error)) as raised:
+        wrapper_builder(wrapper, factory).with_ephemeral_key(9).with_key_file(1, tmp_path / "v1.bin").build()
+
+    assert raised.value is error
+    assert factory.providers == []
+
+
+def test_a_key_wrapper_without_its_own_read_uses_the_default_file_read(tmp_path: Path) -> None:
+    path = tmp_path / "v1.bin"
+    path.write_bytes(b"wrapped-on-disk")
+    wrapper = FixedKeyWrapper()
+
+    assert wrapper.read_key_file(path, verify_permissions=False) == bytearray(b"wrapped-on-disk")
+    assert type(wrapper.read_key_file(path, verify_permissions=False)) is bytearray
+    with pytest.raises(FileNotFoundError):
+        wrapper.read_key_file(tmp_path / "missing.bin")

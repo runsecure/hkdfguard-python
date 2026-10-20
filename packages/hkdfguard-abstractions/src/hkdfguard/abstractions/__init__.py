@@ -6,6 +6,7 @@ from hkdfguard.abstractions._errors import (
     AuthenticationTagMismatchError,
     CryptographicError,
     EncryptedFormatError,
+    InvalidKeyFileError,
     KeyNotFoundError,
     ObjectClosedError,
 )
@@ -32,6 +33,7 @@ from hkdfguard.abstractions._rules import (
     WrappedKeyLimits,
     ascii_upper,
 )
+from hkdfguard.abstractions._wrapped_key_file import WrappedKeyFile
 
 __all__ = [
     "ArrayUtility",
@@ -43,6 +45,7 @@ __all__ = [
     "DataProtector",
     "EncryptedFormatError",
     "EncryptedFormatProvider",
+    "InvalidKeyFileError",
     "KeyNotFoundError",
     "KeyRing",
     "KeyTrackingValue",
@@ -58,6 +61,7 @@ __all__ = [
     "ServiceNames",
     "Utf8",
     "VersionedKey",
+    "WrappedKeyFile",
     "WrappedKeyLimits",
     "WritableBuffer",
     "ascii_upper",
