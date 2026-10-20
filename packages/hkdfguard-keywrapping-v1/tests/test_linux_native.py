@@ -257,7 +257,7 @@ def test_a_service_name_of_the_maximum_length_is_accepted() -> None:
 
 @linux_native_integration()
 def test_a_too_small_buffer_reports_a_capacity_that_suffices() -> None:
-    # The reported capacity is an upper bound for any payload (276 bytes on 0.1.0, for a 164-byte
+    # The reported capacity is an upper bound for any payload (276 bytes on 0.9.0, for a 164-byte
     # payload), not the exact size of this one; it must fit a key file and be enough.
     library = Library()
     dek = os.urandom(DEK_LENGTH)
