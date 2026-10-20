@@ -768,9 +768,9 @@ def test_x64_and_other_architectures_and_old_macos_are_refused() -> None:
 
 
 def test_the_two_locations_are_the_agreed_paths() -> None:
-    assert MacOsNativeLibraryLoader.system_path() == "/Library/Application Support/HkdfGuard/v1/libhkdfguard_v1.dylib"
+    assert MacOsNativeLibraryLoader.system_path() == "/Library/Application Support/HkdfGuard/v1/libhkdfguard.dylib"
     assert MacOsNativeLibraryLoader.user_path("/Users/dev") == MacOsNativeLibraryLoader.user_path("/Users/dev/") \
-        == "/Users/dev/.hkdfguard/v1/libhkdfguard_v1.dylib"
+        == "/Users/dev/.hkdfguard/v1/libhkdfguard.dylib"
 
 
 def test_choose_path_prefers_the_system_install_and_falls_back_only_when_it_is_absent() -> None:
@@ -799,7 +799,7 @@ def test_with_neither_install_usable_both_locations_are_named(home: str) -> None
     with pytest.raises(NativeLibraryNotFoundError) as error:
         MacOsNativeLibraryLoader.choose_path(lambda p: 0 if not p.startswith("/") else errno.ENOENT, home)
     assert MacOsNativeLibraryLoader.system_path() in str(error.value)
-    assert ".hkdfguard/v1/libhkdfguard_v1.dylib" in str(error.value)
+    assert ".hkdfguard/v1/libhkdfguard.dylib" in str(error.value)
 
 
 @pytest.mark.parametrize(("path", "parent"), [("/a/b/c.dylib", "/a/b"), ("/a/b/", "/a"), ("/a", "/"), ("/", None)])
@@ -880,7 +880,7 @@ def test_the_library_must_be_a_regular_file_and_its_parents_real_directories(kin
 
 def test_the_code_requirement_pins_the_hkdfguard_team_and_any_failure_is_refused() -> None:
     assert MacOsNativeLibraryLoader.CODE_REQUIREMENT == (
-        'identifier "libhkdfguard_v1" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists'
+        'identifier "libhkdfguard" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists'
         ' and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "MFW3T8R8J3"')
     checked: list[str] = []
     MacOsNativeLibraryLoader.verify_signature("/x.dylib", lambda p, r: checked.append(r) or 0)  # type: ignore[func-returns-value]
@@ -894,8 +894,8 @@ def test_dyld_library_path_shadowing_is_refused_and_only_that_variable_is_read()
     for search_path in (None, "", "/opt/lib:/usr/local/lib"):
         MacOsNativeLibraryLoader.refuse_shadowing(lambda n, s=search_path: s, lambda p: False)  # type: ignore[misc]
     for search_path in ("/tmp/decoy", "/opt/lib:/tmp/decoy/:/usr/local/lib"):
-        with pytest.raises(PermissionError, match=r"/tmp/decoy/libhkdfguard_v1\.dylib.*DYLD_LIBRARY_PATH"):
-            MacOsNativeLibraryLoader.refuse_shadowing(lambda n, s=search_path: s, lambda p: p == "/tmp/decoy/libhkdfguard_v1.dylib")  # type: ignore[misc]
+        with pytest.raises(PermissionError, match=r"/tmp/decoy/libhkdfguard\.dylib.*DYLD_LIBRARY_PATH"):
+            MacOsNativeLibraryLoader.refuse_shadowing(lambda n, s=search_path: s, lambda p: p == "/tmp/decoy/libhkdfguard.dylib")  # type: ignore[misc]
     asked: list[str] = []
     MacOsNativeLibraryLoader.refuse_shadowing(asked.append, lambda p: True)
     assert asked == ["DYLD_LIBRARY_PATH"]
@@ -905,7 +905,7 @@ def test_the_loaded_image_must_be_the_verified_file() -> None:
     system = MacOsNativeLibraryLoader.system_path()
     MacOsNativeLibraryLoader.verify_loaded_image(system, system)
     with pytest.raises(PermissionError, match="unloaded"):
-        MacOsNativeLibraryLoader.verify_loaded_image(system, "/tmp/decoy/libhkdfguard_v1.dylib")
+        MacOsNativeLibraryLoader.verify_loaded_image(system, "/tmp/decoy/libhkdfguard.dylib")
     with pytest.raises(PermissionError, match=MacOsNativeLibraryLoader.PROBE_EXPORT):
         MacOsNativeLibraryLoader.verify_loaded_image(system, None)
 

@@ -3,8 +3,8 @@ installed library and provisioning tool where there are some. Ported from hkdfgu
 the loader's decisions on simulated filesystems are in test_keywrapping.py and run everywhere.
 
 Every test is skipped off macOS; those that need the installed library (system-wide under
-/Library/Application Support/HkdfGuard/v1, or per user under ~/.hkdfguard/v1) or its provisioning tool,
-hkdfguard-v1-initialize beside it, are skipped - never passed - when it isn't there."""
+/Library/Application Support/HkdfGuard/v1, or per user under ~/.hkdfguard/v1) or its provisioning tool
+(hkdfguard, beside it) are skipped - never passed - when it isn't there."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""The macOS native KMS binding, and the loader that verifies libhkdfguard_v1.dylib before mapping it."""
+"""The macOS native KMS binding, and the loader that verifies libhkdfguard.dylib before mapping it."""
 
 from __future__ import annotations
 
@@ -39,12 +39,12 @@ class MacOsNativeLibraryLoader:
     Any failed check raises ``PermissionError``; there is no other fallback and no override.
     """
 
-    FILE_NAME: Final = "libhkdfguard_v1.dylib"
+    FILE_NAME: Final = "libhkdfguard.dylib"
     SYSTEM_DIRECTORY: Final = "/Library/Application Support/HkdfGuard/v1"
     USER_DIRECTORY_UNDER_HOME: Final = ".hkdfguard/v1"
     TEAM_ID: Final = "MFW3T8R8J3"
     CODE_REQUIREMENT: Final = (
-        'identifier "libhkdfguard_v1" and anchor apple generic'
+        'identifier "libhkdfguard" and anchor apple generic'
         " and certificate 1[field.1.2.840.113635.100.6.2.6] exists"  # Developer ID CA
         " and certificate leaf[field.1.2.840.113635.100.6.1.13] exists"  # Developer ID Application leaf
         f' and certificate leaf[subject.OU] = "{TEAM_ID}"')
@@ -292,15 +292,15 @@ def _check_code_signature(path: str, requirement_text: str) -> int:
 
 
 class MacOsHkdfGuardKmsLibrary(NativeKmsLibrary):
-    """Binds libhkdfguard_v1.dylib, which holds each service's KEK as its own Secure Enclave key,
+    """Binds libhkdfguard.dylib, which holds each service's KEK as its own Secure Enclave key,
     loaded only after the checks in :class:`MacOsNativeLibraryLoader`. No call creates a KEK: run
-    ``hkdfguard-v1-initialize provision --service-name <name>`` first."""
+    ``hkdfguard provision --service-name <name>`` first."""
 
     _PLATFORM_DESCRIPTIONS: Final[dict[int, str]] = {
         NativeKmsLibrary.ERR_PROVIDER_UNAVAILABLE: "this Mac has no Secure Enclave",
         NativeKmsLibrary.ERR_PAYLOAD_AUTH_FAILED:
             "AES-GCM authentication failed: the payload was altered, or wrapped for another service under this KEK",
-        NativeKmsLibrary.ERR_KEK_NOT_FOUND: "no KEK is provisioned for this service in this keychain mode; run hkdfguard-v1-initialize provision",
+        NativeKmsLibrary.ERR_KEK_NOT_FOUND: "no KEK is provisioned for this service in this keychain mode; run hkdfguard provision",
         NativeKmsLibrary.ERR_KEK_ACCESS_DENIED:
             "the keychain denied access: it is locked, there is no session to prompt in, or this process isn't allowed",
         NativeKmsLibrary.ERR_KEK_INVALID: "the keychain item for this service can't be reconstructed into a key",

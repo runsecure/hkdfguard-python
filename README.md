@@ -142,7 +142,7 @@ the package is installed.
 |----------|-------------------------------------------------------------------------|------------------------------------------------|
 | Windows  | `%ProgramFiles%\HkdfGuard\v1\HkdfGuard.dll`                             | `%ProgramFiles%\HkdfGuard\v1\hkdfguard.exe`    |
 | Linux    | `/usr/lib/<multiarch>/libhkdfguard.so.1`, or `/usr/lib64/libhkdfguard.so.1`, from the `libhkdfguard1` package (`hkdfguard-libs` on RPM distributions); x64 and arm64 | `/usr/bin/hkdfguard` |
-| macOS    | `/Library/Application Support/HkdfGuard/v1/libhkdfguard_v1.dylib`, or `~/.hkdfguard/v1/libhkdfguard_v1.dylib` | `hkdfguard-v1-initialize` |
+| macOS    | `/Library/Application Support/HkdfGuard/v1/libhkdfguard.dylib`, or `~/.hkdfguard/v1/libhkdfguard.dylib` | `hkdfguard` |
 
 On **Linux**, `LinuxNativeLibraryLoader` uses the package's file in the Debian multiarch directory
 (`/usr/lib/x86_64-linux-gnu` or `/usr/lib/aarch64-linux-gnu`, by the interpreter's architecture) if
@@ -309,7 +309,7 @@ is skipped, with the reason, where its platform, library or service isn't there:
 | --- | --- | --- |
 | Windows: the installed-library, `hkdfguard_kek_exists`, key-file and process-hardening tests in `test_keywrapping.py` and `test_process_hardening.py` | Windows | `%ProgramFiles%\HkdfGuard\v1\HkdfGuard.dll` (and `hkdfguard.exe`) installed; the KEK round trips also need the provisioned test KEK or `HKDFGUARD_TEST_SERVICE` |
 | Linux: `test_linux_loader.py` (loader against the real filesystem and dynamic linker) and `test_linux_native.py` (the library's contract against the real KEK provider) | Linux | the system tests need only Linux; the installed-library tests need the `libhkdfguard1` package; `test_linux_native.py` also needs `HKDFGUARD_TEST_SERVICE`, and some tests `HKDFGUARD_TEST_SERVICE_OTHER`, `tpm.require_pinned_names = true` in `/etc/hkdfguard/policy.toml`, or `/usr/bin/hkdfguard` |
-| macOS: `test_macos_native.py` (loader against the real filesystem and Security framework, and the provisioning tool) | macOS | the installed `libhkdfguard_v1.dylib` (system-wide or per user) and `hkdfguard-v1-initialize` beside it, where a test needs them; the KEK round trips (here and in the shared tests) also need the provisioned test KEK or `HKDFGUARD_TEST_SERVICE` |
+| macOS: `test_macos_native.py` (loader against the real filesystem and Security framework, and the provisioning tool) | macOS | the installed `libhkdfguard.dylib` (system-wide or per user) and `hkdfguard` beside it, where a test needs them; the KEK round trips (here and in the shared tests) also need the provisioned test KEK or `HKDFGUARD_TEST_SERVICE` |
 
 On a Linux TPM host, provision the test services once with `sudo scripts/provision-linux-test-key.sh`,
 run from the account that runs the tests (`--remove` removes the policy it wrote), then run with the
@@ -342,7 +342,7 @@ If the KEK exists but your account may not use it, add the account to the `HkdfG
 (then sign out and in), or run the tests elevated.
 
 **macOS.** Provision `com.hkdfguard.integration.test.221` with the installed
-`hkdfguard-v1-initialize provision --service-name com.hkdfguard.integration.test.221`; the tests
+`hkdfguard provision --service-name com.hkdfguard.integration.test.221`; the tests
 then find it on their own, asking that tool (which never prompts) whether it is provisioned. The
 first call from Python into a KEK the tool created can show a keychain dialog: click "Always
 Allow". That first call is made with a 60-second deadline, so a dialog nobody answers fails the
@@ -356,7 +356,7 @@ to a second provisioned service to test cross-service isolation against a differ
 that test uses a service that is never provisioned):
 
 ```bash
-hkdfguard provision --service-name hkdfguard.integrationtest   # elevated on Windows; hkdfguard-v1-initialize on macOS
+hkdfguard provision --service-name hkdfguard.integrationtest   # elevated on Windows
 HKDFGUARD_TEST_SERVICE=hkdfguard.integrationtest uv run pytest
 ```
 

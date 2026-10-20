@@ -26,7 +26,7 @@ import pytest
 DEFAULT_TEST_SERVICE = "com.hkdfguard.integration.test.221"
 """The test KEK every platform's provisioning creates and every HkdfGuard port shares:
 scripts/provision-windows-test-key.ps1, scripts/provision-linux-test-key.sh, and
-hkdfguard-v1-initialize on macOS."""
+the hkdfguard tool on macOS."""
 
 SERVICE_VARIABLE = "HKDFGUARD_TEST_SERVICE"
 """Names a service already provisioned on this machine. It always wins over DEFAULT_TEST_SERVICE,
@@ -35,7 +35,7 @@ and setting it means the native tests must run."""
 OTHER_SERVICE_VARIABLE = "HKDFGUARD_TEST_SERVICE_OTHER"
 """An optional second provisioned service, for the cross-service isolation tests."""
 
-MACOS_PROVISIONING_TOOL = "hkdfguard-v1-initialize"
+MACOS_PROVISIONING_TOOL = "hkdfguard"
 
 
 def kek_exists(service: str) -> tuple[int, bool]:
@@ -89,7 +89,7 @@ def macos_installed_library() -> str | None:
 
 
 def macos_provisioning_tool() -> str | None:
-    """The hkdfguard-v1-initialize installed beside the library the macOS loader would choose, if any."""
+    """The hkdfguard tool installed beside the library the macOS loader would choose, if any."""
     library = macos_installed_library()
     if library is None:
         return None
