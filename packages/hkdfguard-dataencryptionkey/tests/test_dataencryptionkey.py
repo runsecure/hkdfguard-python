@@ -579,8 +579,11 @@ def test_a_ring_with_an_ephemeral_key_rotates_and_old_values_still_decrypt() -> 
 
         time.sleep(FAST.total_seconds() * 4)
 
-        assert ring.current_version >= 3
-        assert protector.encrypt("now").split("::")[1] == f"v{ring.current_version}"
+        before = ring.current_version
+        assert before >= 3
+        # Rotation keeps running in the background, so the version can advance around the encrypt.
+        written = int(protector.encrypt("now").split("::")[1].removeprefix("v"))
+        assert before <= written <= ring.current_version
         assert protector.decrypt_to_str(under_v1) == "written under v1"
         assert any(r.levelno == logging.INFO for r in handler.with_event_id(HkdfGuardLog.EPHEMERAL_KEY_ROTATED))
 
