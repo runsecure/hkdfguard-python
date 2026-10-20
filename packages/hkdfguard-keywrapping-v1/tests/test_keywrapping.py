@@ -1338,7 +1338,8 @@ def test_native_a_key_ring_built_from_a_key_file_reads_it_through_the_native_lib
 def test_native_a_key_file_of_the_right_size_with_an_unknown_version_is_malformed(service: str, key_dir: Path) -> None:
     path, wrapped, _ = wrap_to_file(service, key_dir)
     tampered = bytearray(wrapped)
-    tampered[0] ^= 0xFF  # the version byte
+    # The version byte: first on Linux and Windows; on macOS, the suite id after the 32-byte KEK fingerprint.
+    tampered[32 if sys.platform == "darwin" else 0] ^= 0xFF
     path.write_bytes(tampered)
 
     with pytest.raises(InvalidKeyFileError, match="status -38"):
