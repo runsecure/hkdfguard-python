@@ -3,13 +3,14 @@ from __future__ import annotations
 import base64
 import ctypes
 import errno
-import functools
 import os
+import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import uuid
-from collections.abc import Buffer, Callable
+from collections.abc import Buffer, Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -26,6 +27,19 @@ from hkdfguard.keywrapping.v1._interop._windows import (
     WindowsHkdfGuardKmsLibrary,
     WindowsNativeLibraryLoader,
     windows_subject_name,
+)
+from hkdfguard_test_support import (
+    DEFAULT_TEST_SERVICE,
+    SERVICE_VARIABLE,
+    await_native_access,
+    kek_exists,
+    key_directory,
+    long_path,
+    native_test_service,
+    private_key_directory,
+    private_key_directory_root,
+    provisioned_service,
+    untrusted_directory,
 )
 
 IS_WINDOWS = sys.platform == "win32"
@@ -100,7 +114,6 @@ class FakeKmsLibrary(AbstractHkdfGuardKmsLibrary):
         return KmsResult(self.generate_status, 0) if self.generate_status != OK else self._emit(destination, self.generate_payload or bytes(64))
 
 
-DEFAULT_WINDOWS_SERVICE = "com.hkdfguard.integration.test.221"
 UNPROVISIONED_SERVICE = "hkdfguard.integrationtest.unprovisioned"
 
 
@@ -111,49 +124,11 @@ def windows_library_installed() -> bool:
 installed_windows_library = pytest.mark.skipif(not windows_library_installed(), reason="The Windows native KMS library is not installed.")
 
 
-def kek_exists(service: str) -> tuple[int, bool]:
-    """hkdfguard_kek_exists(const char* service, int32_t* out_exists) on the library the verified
-    Windows loader loaded: the library's status, and whether the KEK exists when it is 0."""
-    function = WindowsNativeLibraryLoader.load().hkdfguard_kek_exists
-    function.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_int32)]
-    function.restype = ctypes.c_int
-    exists = ctypes.c_int32()
-    status = int(function(service.encode("utf-8"), ctypes.byref(exists)))
-    return status, status == OK and exists.value != 0
-
-
-@functools.cache
-def provisioned_service() -> tuple[str | None, str]:
-    """The service native integration tests run against: HKDFGUARD_TEST_SERVICE if set; otherwise on
-    Windows the provisioned test KEK, unless the installed library reports it absent or forbidden."""
-    explicit = os.environ.get("HKDFGUARD_TEST_SERVICE")
-    if explicit:
-        return explicit, ""
-    if not IS_WINDOWS:
-        return None, "Set HKDFGUARD_TEST_SERVICE to a service provisioned with hkdfguard to run native integration tests."
-    if not windows_library_installed():
-        return None, f"The native KMS library is not installed at {WindowsNativeLibraryLoader.installed_path()}."
-    try:
-        status, exists = kek_exists(DEFAULT_WINDOWS_SERVICE)
-    except Exception:
-        return DEFAULT_WINDOWS_SERVICE, ""
-    if status == 0 and exists:
-        return DEFAULT_WINDOWS_SERVICE, ""
-    if status in (0, AbstractHkdfGuardKmsLibrary.ERR_KEK_NOT_FOUND):
-        return None, (f"The test KEK '{DEFAULT_WINDOWS_SERVICE}' is not provisioned. Run scripts/provision-windows-test-key.ps1 from an elevated PowerShell, "
-                      "or set HKDFGUARD_TEST_SERVICE to a provisioned service.")
-    if status == AbstractHkdfGuardKmsLibrary.ERR_KEK_ACCESS_DENIED:
-        return None, (f"The test KEK '{DEFAULT_WINDOWS_SERVICE}' exists, but this account may not use it. Add it to the HkdfGuardUsers group "
-                      "(then sign out and in), or run the tests elevated.")
-    return DEFAULT_WINDOWS_SERVICE, ""
-
-
 @pytest.fixture
 def service() -> str:
-    name, reason = provisioned_service()
-    if name is None:
-        pytest.skip(reason)
-    return name
+    """HKDFGUARD_TEST_SERVICE, or DEFAULT_TEST_SERVICE where Windows or macOS reports it provisioned,
+    after its first native call has answered in time; skips the test when there is none."""
+    return native_test_service()
 
 
 # --- NativeHkdfKeyWrapperV1 -------------------------------------------------------------------
@@ -1075,21 +1050,12 @@ def test_too_small_buffers_and_corrupt_payloads_fail_through_the_wrapper(service
 # library is installed; reading back a real wrapped key needs a provisioned service.
 
 
-def long_path(path: Path) -> Path:
-    """``path`` with every 8.3 short name expanded. hkdfguard_open_file refuses a short name anywhere
-    in a path, and Windows can hand out %TEMP% - and so pytest's tmp_path - in short form (for example
-    C:\\Users\\RUNNER~1\\... on GitHub-hosted runners)."""
-    if sys.platform == "win32":
-        buffer = ctypes.create_unicode_buffer(32_767)
-        length = ctypes.WinDLL("kernel32", use_last_error=True).GetLongPathNameW(str(path), buffer, len(buffer))
-        if 0 < length < len(buffer):
-            return Path(buffer.value)
-    return path
-
-
 @pytest.fixture
-def key_dir(tmp_path: Path) -> Path:
-    return long_path(tmp_path)
+def key_dir(tmp_path: Path) -> Iterator[Path]:
+    """Where these tests write key files (hkdfguard_test_support.key_directory): tmp_path in long form
+    on Windows; on Linux a private 0700 directory outside /tmp, which the library refuses."""
+    with key_directory(tmp_path) as directory:
+        yield directory
 
 
 def reader() -> NativeHkdfKeyWrapperV1:
@@ -1121,6 +1087,141 @@ def test_the_long_path_helper_expands_short_names(tmp_path: Path) -> None:
             short = Path(buffer.value)  # the same as directory where the volume has no 8.3 names
 
     assert long_path(short) == directory
+
+
+linux_only = pytest.mark.skipif(sys.platform != "linux", reason="Linux only.")
+
+
+@linux_only
+def test_the_key_directory_on_linux_is_private_trusted_outside_the_shared_temporary_directories_and_removed(tmp_path: Path) -> None:
+    uid = os.geteuid()  # type: ignore[attr-defined,unused-ignore]
+    with key_directory(tmp_path) as directory:
+        status = os.lstat(directory)
+        assert stat.S_ISDIR(status.st_mode) and stat.S_IMODE(status.st_mode) == 0o700 and status.st_uid == uid
+        assert untrusted_directory(directory, uid) is None
+        assert directory == Path(os.path.realpath(directory))
+        assert not any(directory == Path(shared) or Path(shared) in directory.parents for shared in ("/tmp", "/var/tmp", "/dev/shm"))
+        assert tmp_path not in (directory, *directory.parents)
+        write(directory, "dek.bin", bytes(132))
+    assert not directory.exists()
+
+
+@linux_only
+def test_untrusted_directory_refuses_group_or_world_writable_directories_sticky_or_not(tmp_path: Path) -> None:
+    uid = os.geteuid()  # type: ignore[attr-defined,unused-ignore]
+    with private_key_directory() as directory:
+        for mode, sticky in ((0o1777, True), (0o777, False), (0o770, False), (0o702, False)):
+            shared = directory / f"mode-{mode:o}"
+            shared.mkdir()
+            shared.chmod(mode)
+            (shared / "inner").mkdir(mode=0o700)
+
+            for path in (shared, shared / "inner"):
+                reason = untrusted_directory(path, uid)
+                assert reason is not None and f"'{shared}'" in reason and "writable by its group or by other users" in reason
+                assert ("sticky" in reason) == sticky
+        link = directory / "link"
+        link.symlink_to(directory)
+        assert "symbolic link" in (untrusted_directory(link, uid) or "")
+        assert "owned by uid" in (untrusted_directory(directory, uid + 1) or "")  # this user's directory, judged for another
+    if os.stat("/tmp").st_mode & stat.S_IWOTH:
+        assert "'/tmp'" in (untrusted_directory(Path("/tmp"), uid) or "")
+
+
+@linux_only
+def test_the_private_root_prefers_a_trusted_runtime_directory_then_home_and_otherwise_says_why() -> None:
+    uid = os.geteuid()  # type: ignore[attr-defined,unused-ignore]
+    with private_key_directory() as directory:
+        runtime, home, shared = directory / "runtime", directory / "home", directory / "shared"
+        runtime.mkdir(mode=0o700)
+        home.mkdir(mode=0o700)
+        shared.mkdir()
+        shared.chmod(0o1777)
+
+        assert private_key_directory_root({"XDG_RUNTIME_DIR": str(runtime), "HOME": str(home)}, uid, "") == (runtime / "hkdfguard-tests", "")
+        assert stat.S_IMODE(os.lstat(runtime / "hkdfguard-tests").st_mode) == 0o700
+
+        expected = home / ".cache" / "hkdfguard-tests"
+        assert private_key_directory_root({"XDG_RUNTIME_DIR": str(shared), "HOME": str(home)}, uid, "") == (expected, "")
+        assert private_key_directory_root({"HOME": str(home)}, uid, "") == (expected, "")
+        assert private_key_directory_root({}, uid, str(home)) == (expected, "")
+        assert stat.S_IMODE(os.lstat(home / ".cache").st_mode) == 0o700
+
+        (shared / "home").mkdir(mode=0o700)
+        root, reason = private_key_directory_root({"XDG_RUNTIME_DIR": "relative", "HOME": str(shared / "home")}, uid, "")
+        assert root is None
+        assert "not an absolute path" in reason and f"'{shared}'" in reason and "sticky" in reason and "/tmp" in reason
+
+        loose = directory / "loose"
+        loose.mkdir(mode=0o700)
+        (loose / ".cache").mkdir(mode=0o700)
+        (loose / ".cache").chmod(0o775)
+        root, reason = private_key_directory_root({"HOME": str(loose)}, uid, "")
+        assert root is None and f"'{loose / '.cache'}'" in reason and "XDG_RUNTIME_DIR is not set" in reason
+
+
+@linux_only
+def test_without_a_private_root_the_key_directory_skips_rather_than_passes() -> None:
+    with private_key_directory() as directory:
+        shared = directory / "shared"
+        shared.mkdir()
+        shared.chmod(0o1777)
+        (shared / "home").mkdir(mode=0o700)
+
+        with pytest.raises(pytest.skip.Exception, match=r"No private directory for key files.*sticky"), \
+                private_key_directory({"HOME": str(shared / "home")}):
+            pytest.fail("a key directory under a sticky, world-writable directory")
+        assert not (shared / "home" / ".cache").exists()  # nothing is made under an untrusted home
+
+
+def test_off_macos_waiting_for_native_access_never_calls() -> None:
+    calls: list[str] = []
+
+    await_native_access("hkdfguard.test.elsewhere", calls.append, platform="linux")
+    await_native_access("hkdfguard.test.elsewhere", calls.append, platform="win32")
+
+    assert calls == []
+
+
+def test_on_macos_a_first_native_call_that_never_returns_fails_saying_why_and_once_per_service() -> None:
+    release = threading.Event()
+    calls: list[str] = []
+
+    def blocked(service: str) -> None:
+        calls.append(service)
+        release.wait(30)
+
+    try:
+        for _ in range(2):
+            with pytest.raises(pytest.fail.Exception, match=r"'hkdfguard\.test\.blocked'.*keychain.*Always Allow.*\(-18\)"):
+                await_native_access("hkdfguard.test.blocked", blocked, timeout=0.05, platform="darwin")
+    finally:
+        release.set()
+    assert calls == ["hkdfguard.test.blocked"]
+
+
+def test_on_macos_a_first_native_call_that_answers_in_time_passes_whatever_it_answered() -> None:
+    calls: list[str] = []
+
+    def refused(service: str) -> None:
+        calls.append(service)
+        raise CryptographicError("status -18")
+
+    await_native_access("hkdfguard.test.answers", refused, timeout=30, platform="darwin")
+    await_native_access("hkdfguard.test.answers", refused, timeout=30, platform="darwin")
+
+    assert calls == ["hkdfguard.test.answers"]
+
+
+def test_the_shared_service_is_the_variable_or_the_one_default_test_service() -> None:
+    assert DEFAULT_TEST_SERVICE == "com.hkdfguard.integration.test.221"
+    name, reason = provisioned_service()
+    if os.environ.get(SERVICE_VARIABLE):
+        assert (name, reason) == (os.environ[SERVICE_VARIABLE], "")
+    elif name is not None:
+        assert name == DEFAULT_TEST_SERVICE and sys.platform in ("win32", "darwin")
+    else:
+        assert reason
 
 
 @installed_windows_library

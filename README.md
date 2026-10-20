@@ -298,6 +298,12 @@ passed. Once a service is chosen, a missing or failing library is a test failure
 native library's key-file refusals need no KEK, so on Windows they run wherever the library is
 installed; they make their files under the long form of the temporary folder, since
 `hkdfguard_open_file` refuses an 8.3 short name and `%TEMP%` can be one (`C:\Users\RUNNER~1\...`).
+On Linux the library refuses a key file under any directory its group or other users can write,
+sticky or not, so nothing under `/tmp`, `/var/tmp` or `/dev/shm` (where pytest's `tmp_path` is):
+there the key-file tests write to a new 0700 directory under `$XDG_RUNTIME_DIR/hkdfguard-tests`,
+or `~/.cache/hkdfguard-tests` without a trusted one, and are skipped, saying why, when neither will
+do. What the native tests share - the default test service, how it is chosen, these directories and
+the macOS deadline below - is in `packages/hkdfguard-keywrapping-v1/tests/hkdfguard_test_support.py`.
 
 Each platform also has its own native suite, matching the other HkdfGuard ports. Every test in them
 is skipped, with the reason, where its platform, library or service isn't there:
@@ -306,7 +312,7 @@ is skipped, with the reason, where its platform, library or service isn't there:
 | --- | --- | --- |
 | Windows: the installed-library, `hkdfguard_kek_exists`, key-file and process-hardening tests in `test_keywrapping.py` and `test_process_hardening.py` | Windows | `%ProgramFiles%\HkdfGuard\v1\HkdfGuard.dll` (and `hkdfguard.exe`) installed; the KEK round trips also need the provisioned test KEK or `HKDFGUARD_TEST_SERVICE` |
 | Linux: `test_linux_loader.py` (loader against the real filesystem and dynamic linker) and `test_linux_native.py` (the library's contract against the real KEK provider) | Linux | the system tests need only Linux; the installed-library tests need the `libhkdfguard1` package; `test_linux_native.py` also needs `HKDFGUARD_TEST_SERVICE`, and some tests `HKDFGUARD_TEST_SERVICE_OTHER`, `tpm.require_pinned_names = true` in `/etc/hkdfguard/policy.toml`, or `/usr/bin/hkdfguard` |
-| macOS: `test_macos_native.py` (loader against the real filesystem and Security framework, and the provisioning tool) | macOS | the installed `libhkdfguard_v1.dylib` (system-wide or per user) and `hkdfguard-v1-initialize` beside it, where a test needs them |
+| macOS: `test_macos_native.py` (loader against the real filesystem and Security framework, and the provisioning tool) | macOS | the installed `libhkdfguard_v1.dylib` (system-wide or per user) and `hkdfguard-v1-initialize` beside it, where a test needs them; the KEK round trips (here and in the shared tests) also need the provisioned test KEK or `HKDFGUARD_TEST_SERVICE` |
 
 On a Linux TPM host, provision the test services once with `sudo scripts/provision-linux-test-key.sh`,
 run from the account that runs the tests (`--remove` removes the policy it wrote), then run with the
@@ -339,8 +345,17 @@ uv run pytest
 If the KEK exists but your account may not use it, add the account to the `HkdfGuardUsers` group
 (then sign out and in), or run the tests elevated.
 
-**Any platform.** Name a provisioned service in `HKDFGUARD_TEST_SERVICE`; it always wins over the
-Windows default, and setting it means the native tests must run. Set `HKDFGUARD_TEST_SERVICE_OTHER`
+**macOS.** Provision `com.hkdfguard.integration.test.221` with the installed
+`hkdfguard-v1-initialize provision --service-name com.hkdfguard.integration.test.221`; the tests
+then find it on their own, asking that tool (which never prompts) whether it is provisioned. The
+first call from Python into a KEK the tool created can show a keychain dialog: click "Always
+Allow". That first call is made with a 60-second deadline, so a dialog nobody answers fails the
+run, saying so, rather than hanging it; in a session with no UI the library reports
+`KEK_ACCESS_DENIED` (-18) instead, so run the tests from a logged-in session.
+
+**Any platform.** Every platform's default test service is `com.hkdfguard.integration.test.221`.
+Name another provisioned service in `HKDFGUARD_TEST_SERVICE`; it always wins over the default,
+and setting it means the native tests must run. Set `HKDFGUARD_TEST_SERVICE_OTHER`
 to a second provisioned service to test cross-service isolation against a different KEK (otherwise
 that test uses a service that is never provisioned):
 

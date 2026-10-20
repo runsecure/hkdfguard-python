@@ -10,25 +10,33 @@ from __future__ import annotations
 
 import errno
 import os
-import subprocess
 import sys
 from pathlib import Path
 
 import pytest
-from hkdfguard.keywrapping.v1 import NativeLibraryNotFoundError
+from hkdfguard.abstractions import WrappedKeyLimits
+from hkdfguard.keywrapping.v1 import NativeHkdfKeyWrapperV1, NativeLibraryNotFoundError
 from hkdfguard.keywrapping.v1._interop import _macos
 from hkdfguard.keywrapping.v1._interop._macos import MacOsNativeLibraryLoader, PathChoice
 from hkdfguard.keywrapping.v1._interop._unix import UnixFileStatus, probe
+from hkdfguard_test_support import (
+    DEFAULT_TEST_SERVICE,
+    MACOS_PROVISIONING_TOOL,
+    SERVICE_VARIABLE,
+    macos_kek_status,
+    macos_provisioning_tool,
+    macos_test_environment,
+    native_test_service,
+    provisioned_service,
+)
 
 IS_MACOS = sys.platform == "darwin"
 pytestmark = pytest.mark.skipif(not IS_MACOS, reason="macOS only.")
 
 Loader = MacOsNativeLibraryLoader
 
-PROVISIONING_TOOL = "hkdfguard-v1-initialize"
-DEFAULT_MACOS_SERVICE = "com.hkdfguard.integration.test.221"
+PROVISIONING_TOOL = MACOS_PROVISIONING_TOOL
 UNPROVISIONED_SERVICE = "hkdfguard.integrationtest.unprovisioned"
-SERVICE_VARIABLE = "HKDFGUARD_TEST_SERVICE"
 
 
 def installed_library() -> PathChoice | None:
@@ -37,39 +45,6 @@ def installed_library() -> PathChoice | None:
         return Loader.choose_path(probe, os.path.expanduser("~"))
     except NativeLibraryNotFoundError:
         return None
-
-
-def provisioning_tool() -> str | None:
-    """The hkdfguard-v1-initialize installed beside the library the loader would choose, if any."""
-    choice = installed_library()
-    if choice is None:
-        return None
-    tool = str(Path(choice.path).with_name(PROVISIONING_TOOL))
-    return tool if os.path.isfile(tool) else None
-
-
-def kek_status(tool: str, service: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run([tool, "status", "--service-name", service], stdin=subprocess.DEVNULL, capture_output=True, text=True,
-                          timeout=60, check=False)
-
-
-def macos_test_environment(default_service: str) -> tuple[str | None, str]:
-    """Whether the default test service is provisioned, asked of the installed provisioning tool. The
-    tool created the KEK, so it is on the keychain item's access list and never prompts; asking the
-    library from this process would. ``(service, "")`` to run against it - also when the tool can't
-    answer, so that failure is reported - or ``(None, why)`` to skip."""
-    tool = provisioning_tool()
-    if tool is None:
-        return default_service, ""
-    try:
-        completed = kek_status(tool, default_service)
-    except (OSError, subprocess.TimeoutExpired):
-        return default_service, ""
-    output = completed.stdout + completed.stderr
-    if completed.returncode == 0 and "kek: absent" in output:
-        return None, (f"The test KEK '{default_service}' is not provisioned. Run {PROVISIONING_TOOL} provision --service-name "
-                      f"{default_service}, or set {SERVICE_VARIABLE} to a provisioned service.")
-    return default_service, ""
 
 
 # --- The loader against the real filesystem and Security framework ---------------------------------
@@ -124,23 +99,42 @@ def test_probe_distinguishes_missing_from_present() -> None:
 
 
 def test_the_provisioning_tool_reports_an_unprovisioned_service_as_absent() -> None:
-    tool = provisioning_tool()
+    tool = macos_provisioning_tool()
     if tool is None:
         pytest.skip(f"{PROVISIONING_TOOL} is not installed beside the native library.")
 
-    completed = kek_status(tool, UNPROVISIONED_SERVICE)
+    completed = macos_kek_status(tool, UNPROVISIONED_SERVICE)
 
     assert completed.returncode == 0 and "kek: absent" in completed.stdout, f"status exited {completed.returncode}: {completed.stdout}{completed.stderr}"
 
 
 def test_the_default_test_service_is_found_only_when_provisioned() -> None:
-    tool = provisioning_tool()
+    tool = macos_provisioning_tool()
     if tool is None:
         pytest.skip(f"{PROVISIONING_TOOL} is not installed beside the native library.")
-    completed = kek_status(tool, DEFAULT_MACOS_SERVICE)
+    completed = macos_kek_status(tool, DEFAULT_TEST_SERVICE)
     assert completed.returncode == 0, f"status exited {completed.returncode}: {completed.stdout}{completed.stderr}"
 
-    service, reason = macos_test_environment(DEFAULT_MACOS_SERVICE)
+    service, reason = macos_test_environment(DEFAULT_TEST_SERVICE)
 
     provisioned = "kek: present" in completed.stdout
     assert (service is not None) == provisioned, f"environment = {service!r} ({reason}), but the tool reports provisioned = {provisioned}"
+
+
+def test_without_the_variable_the_shared_service_is_the_default_test_service_when_provisioned() -> None:
+    # What the service fixtures in test_keywrapping.py and test_dataencryptionkey.py resolve to here.
+    if os.environ.get(SERVICE_VARIABLE):
+        pytest.skip(f"{SERVICE_VARIABLE} is set, so it is the service.")
+
+    assert provisioned_service() == macos_test_environment(DEFAULT_TEST_SERVICE)
+
+
+def test_the_resolved_service_answers_its_first_native_call_before_the_deadline() -> None:
+    # The first call from this Python can wait on a keychain dialog: native_test_service makes it
+    # with a deadline and fails, saying so, instead of hanging the run.
+    service = native_test_service()
+
+    wrapper = NativeHkdfKeyWrapperV1(service)
+    wrapped = bytearray(WrappedKeyLimits.MAX_BYTES)
+    length = wrapper.generate_and_wrap(wrapped)
+    assert wrapper.unwrap(wrapped[:length], bytearray(32)) == 32

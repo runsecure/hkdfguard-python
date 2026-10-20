@@ -21,6 +21,7 @@ import base64
 import os
 import subprocess
 import sys
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -29,13 +30,11 @@ from hkdfguard.abstractions import ServiceNames, WrappedKeyLimits
 from hkdfguard.keywrapping.v1 import NativeHkdfKeyWrapperV1
 from hkdfguard.keywrapping.v1._interop._kms import DEK_LENGTH, OK, AbstractHkdfGuardKmsLibrary, CpuArchitecture
 from hkdfguard.keywrapping.v1._interop._linux import LinuxHkdfGuardKmsLibrary, LinuxNativeLibraryLoader
+from hkdfguard_test_support import DEFAULT_TEST_SERVICE, OTHER_SERVICE_VARIABLE, SERVICE_VARIABLE, key_directory
 
 IS_LINUX = sys.platform.startswith("linux")
 
-SERVICE_VARIABLE = "HKDFGUARD_TEST_SERVICE"
-OTHER_SERVICE_VARIABLE = "HKDFGUARD_TEST_SERVICE_OTHER"
 UNPROVISIONED_SERVICE = "hkdfguard.integrationtest.unprovisioned"
-DEFAULT_LINUX_SERVICE = "com.hkdfguard.integration.test.221"
 POLICY_PATH = "/etc/hkdfguard/policy.toml"
 CLI = "/usr/bin/hkdfguard"
 
@@ -78,7 +77,7 @@ def skip_reason(*, needs_other_service: bool = False, needs_pinned_names_allowli
         return "The libhkdfguard1 package is not installed."
     if _variable(SERVICE_VARIABLE) is None:
         return (f"Set {SERVICE_VARIABLE} to a service provisioned with hkdfguard to run native integration tests. On a Linux TPM host, "
-                f"sudo scripts/provision-linux-test-key.sh provisions {DEFAULT_LINUX_SERVICE}.")
+                f"sudo scripts/provision-linux-test-key.sh provisions {DEFAULT_TEST_SERVICE}.")
     if needs_other_service and _variable(OTHER_SERVICE_VARIABLE) is None:
         return f"Set {OTHER_SERVICE_VARIABLE} to a second provisioned service."
     if needs_pinned_names_allowlist and not policy_requires_pinned_names():
@@ -309,13 +308,21 @@ def run_cli(*arguments: str) -> tuple[int, str]:
     return completed.returncode, completed.stdout + completed.stderr
 
 
+@pytest.fixture
+def key_dir(tmp_path: Path) -> Iterator[Path]:
+    """A private 0700 directory outside /tmp, /var/tmp and /dev/shm (hkdfguard_test_support.key_directory):
+    the library refuses a key file under any group- or world-writable directory, sticky or not."""
+    with key_directory(tmp_path) as directory:
+        yield directory
+
+
 @linux_native_integration(needs_cli=True)
-def test_a_key_file_wrapped_by_the_provisioning_tool_reveals_its_dek_through_the_wrapper(tmp_path: Path) -> None:
+def test_a_key_file_wrapped_by_the_provisioning_tool_reveals_its_dek_through_the_wrapper(key_dir: Path) -> None:
     # The deployment path: hkdfguard wraps a delivered DEK on the host, in its own process, and the
-    # application unwraps the key file through this binding.
+    # application reads the key file and unwraps it through this binding.
     dek = os.urandom(DEK_LENGTH)
-    dek_file = tmp_path / "dek"
-    key_file = tmp_path / "key.bin"
+    dek_file = key_dir / "dek"
+    key_file = key_dir / "key.bin"
     descriptor = os.open(dek_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(descriptor, "wb") as stream:
         stream.write(base64.b64encode(dek))
@@ -324,8 +331,11 @@ def test_a_key_file_wrapped_by_the_provisioning_tool_reveals_its_dek_through_the
     assert exit_code == 0, f"hkdfguard wrap exited {exit_code}: {output}"
     assert key_file.stat().st_mode & 0o777 == 0o600
 
+    wrapper = NativeHkdfKeyWrapperV1(service())
+    wrapped = wrapper.read_key_file(key_file)  # through hkdfguard_open_file, which checks the directory chain
+    assert wrapped == key_file.read_bytes()
     recovered = bytearray(DEK_LENGTH)
-    written = NativeHkdfKeyWrapperV1(service()).unwrap(key_file.read_bytes(), recovered)
+    written = wrapper.unwrap(wrapped, recovered)
 
     assert written == DEK_LENGTH
     assert recovered == dek
@@ -348,7 +358,7 @@ def test_without_linux_the_package_or_a_service_the_native_tests_skip_saying_why
 
     assert reason is not None
     if IS_LINUX and installed_linux_library() is not None:
-        assert SERVICE_VARIABLE in reason and DEFAULT_LINUX_SERVICE in reason
+        assert SERVICE_VARIABLE in reason and DEFAULT_TEST_SERVICE in reason
     elif IS_LINUX:
         assert "libhkdfguard1" in reason
     else:

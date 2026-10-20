@@ -5,7 +5,6 @@ import logging
 import os
 import re
 import stat
-import sys
 import threading
 import time
 from collections.abc import Buffer, Iterator
@@ -36,6 +35,7 @@ from hkdfguard.abstractions._wrapped_key_file import KeyFilePermissions, PathSta
 from hkdfguard.cryptoprovider.aesgcm256 import AesGcmCryptoProvider, AesGcmCryptoProviderFactory, AesGcmPipelineDataProtector
 from hkdfguard.dataencryptionkey import Base64ConversionUtility, DataEncryptionKey, DefaultFormatProvider, KeyRing, KeyRingBuilder
 from hkdfguard.diagnostics import AttributeNames, HkdfGuardLog, HkdfGuardTelemetry, SpanNames
+from hkdfguard_test_support import key_directory, native_test_service
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -822,38 +822,19 @@ def test_pipeline_values_decrypt_through_a_ring_protector_for_the_identifiers_pu
 
 @pytest.fixture(scope="module")
 def native_service() -> str:
-    explicit = os.environ.get("HKDFGUARD_TEST_SERVICE")
-    if explicit:
-        return explicit
-    if sys.platform != "win32":
-        pytest.skip("Set HKDFGUARD_TEST_SERVICE to a provisioned service to run native end-to-end tests.")
-    from hkdfguard.keywrapping.v1 import NativeHkdfKeyWrapperV1, NativeLibraryNotFoundError
-
-    candidate = "com.hkdfguard.integration.test.221"
-    try:
-        NativeHkdfKeyWrapperV1(candidate).generate_and_wrap(bytearray(WrappedKeyLimits.MAX_BYTES))
-    except NativeLibraryNotFoundError as error:
-        pytest.skip(str(error))
-    except CryptographicError as error:
-        if "status -17" in str(error) or "status -18" in str(error):  # KEK not found / access denied
-            pytest.skip(f"The Windows test KEK is unavailable: {error} Run scripts/provision-windows-test-key.ps1 from an elevated PowerShell, "
-                        "or set HKDFGUARD_TEST_SERVICE to a provisioned service.")
-        raise
-    return candidate
+    """HKDFGUARD_TEST_SERVICE, or the shared default test service where Windows or macOS reports it
+    provisioned, after its first native call has answered in time (on macOS that call can wait on a
+    keychain dialog); skips the tests when there is none."""
+    return native_test_service()
 
 
 @pytest.fixture
-def key_dir(tmp_path: Path) -> Path:
-    """tmp_path with every 8.3 short name expanded: the native library refuses a key file path that
-    uses one, and Windows can hand out %TEMP% in short form (C:\\Users\\RUNNER~1\\... on CI runners)."""
-    if sys.platform == "win32":
-        import ctypes
-
-        buffer = ctypes.create_unicode_buffer(32_767)
-        length = ctypes.WinDLL("kernel32").GetLongPathNameW(str(tmp_path), buffer, len(buffer))
-        if 0 < length < len(buffer):
-            return Path(buffer.value)
-    return tmp_path
+def key_dir(tmp_path: Path) -> Iterator[Path]:
+    """Where the release's key file is written: tmp_path in long form on Windows (the native library
+    refuses an 8.3 short name, and %TEMP% can be one), and on Linux a private 0700 directory outside
+    /tmp, which the library refuses as untrusted."""
+    with key_directory(tmp_path) as directory:
+        yield directory
 
 
 def native_builder(service: str) -> KeyRingBuilder:
