@@ -3,7 +3,6 @@ KEK provider - on a TPM host, provisioned by this repository's scripts/provision
 
     sudo scripts/provision-linux-test-key.sh
     HKDFGUARD_TEST_SERVICE=com.hkdfguard.integration.test.221 \\
-    HKDFGUARD_TEST_SERVICE_OTHER=com.hkdfguard.integration.test.221.other \\
     uv run pytest packages/hkdfguard-keywrapping-v1/tests/test_linux_native.py
 
 The integration tests in test_keywrapping.py cover what every platform shares; these pin down the exact

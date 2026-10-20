@@ -12,19 +12,22 @@
 #      0440) if there isn't one - an existing secret is never replaced, because that would change
 #      every TPM KEK on this host;
 #   3. writes /etc/hkdfguard/policy.toml requiring the TPM, the derivation secret, and a pinned
-#      TPM Name for each test service (the provisioning allowlist), learning each Name from the
+#      TPM Name for the test service (the provisioning allowlist), learning the Name from the
 #      TPM itself through hkdfguard, run as the test user;
-#   4. runs "hkdfguard provision" for both services, as the test user, to confirm.
+#   4. runs "hkdfguard provision" for the service, as the test user, to confirm.
 #
 # It refuses to overwrite a policy it didn't write. Re-running it is safe: it re-learns the same
-# Names (the KEKs are derived on demand from the TPM's seed and the secret) and rewrites its own
+# Name (the KEK is derived on demand from the TPM's seed and the secret) and rewrites its own
 # policy. It never wraps a DEK and never touches a key file.
 #
 # Then run the native tests from the repository root:
 #
 #   HKDFGUARD_TEST_SERVICE=com.hkdfguard.integration.test.221 \
-#   HKDFGUARD_TEST_SERVICE_OTHER=com.hkdfguard.integration.test.221.other \
 #   uv run pytest
+#
+# The tests' cross-service isolation checks unwrap under a service that is never provisioned. To
+# run them against a second real KEK instead, provision one yourself and name it in
+# HKDFGUARD_TEST_SERVICE_OTHER.
 #
 # Every HkdfGuard port's copy of this script (.NET, Go, Java, Node, Python) writes the same
 # policy under its own marker, and each accepts the others', so one host can run every port's
@@ -40,7 +43,6 @@
 set -euo pipefail
 
 readonly SERVICE="com.hkdfguard.integration.test.221"
-readonly OTHER_SERVICE="${SERVICE}.other"
 readonly TOOL="/usr/bin/hkdfguard"
 readonly TPM_DEVICE="/dev/tpmrm0"
 readonly ETC_DIR="/etc/hkdfguard"
@@ -182,12 +184,10 @@ learn_name() {
 }
 
 write_policy
-note "learning each test service's TPM Name (each call takes about a second)"
+note "learning the test service's TPM Name (this takes about a second)"
 service_name="$(learn_name "${SERVICE}")"
-other_name="$(learn_name "${OTHER_SERVICE}")"
-[[ ${service_name} != "${other_name}" ]] || die "the TPM derived the same key for both services; it is not usable"
 
-write_policy "\"${SERVICE}\" = \"${service_name}\"" "\"${OTHER_SERVICE}\" = \"${other_name}\""
+write_policy "\"${SERVICE}\" = \"${service_name}\""
 if command -v python3 >/dev/null; then
     python3 -c 'import sys, tomllib; tomllib.load(open(sys.argv[1], "rb"))' "${POLICY}" \
         || die "${POLICY} is not valid TOML"
@@ -196,17 +196,14 @@ note "wrote ${POLICY}"
 
 # --- Confirm -----------------------------------------------------------------------------------
 
-for service in "${SERVICE}" "${OTHER_SERVICE}"; do
-    output="$(provision_as_test_user "${service}")" \
-        || die "provision failed for ${service} as ${TEST_USER}:"$'\n'"${output}"
-    note "${service}: provisioned on the TPM"
-done
+output="$(provision_as_test_user "${SERVICE}")" \
+    || die "provision failed for ${SERVICE} as ${TEST_USER}:"$'\n'"${output}"
+note "${SERVICE}: provisioned on the TPM"
 
 cat <<EOF
 
 Done. Run the native integration tests as ${TEST_USER}, from the hkdfguard-python repository root:
 
   HKDFGUARD_TEST_SERVICE=${SERVICE} \\
-  HKDFGUARD_TEST_SERVICE_OTHER=${OTHER_SERVICE} \\
   uv run pytest
 EOF

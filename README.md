@@ -319,8 +319,7 @@ run from the account that runs the tests (`--remove` removes the policy it wrote
 variables it prints:
 
 ```bash
-HKDFGUARD_TEST_SERVICE=com.hkdfguard.integration.test.221 \
-HKDFGUARD_TEST_SERVICE_OTHER=com.hkdfguard.integration.test.221.other uv run pytest
+HKDFGUARD_TEST_SERVICE=com.hkdfguard.integration.test.221 uv run pytest
 ```
 
 **Windows.** Install the HkdfGuard native package, then provision the test KEK
