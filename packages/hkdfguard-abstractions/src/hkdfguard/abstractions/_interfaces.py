@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import os
 from abc import ABC, abstractmethod
 from collections.abc import Buffer
 from dataclasses import dataclass
@@ -10,6 +12,7 @@ from typing import NamedTuple, Self
 
 from hkdfguard.abstractions._buffers import WritableBuffer
 from hkdfguard.abstractions._rules import RefreshFailurePolicy
+from hkdfguard.abstractions._wrapped_key_file import WrappedKeyFile
 
 
 class _Closable(ABC):
@@ -72,6 +75,27 @@ class KeyWrapper(ABC):
 
         :returns: the number of bytes of wrapped key written to ``result``
         """
+
+    def read_key_file(self, path: str | os.PathLike[str], *, verify_permissions: bool = True,
+                      logger: logging.Logger | None = None) -> bytearray:
+        """Reads a key file holding a key this instance wrapped, returning its bytes still wrapped -
+        ready for :meth:`unwrap`. KeyRingBuilder reads every key file through its key wrapper, so a
+        wrapper backed by a native KMS can read through that KMS's own checks (the native library
+        refuses a file another account could have replaced, or one holding what looks like an
+        unwrapped key). The default reads it with ordinary file I/O (:meth:`WrappedKeyFile.read`),
+        applying the POSIX permission rule unless ``verify_permissions`` is off, and logging to
+        ``logger`` where there is no such rule; a wrapper whose own checks can't be turned off ignores
+        both.
+
+        :returns: the wrapped key the file holds; the caller owns it
+        :raises FileNotFoundError: the file, or a folder in its path, does not exist
+        :raises PermissionError: this account may not read the file, or the key wrapper doesn't trust
+            where it lives
+        :raises InvalidKeyFileError: the file isn't a wrapped key - empty, the wrong size, or not a
+            valid payload (an ``OSError``)
+        :raises OSError: the file can't be read for another reason
+        """
+        return WrappedKeyFile.read(path, verify_permissions=verify_permissions, logger=logger)
 
 
 class CryptoProvider(_Closable):

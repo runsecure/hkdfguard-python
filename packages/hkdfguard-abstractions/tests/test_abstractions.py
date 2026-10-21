@@ -1,20 +1,24 @@
 from __future__ import annotations
 
 from collections.abc import Buffer, Callable
+from pathlib import Path
 
 import pytest
 from hkdfguard.abstractions import (
     ArrayUtility,
     DataEncryptionKey,
+    InvalidKeyFileError,
     KeyNotFoundError,
     KeyRing,
     KeyTrackingValue,
+    KeyWrapper,
     ProtectedCacheBase,
     ProtectedConfigurationPurpose,
     RefreshFailurePolicy,
     ServiceNames,
     Utf8,
     VersionedKey,
+    WrappedKeyFile,
     WrappedKeyLimits,
     WritableBuffer,
 )
@@ -462,3 +466,35 @@ def test_key_versions_accept_exactly_the_signed_32_bit_range() -> None:
         assert not KeyVersions.is_valid(version)
         with pytest.raises(ValueError, match="version must be between"):
             KeyVersions.require_valid(version)
+
+
+# --- Key files ----------------------------------------------------------------------------------
+
+
+class _MinimalKeyWrapper(KeyWrapper):
+    def wrap(self, plaintext: Buffer, result: WritableBuffer) -> int:
+        raise NotImplementedError
+
+    def unwrap(self, wrapped: Buffer, result: WritableBuffer) -> int:
+        raise NotImplementedError
+
+    def generate_and_wrap(self, result: WritableBuffer) -> int:
+        raise NotImplementedError
+
+
+def test_a_key_wrapper_reads_key_files_with_the_default_read_unless_it_has_its_own(tmp_path: Path) -> None:
+    path = tmp_path / "dek.bin"
+    path.write_bytes(b"\x01wrapped")
+
+    assert _MinimalKeyWrapper().read_key_file(path, verify_permissions=False) == WrappedKeyFile.read(path, verify_permissions=False) \
+        == bytearray(b"\x01wrapped")
+
+
+@pytest.mark.parametrize(("size", "message"), [(0, "is empty"), (WrappedKeyLimits.MAX_BYTES + 1, "larger than 512 bytes")])
+def test_the_default_read_refuses_an_empty_or_oversized_file_as_invalid_data(tmp_path: Path, size: int, message: str) -> None:
+    path = tmp_path / "dek.bin"
+    path.write_bytes(b"\x7f" * size)
+
+    with pytest.raises(InvalidKeyFileError, match=message):
+        _MinimalKeyWrapper().read_key_file(path, verify_permissions=False)
+    assert issubclass(InvalidKeyFileError, OSError)
