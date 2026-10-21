@@ -143,7 +143,8 @@ class KeyRing(abstractions.KeyRing):
 
     A ring built with ephemeral keys also rotates on a schedule (see
     :meth:`KeyRingBuilder.with_ephemeral_key_rotation`): every interval it adds a fresh ephemeral key
-    at the current version + 1. A superseded ephemeral key stays registered for
+    at the current version + 1 (the builder refuses a key file above every ephemeral version, which
+    the first rotation would supersede). A superseded ephemeral key stays registered for
     :attr:`ephemeral_key_retention`, then the next rotation closes and removes it. Keys read from key
     files are never retired. close stops the rotation before closing any key.
     """

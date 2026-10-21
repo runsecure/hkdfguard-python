@@ -1,6 +1,6 @@
 [project]
 name = "hkdfguard-diagnostics"
-version = "1.0.0.dev0"
+version = "0.9.0"
 description = "Shared OpenTelemetry spans, metrics and log messages for every HkdfGuard component."
 license = "MPL-2.0"
 readme = "README.md"

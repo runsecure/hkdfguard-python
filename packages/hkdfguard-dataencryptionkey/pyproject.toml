@@ -1,6 +1,6 @@
 [project]
 name = "hkdfguard-dataencryptionkey"
-version = "1.0.0.dev0"
+version = "0.9.0"
 description = "Versioned key rings of data encryption keys, string data protectors, and the enc::v{version}::{base64} format."
 license = "MPL-2.0"
 readme = "README.md"

@@ -1,6 +1,6 @@
 [project]
 name = "hkdfguard-options"
-version = "1.0.0.dev0"
+version = "0.9.0"
 description = "Plain-data, validated key ring settings that a configuration file can supply, applied onto a KeyRingBuilder."
 license = "MPL-2.0"
 readme = "README.md"

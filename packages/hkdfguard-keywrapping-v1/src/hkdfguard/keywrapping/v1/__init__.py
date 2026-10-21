@@ -72,18 +72,18 @@ class NativeHkdfKeyWrapperV1(KeyWrapper):
         self._library = library if library is not None else native_library()
 
     def wrap(self, plaintext: Buffer, result: WritableBuffer) -> int:
-        return self._complete(lambda: self._library.wrap_dek(self._service_name, plaintext, result), "wrap")
+        return self._complete(lambda: self._library.wrap_dek(self._service_name, plaintext, result), "wrap", result)
 
     def unwrap(self, wrapped: Buffer, result: WritableBuffer) -> int:
         try:
-            return self._complete(lambda: self._library.unwrap_dek(self._service_name, wrapped, result), "unwrap")
+            return self._complete(lambda: self._library.unwrap_dek(self._service_name, wrapped, result), "unwrap", result)
         except BaseException:
             # Whatever a failed call left in the DEK buffer is erased.
             ArrayUtility.zero_memory(result)
             raise
 
     def generate_and_wrap(self, result: WritableBuffer) -> int:
-        return self._complete(lambda: self._library.generate_and_wrap_dek(self._service_name, result), "generate-and-wrap")
+        return self._complete(lambda: self._library.generate_and_wrap_dek(self._service_name, result), "generate-and-wrap", result)
 
     def read_key_file(self, path: str | os.PathLike[str], *, verify_permissions: bool = True,
                       logger: logging.Logger | None = None) -> bytearray:
@@ -103,9 +103,15 @@ class NativeHkdfKeyWrapperV1(KeyWrapper):
         """
         return bytearray(self._library.open_file(path))
 
-    def _complete(self, call: Callable[[], KmsResult], operation: str) -> int:
+    def _complete(self, call: Callable[[], KmsResult], operation: str, result: WritableBuffer) -> int:
         status, written = call()
         if status == OK:
+            # A success claiming more bytes than result holds (or a negative count) is refused rather than trusted.
+            capacity = len(memoryview(result).cast("B"))
+            if not 0 <= written <= capacity:
+                ArrayUtility.zero_memory(result)
+                raise CryptographicError(f"Native KMS {operation} for service '{self._service_name}' reported {written} bytes written "
+                                         f"into a {capacity}-byte buffer.")
             return written
 
         # Name the status's meaning when it is known - "-18" alone tells an operator nothing.

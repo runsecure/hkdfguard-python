@@ -195,6 +195,34 @@ def test_generate_and_wrap_delegates_and_failures_raise() -> None:
         NativeHkdfKeyWrapperV1("service.e", library).generate_and_wrap(bytearray(16))
 
 
+@pytest.mark.parametrize("written", [-1, 17])
+@pytest.mark.parametrize("operation", ["wrap", "unwrap", "generate-and-wrap"])
+def test_a_success_reporting_a_written_count_outside_the_buffer_is_refused_and_zeroes_the_result(operation: str, written: int) -> None:
+    class Miscounting(FakeKmsLibrary):
+        def wrap_dek(self, service: str, dek: Buffer, destination: WritableBuffer) -> KmsResult:
+            return super().wrap_dek(service, dek, destination)._replace(bytes_written=written)
+
+        def unwrap_dek(self, service: str, wrapped: Buffer, destination: WritableBuffer) -> KmsResult:
+            return super().unwrap_dek(service, wrapped, destination)._replace(bytes_written=written)
+
+        def generate_and_wrap_dek(self, service: str, destination: WritableBuffer) -> KmsResult:
+            return super().generate_and_wrap_dek(service, destination)._replace(bytes_written=written)
+
+    library = Miscounting()
+    library.generate_payload = bytes([7] * 5)
+    wrapper = NativeHkdfKeyWrapperV1("service.f", library)
+    calls: dict[str, Callable[[bytearray], int]] = {
+        "wrap": lambda result: wrapper.wrap(bytes([7] * 5), result),
+        "unwrap": lambda result: wrapper.unwrap(bytes([7] * 5), result),
+        "generate-and-wrap": wrapper.generate_and_wrap,
+    }
+    result = bytearray(16)
+
+    with pytest.raises(CryptographicError, match=rf"{operation} for service 'service\.f' reported {written} bytes written into a 16-byte buffer\."):
+        calls[operation](result)
+    assert result == bytearray(16)
+
+
 def test_a_library_that_fails_to_load_raises_and_still_zeroes_an_unwrap_buffer() -> None:
     library = FakeKmsLibrary()
     library.throw_on_call = PermissionError("not signed by the HkdfGuard publisher")
@@ -318,6 +346,17 @@ def test_open_file_returns_exactly_the_bytes_the_native_library_read() -> None:
 
     assert type(data) is bytes and data == bytes(range(132))
     assert library.last_open_file_path == "C:\\keys\\dek.bin"
+
+
+@pytest.mark.parametrize("read", [-1, WrappedKeyLimits.MAX_BYTES + 1])
+def test_open_file_refuses_a_read_count_outside_its_buffer(read: int) -> None:
+    class MisreportingLibrary(FakeKmsLibrary):
+        def _open_file(self, path: str, destination: WritableBuffer) -> KmsResult:
+            super()._open_file(path, destination)
+            return KmsResult(OK, read)
+
+    with pytest.raises(CryptographicError, match=f"reported {read} bytes read"):
+        MisreportingLibrary().open_file("C:\\keys\\dek.bin")
 
 
 def test_open_file_passes_a_buffer_large_enough_for_every_platforms_wrapped_dek() -> None:
