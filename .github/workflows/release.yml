@@ -2,12 +2,12 @@ name: Release
 
 # Publishes the seven hkdfguard-* distributions together.
 #
-#   * Push a tag "vX.Y.Z" that is on main: tests, builds, checks, and publishes to PyPI.
+#   * Push a tag "vX.Y.Z" that is on main: tests, builds, checks, and creates a GitHub Release with
+#     the wheels and sdists attached, signed with Sigstore build provenance.
 #     The tag must equal the version in every packages/*/pyproject.toml.
-#   * Run manually (Actions > Release > Run workflow): the same, but publishes to TestPyPI.
+#   * Run manually (Actions > Release > Run workflow): tests, builds and checks only; nothing is published.
 #
-# Nothing here holds a token. PyPI and TestPyPI each trust this workflow file and the matching
-# environment below (PyPI "trusted publishing"), and issue a short-lived credential per run.
+# Nothing is published to PyPI or TestPyPI. Nothing here holds a token.
 
 on:
   push:
@@ -57,42 +57,36 @@ jobs:
             dist/*.tar.gz
           if-no-files-found: error
 
-  publish-testpypi:
-    name: publish to TestPyPI
-    if: github.event_name == 'workflow_dispatch'
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: testpypi
-      url: https://test.pypi.org/project/hkdfguard-abstractions/
-    permissions:
-      id-token: write # the trusted-publishing credential; nothing else
-    steps:
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: dist
-          path: dist
-      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
-        with:
-          repository-url: https://test.pypi.org/legacy/
-          packages-dir: dist
-          skip-existing: true # a re-run of the same version is not an error on the test index
-
-  publish-pypi:
-    name: publish to PyPI
+  github-release:
+    name: GitHub release with signed provenance
     if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
     needs: build
     runs-on: ubuntu-latest
     environment:
-      name: pypi # give this environment required reviewers: it is the last gate before the public index
-      url: https://pypi.org/project/hkdfguard-abstractions/
+      name: github-release
     permissions:
-      id-token: write # the trusted-publishing credential; nothing else
+      contents: write # create the release and upload the files
+      id-token: write # Sigstore signs with this run's OIDC identity
+      attestations: write # store the signed provenance with the repository
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: dist
           path: dist
-      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+      # Signs every file with a keyless Sigstore certificate naming this repository, workflow and
+      # tag. Verify a download with: gh attestation verify <file> --repo runsecure/hkdfguard-python
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          packages-dir: dist
+          subject-path: |
+            dist/*.whl
+            dist/*.tar.gz
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          # A version with a pre-release segment (dev, a, b, rc) is marked as a pre-release.
+          prerelease=""
+          if [[ "${TAG}" =~ (dev|a|b|rc)[0-9]*$ ]]; then prerelease="--prerelease"; fi
+          gh release create "${TAG}" dist/*.whl dist/*.tar.gz \
+            --repo "${GITHUB_REPOSITORY}" --verify-tag --title "${TAG}" --generate-notes ${prerelease}
