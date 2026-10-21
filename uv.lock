@@ -241,7 +241,7 @@ wheels = [
 
 [[package]]
 name = "hkdfguard-abstractions"
-version = "1.0.0.dev0"
+version = "0.9.0"
 source = { editable = "packages/hkdfguard-abstractions" }
 dependencies = [
     { name = "hkdfguard-diagnostics" },
@@ -252,7 +252,7 @@ requires-dist = [{ name = "hkdfguard-diagnostics", editable = "packages/hkdfguar
 
 [[package]]
 name = "hkdfguard-cache"
-version = "1.0.0.dev0"
+version = "0.9.0"
 source = { editable = "packages/hkdfguard-cache" }
 dependencies = [
     { name = "hkdfguard-abstractions" },
@@ -267,7 +267,7 @@ requires-dist = [
 
 [[package]]
 name = "hkdfguard-cryptoprovider-aesgcm256"
-version = "1.0.0.dev0"
+version = "0.9.0"
 source = { editable = "packages/hkdfguard-cryptoprovider-aesgcm256" }
 dependencies = [
     { name = "cryptography" },
@@ -282,7 +282,7 @@ requires-dist = [
 
 [[package]]
 name = "hkdfguard-dataencryptionkey"
-version = "1.0.0.dev0"
+version = "0.9.0"
 source = { editable = "packages/hkdfguard-dataencryptionkey" }
 dependencies = [
     { name = "hkdfguard-abstractions" },
@@ -293,7 +293,7 @@ requires-dist = [{ name = "hkdfguard-abstractions", editable = "packages/hkdfgua
 
 [[package]]
 name = "hkdfguard-diagnostics"
-version = "1.0.0.dev0"
+version = "0.9.0"
 source = { editable = "packages/hkdfguard-diagnostics" }
 dependencies = [
     { name = "opentelemetry-api" },
@@ -304,7 +304,7 @@ requires-dist = [{ name = "opentelemetry-api", specifier = ">=1.45" }]
 
 [[package]]
 name = "hkdfguard-keywrapping-v1"
-version = "1.0.0.dev0"
+version = "0.9.0"
 source = { editable = "packages/hkdfguard-keywrapping-v1" }
 dependencies = [
     { name = "cryptography" },
@@ -319,7 +319,7 @@ requires-dist = [
 
 [[package]]
 name = "hkdfguard-options"
-version = "1.0.0.dev0"
+version = "0.9.0"
 source = { editable = "packages/hkdfguard-options" }
 dependencies = [
     { name = "hkdfguard-abstractions" },

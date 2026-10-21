@@ -1,6 +1,6 @@
 [project]
 name = "hkdfguard-cache"
-version = "1.0.0.dev0"
+version = "0.9.0"
 description = "Concurrent name-to-encrypted-value caches that follow key ring rotation and bind every value to its name."
 license = "MPL-2.0"
 readme = "README.md"
