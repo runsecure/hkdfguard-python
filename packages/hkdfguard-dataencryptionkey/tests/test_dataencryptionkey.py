@@ -597,6 +597,19 @@ def test_key_files_alone_or_rotation_off_never_rotate(tmp_path: Path) -> None:
         assert len(factory.ephemeral_expiries) == 1
 
 
+def test_a_key_file_above_every_ephemeral_version_is_refused_before_any_read_unless_rotation_is_off(tmp_path: Path) -> None:
+    wrapper = FileReadingKeyWrapper()
+    factory = RecordingFactory()
+
+    # The first rotation would land above the key file and take over as current, under a key gone after a restart.
+    with pytest.raises(RuntimeError, match=r"Key file version 5 is above every ephemeral version.*call without_ephemeral_key_rotation\(\)\."):
+        wrapper_builder(wrapper, factory).with_key_file(5, tmp_path / "v5.bin").with_ephemeral_key(1).with_ephemeral_key(2).build()
+    assert wrapper.reads == [] and factory.providers == []
+
+    with wrapper_builder(wrapper, factory).with_key_file(5, tmp_path / "v5.bin").with_ephemeral_key(1).without_ephemeral_key_rotation().build() as ring:
+        assert ring.current_version == 5 and ring.ephemeral_key_rotation_interval is None
+
+
 def test_rotated_keys_get_the_rings_expiry_and_policy() -> None:
     factory = RecordingFactory()
     with builder(factory).with_max_refresh_failures(7).with_ephemeral_key(1)._with_ephemeral_key_rotation_for_testing(FAST).build():
