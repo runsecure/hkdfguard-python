@@ -32,7 +32,9 @@ class KeyRingBuilder:
 
     Key files are rotated by deployment: each release brings its own. Ephemeral keys are rotated
     here: a ring with any ephemeral key adds a fresh one as its current version every
-    :attr:`ephemeral_key_rotation_interval` (24 hours unless configured otherwise).
+    :attr:`ephemeral_key_rotation_interval` (24 hours unless configured otherwise). Each rotation
+    lands above whatever is current, so while rotation is on, build refuses a key file registered
+    above every ephemeral version: the first rotation would replace it as the current version.
     """
 
     DEFAULT_EPHEMERAL_KEY_ROTATION_INTERVAL: Final = timedelta(hours=24)
@@ -72,7 +74,8 @@ class KeyRingBuilder:
         return self
 
     def without_ephemeral_key_rotation(self) -> Self:
-        """The startup ephemeral key stays current until the process restarts."""
+        """The startup ephemeral key stays current until the process restarts. Also lets a key file be
+        registered above every ephemeral version, which build otherwise refuses."""
         self.ephemeral_key_rotation_interval = None
         return self
 
@@ -183,7 +186,8 @@ class KeyRingBuilder:
         Every key file is read through the key wrapper (:meth:`KeyWrapper.read_key_file`), so a native
         KMS reads its own key files, with its own checks on who could have written them.
 
-        :raises RuntimeError: no key wrapper, factory, key refresh interval, or keys were configured
+        :raises RuntimeError: no key wrapper, factory, key refresh interval, or keys were configured,
+            or rotation is on and a key file is registered above every ephemeral version
         :raises FileNotFoundError: a key file, or a folder in its path, does not exist
         :raises PermissionError: a key file may not be read, or it or a directory above it fails the
             key wrapper's permission check
@@ -199,6 +203,15 @@ class KeyRingBuilder:
             raise RuntimeError("At least one key file or ephemeral key is required - call with_key_file or with_ephemeral_key first.")
         if self.key_refresh_interval is None:
             raise RuntimeError("A key refresh interval is required - call with_key_refresh_interval first.")
+        if self._key_files and self._ephemeral_versions and self.ephemeral_key_rotation_interval is not None:
+            # Rotation adds each key at the current version + 1, so the first one would supersede a key
+            # file above every ephemeral version, and everything encrypted after it would be lost on restart.
+            highest_key_file = max(self._key_files)
+            if highest_key_file > max(self._ephemeral_versions):
+                raise RuntimeError(f"Key file version {highest_key_file} is above every ephemeral version, so the first scheduled rotation "
+                                   "would supersede it as the current version and new values would be encrypted under a key that does not "
+                                   "survive a restart. Register the ephemeral key at a version above every key file, or call "
+                                   "without_ephemeral_key_rotation().")
 
         wrapper, factory, interval, failures = self._key_wrapper, self._factory, self.key_refresh_interval, self.max_refresh_failures
         ring = KeyRing(self._format_provider)

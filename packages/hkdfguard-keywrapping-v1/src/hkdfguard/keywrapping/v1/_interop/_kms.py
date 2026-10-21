@@ -11,7 +11,7 @@ from collections.abc import Buffer, Callable
 from enum import Enum
 from typing import Any, Final, NamedTuple
 
-from hkdfguard.abstractions import InvalidKeyFileError, WrappedKeyLimits, WritableBuffer
+from hkdfguard.abstractions import ArrayUtility, CryptographicError, InvalidKeyFileError, WrappedKeyLimits, WritableBuffer
 
 DEK_LENGTH: Final = 32
 OK: Final = 0
@@ -202,6 +202,12 @@ class AbstractHkdfGuardKmsLibrary(ABC):
         buffer = bytearray(WrappedKeyLimits.MAX_BYTES)
         status, read = self._open_file(text, buffer)
         if status == OK:
+            # A count outside the buffer would slice the wrong bytes (a negative one counts from
+            # the end), so a library reporting one is refused rather than trusted.
+            if not 0 <= read <= len(buffer):
+                ArrayUtility.zero_memory(buffer)
+                raise CryptographicError(f"Native KMS open_file for '{text}' reported {read} bytes read into a "
+                                         f"{len(buffer)}-byte buffer; the result was discarded.")
             return bytes(buffer[:read])
 
         message = (f"Key file '{text}' was refused by the native library with status {status} "

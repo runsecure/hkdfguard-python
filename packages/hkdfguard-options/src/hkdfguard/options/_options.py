@@ -80,7 +80,8 @@ class HkdfGuardOptions:
     combined with :attr:`disable_ephemeral_key_rotation`."""
 
     disable_ephemeral_key_rotation: bool = False
-    """True turns scheduled rotation off: the startup ephemeral key stays current until restart."""
+    """True turns scheduled rotation off: the startup ephemeral key stays current until restart. Required
+    for a key file above every ephemeral key, which the first rotation would otherwise replace as current."""
 
     ephemeral_key_retention_hours: int | None = None
     """Hours a superseded ephemeral key stays registered for decryption after a rotation replaces
@@ -121,9 +122,10 @@ class HkdfGuardOptions:
 
     def validate(self) -> list[str]:
         """Checks these options against the constraints :class:`KeyRingBuilder` enforces, plus what
-        :meth:`apply_to` and build need: a valid service name, every key file having a path, and
-        versions that don't collide across key files and ephemeral keys - caught here, at
-        configuration time, with a much clearer message than a failure deep inside build.
+        :meth:`apply_to` and build need: a valid service name, every key file having a path,
+        versions that don't collide across key files and ephemeral keys, and no key file above every
+        ephemeral key while rotation is on - caught here, at configuration time, with a much clearer
+        message than a failure deep inside build.
 
         :returns: every failure, or an empty list if these options are valid
         """
@@ -165,6 +167,14 @@ class HkdfGuardOptions:
         versions = Counter([key_file.version for key_file in self.key_files] + list(self.ephemeral_keys))
         failures.extend(f"Version {version} is registered more than once across key_files/ephemeral_keys."
                         for version, count in versions.items() if count > 1)
+
+        if self.key_files and self.ephemeral_keys and not self.disable_ephemeral_key_rotation:
+            highest_key_file = max(key_file.version for key_file in self.key_files)
+            if highest_key_file > max(self.ephemeral_keys):
+                failures.append(f"key_files version {highest_key_file} is above every ephemeral key version, so the first scheduled rotation "
+                                "would supersede it as the current version and new values would be encrypted under a key that does not "
+                                "survive a restart. Register the ephemeral key at a version above every key file, or set "
+                                "disable_ephemeral_key_rotation.")
 
         return failures
 

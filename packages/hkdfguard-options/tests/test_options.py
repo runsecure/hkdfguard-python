@@ -194,6 +194,19 @@ def test_unique_versions_across_key_files_and_ephemeral_keys_succeed() -> None:
     assert options.validate() == []
 
 
+def test_a_key_file_above_every_ephemeral_key_fails_while_rotation_is_on() -> None:
+    options = valid_options()
+    options.key_files = [KeyFileOptions(5, "/tmp/dek.bin")]
+    assert any("key_files version 5 is above every ephemeral key version" in f for f in options.validate())
+
+
+def test_a_key_file_above_every_ephemeral_key_succeeds_with_rotation_disabled() -> None:
+    options = valid_options()
+    options.key_files = [KeyFileOptions(5, "/tmp/dek.bin")]
+    options.disable_ephemeral_key_rotation = True
+    assert options.validate() == []
+
+
 @pytest.mark.parametrize("failures", [0, -1])
 def test_max_refresh_failures_below_one_fails(failures: int) -> None:
     options = valid_options()
