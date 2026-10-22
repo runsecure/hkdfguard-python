@@ -129,14 +129,6 @@ class AesGcmPipelineDataProtector(PipelineDataProtector):
                 raise KeyNotFoundError(f"No key is registered for version {value.key_version}.")
             return session.decrypt(value.value, result, aad=aad)
 
-    def decrypt_to_str(self, encrypted: str, secret_identifier: str) -> str:
-        buffer = bytearray(self.get_max_decrypted_length(encrypted))
-        try:
-            written = self.decrypt(encrypted, secret_identifier, buffer)
-            return str(memoryview(buffer)[:written], "utf-8", "replace")
-        finally:
-            ArrayUtility.zero_memory(buffer)
-
     def get_max_decrypted_length(self, encrypted: str) -> int:
         return self._format_provider.get_max_decrypted_length(encrypted)
 

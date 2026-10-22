@@ -96,8 +96,8 @@ silently fall back to a default.
   zeroed; immutable `bytes` are refused wherever a plaintext would need zeroing. AES-GCM reads
   and writes the caller's buffers directly (`encrypt_into`/`decrypt_into`) rather than through
   immutable copies. The plaintext and result buffers of an encrypt must not overlap: it is refused
-  with `ValueError`, since encrypting in place would destroy the plaintext. Decrypt writes UTF-8 bytes and returns the count; `decrypt_to_str` is a convenience
-  for when an immutable `str` is acceptable. AAD is the keyword-only argument `aad=`. A `str`
+  with `ValueError`, since encrypting in place would destroy the plaintext. Decrypt writes UTF-8 bytes into the caller's buffer and returns the count; as in
+  every other port, nothing decrypts to an immutable `str`, so decode only what you must. AAD is the keyword-only argument `aad=`. A `str`
   plaintext is encoded into a `bytearray` that is zeroed, but the `str` itself and the temporary
   `bytes` CPython builds while encoding it can't be: hold a secret in a buffer from the start if
   it must not linger.
