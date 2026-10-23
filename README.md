@@ -52,6 +52,27 @@ with (KeyRingBuilder()
     ...  # use result[:length], then zero it
 ```
 
+## Encryption budget
+
+With random 96-bit nonces, AES-GCM is safe for about 2^32 encryptions under one key (NIST
+SP 800-38D). Each crypto provider counts the encryptions under its key, warns at 2^28, and
+refuses to encrypt past 2^31 (`AesGcmCryptoProvider.MAX_ENCRYPTIONS_PER_KEY`). Decryption is never limited.
+
+That count is kept per process, by design. It is exact for the key an application should encrypt
+with at runtime: an ephemeral key, generated at startup and held only in that process's memory, so
+no other process or restart ever adds to its use. Key files are different. They carry what the
+deployment pipeline encrypted and are meant to be decrypted at runtime; every process that loads a
+key file, and every restart, starts a fresh count for it.
+
+**For encrypt operations, add an ephemeral key** at a version above every key file
+(`KeyRingBuilder.with_ephemeral_key(2)` beside `with_key_file(1, ...)`). New values are then encrypted under it, while the pipeline's values still decrypt
+under their key files. A value encrypted under an ephemeral key can't be decrypted once the process
+exits, which suits caches and other in-process data; never persist it.
+
+If an application does encrypt values that must outlive the process under a key file, its
+encryptions under that file are not counted together across instances and restarts. Bound them by
+deploying a new key file at a higher version regularly.
+
 ## Configuration
 
 `hkdfguard-options` lets a configuration file describe the ring. `HkdfGuardOptions.from_mapping`
