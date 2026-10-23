@@ -459,6 +459,9 @@ def test_builder_configuration_and_its_limits() -> None:
     assert b.with_fail_open_on_refresh_failure().max_refresh_failures is None
     with pytest.raises(ValueError):
         b.with_max_refresh_failures(0)
+    with pytest.raises(ValueError, match="between 1 and 100"):
+        b.with_max_refresh_failures(101)
+    assert KeyRingBuilder().with_max_refresh_failures(100).max_refresh_failures == 100
     with pytest.raises(ValueError, match="already registered"):
         KeyRingBuilder().with_key_file(1, "a.bin").with_key_file(1, "b.bin")
 

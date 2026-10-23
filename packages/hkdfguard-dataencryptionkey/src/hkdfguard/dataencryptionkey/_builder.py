@@ -120,9 +120,10 @@ class KeyRingBuilder:
         return self
 
     def with_max_refresh_failures(self, max_refresh_failures: int) -> Self:
-        """:raises ValueError: below 1"""
-        if max_refresh_failures < 1:
-            raise ValueError(f"max_refresh_failures must be at least 1; it is {max_refresh_failures}.")
+        """:raises ValueError: not between 1 and :attr:`RefreshFailurePolicy.MAX_ALLOWED_REFRESH_FAILURES` (100)"""
+        limit = RefreshFailurePolicy.MAX_ALLOWED_REFRESH_FAILURES
+        if not 1 <= max_refresh_failures <= limit:
+            raise ValueError(f"max_refresh_failures must be between 1 and {limit}; it is {max_refresh_failures}.")
         self.max_refresh_failures = max_refresh_failures
         return self
 

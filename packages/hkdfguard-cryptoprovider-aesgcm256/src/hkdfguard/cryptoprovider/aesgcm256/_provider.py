@@ -32,8 +32,9 @@ _DEFAULT_LOGGER: Final = logging.getLogger("hkdfguard.cryptoprovider.aesgcm256")
 def _validate(expiry_seconds: int, max_refresh_failures: int | None) -> None:
     if not 1 <= expiry_seconds <= 300:
         raise ValueError(f"expiry_seconds must be between 1 and 300; it is {expiry_seconds}.")
-    if max_refresh_failures is not None and max_refresh_failures < 1:
-        raise ValueError(f"max_refresh_failures must be at least 1; it is {max_refresh_failures}.")
+    limit = RefreshFailurePolicy.MAX_ALLOWED_REFRESH_FAILURES
+    if max_refresh_failures is not None and not 1 <= max_refresh_failures <= limit:
+        raise ValueError(f"max_refresh_failures must be between 1 and {limit}; it is {max_refresh_failures}.")
 
 
 def _reveal(key_wrapper: KeyWrapper, wrapped: Buffer, budget: EncryptionBudget | None, logger: logging.Logger) -> AesGcmCryptoSession:
@@ -165,7 +166,7 @@ class AesGcmCryptoProvider(CryptoProvider):
             on and zeroed when it closes; other buffers are copied.
         :param expiry_seconds: how long each session is used before the next refresh, 1-300
         :param max_refresh_failures: consecutive failed refreshes tolerated before failing closed,
-            at least 1; ``None`` to fail open
+            1 to :attr:`RefreshFailurePolicy.MAX_ALLOWED_REFRESH_FAILURES` (100); ``None`` to fail open
         :param logger: receives an error per failed refresh, a critical entry when key access is
             suspended, an info entry when it resumes, and a warning near the encryption limit;
             ``None`` for the ``hkdfguard.cryptoprovider.aesgcm256`` logger

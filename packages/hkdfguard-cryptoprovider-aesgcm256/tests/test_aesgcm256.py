@@ -371,10 +371,16 @@ def test_create_refuses_an_expiry_out_of_range_before_any_unwrap(expiry: int) ->
     assert wrapper.unwrap_calls == 0
 
 
-@pytest.mark.parametrize("failures", [0, -1])
-def test_create_refuses_max_refresh_failures_below_one(failures: int) -> None:
-    with pytest.raises(ValueError):
+@pytest.mark.parametrize("failures", [0, -1, 101, 2**31])
+def test_create_refuses_max_refresh_failures_outside_one_to_one_hundred(failures: int) -> None:
+    with pytest.raises(ValueError, match="between 1 and 100"):
         create(FakeKeyWrapper(), max_refresh_failures=failures)
+
+
+def test_create_accepts_the_largest_allowed_max_refresh_failures() -> None:
+    assert RefreshFailurePolicy.MAX_ALLOWED_REFRESH_FAILURES == 100
+    with create(FakeKeyWrapper(), max_refresh_failures=100) as provider:
+        assert provider.max_refresh_failures == 100
 
 
 @pytest.mark.parametrize("written", [0, 16, 31, 33])

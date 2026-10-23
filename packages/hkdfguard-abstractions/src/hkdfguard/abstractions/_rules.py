@@ -21,6 +21,11 @@ class RefreshFailurePolicy:
 
     DEFAULT_MAX_REFRESH_FAILURES: Final = 3
 
+    MAX_ALLOWED_REFRESH_FAILURES: Final = 100
+    """The largest fail-closed limit accepted. 100 failures at the longest, 300-second refresh interval is
+    about 8 h 20 min before a revoked KEK suspends key access; a larger value would quietly turn
+    fail-closed into fail-open. To fail open, say so explicitly with ``None``."""
+
 
 class WrappedKeyLimits:
     """Size limits for a wrapped DEK - the bytes a key file holds and a key wrapper produces."""

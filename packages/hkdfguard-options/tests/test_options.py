@@ -294,6 +294,16 @@ def test_validate_reports_every_failure_at_once() -> None:
     assert len(failures) == 4  # service name, interval, max failures, and no keys
 
 
+@pytest.mark.parametrize(("failures", "valid"), [(1, True), (100, True), (0, False), (101, False)])
+def test_max_refresh_failures_must_be_from_one_to_one_hundred(failures: int, valid: bool) -> None:
+    options = valid_options()
+    options.max_refresh_failures = failures
+    problems = options.validate()
+    assert (problems == []) is valid
+    if not valid:
+        assert problems == ["max_refresh_failures must be between 1 and 100."]
+
+
 def test_require_valid_returns_the_same_options() -> None:
     options = valid_options()
     assert options.require_valid() is options
