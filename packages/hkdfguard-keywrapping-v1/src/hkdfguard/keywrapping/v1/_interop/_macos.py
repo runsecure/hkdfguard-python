@@ -40,6 +40,11 @@ class MacOsNativeLibraryLoader:
     """
 
     FILE_NAME: Final = "libhkdfguard.dylib"
+    REFUSED_DYLD_VARIABLES: Final = ("DYLD_INSERT_LIBRARIES", "DYLD_FRAMEWORK_PATH", "DYLD_VERSIONED_LIBRARY_PATH",
+                                     "DYLD_VERSIONED_FRAMEWORK_PATH", "DYLD_IMAGE_SUFFIX")
+    """The dyld variables whose presence alone refuses the load: each makes dyld inject code into this process,
+    or load another file in place of a library it names - including the frameworks the HkdfGuard native library
+    calls with every DEK. None is set on a production host."""
     SYSTEM_DIRECTORY: Final = "/Library/Application Support/HkdfGuard/v1"
     USER_DIRECTORY_UNDER_HOME: Final = ".hkdfguard/v1"
     TEAM_ID: Final = "MFW3T8R8J3"
@@ -142,7 +147,17 @@ class MacOsNativeLibraryLoader:
 
     @classmethod
     def refuse_shadowing(cls, get_environment_variable: Callable[[str], str | None], exists: Callable[[str], bool]) -> None:
-        """Refuses before anything is loaded if a DYLD_LIBRARY_PATH directory holds a :attr:`FILE_NAME`."""
+        """Refuses before anything is loaded if one of :attr:`REFUSED_DYLD_VARIABLES` is set, or a
+        DYLD_LIBRARY_PATH directory holds a :attr:`FILE_NAME`.
+
+        A guard against a misconfigured environment, not against whoever controls it: dyld acts on these
+        variables when the process starts, so code they injected has already run - and can hide - by the
+        time this looks. Running the host with the Hardened Runtime, which makes dyld ignore them, is what
+        keeps that code out."""
+        for name in cls.REFUSED_DYLD_VARIABLES:
+            if get_environment_variable(name):
+                raise PermissionError(f"{name} is set, so dyld may inject code into this process or substitute a library the HkdfGuard "
+                                      f"native library uses; refusing to load it. Unset {name}.")
         search_path = get_environment_variable("DYLD_LIBRARY_PATH")
         if not search_path:
             return

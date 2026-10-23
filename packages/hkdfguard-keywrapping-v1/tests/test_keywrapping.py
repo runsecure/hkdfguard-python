@@ -931,13 +931,23 @@ def test_the_code_requirement_pins_the_hkdfguard_team_and_any_failure_is_refused
 
 def test_dyld_library_path_shadowing_is_refused_and_only_that_variable_is_read() -> None:
     for search_path in (None, "", "/opt/lib:/usr/local/lib"):
-        MacOsNativeLibraryLoader.refuse_shadowing(lambda n, s=search_path: s, lambda p: False)  # type: ignore[misc]
+        MacOsNativeLibraryLoader.refuse_shadowing(lambda n, s=search_path: s if n == "DYLD_LIBRARY_PATH" else None, lambda p: False)  # type: ignore[misc]
     for search_path in ("/tmp/decoy", "/opt/lib:/tmp/decoy/:/usr/local/lib"):
         with pytest.raises(PermissionError, match=r"/tmp/decoy/libhkdfguard\.dylib.*DYLD_LIBRARY_PATH"):
-            MacOsNativeLibraryLoader.refuse_shadowing(lambda n, s=search_path: s, lambda p: p == "/tmp/decoy/libhkdfguard.dylib")  # type: ignore[misc]
+            MacOsNativeLibraryLoader.refuse_shadowing(lambda n, s=search_path: s if n == "DYLD_LIBRARY_PATH" else None,  # type: ignore[misc]
+                                                      lambda p: p == "/tmp/decoy/libhkdfguard.dylib")
     asked: list[str] = []
     MacOsNativeLibraryLoader.refuse_shadowing(asked.append, lambda p: True)
-    assert asked == ["DYLD_LIBRARY_PATH"]
+    assert asked == [*MacOsNativeLibraryLoader.REFUSED_DYLD_VARIABLES, "DYLD_LIBRARY_PATH"]
+
+
+@pytest.mark.parametrize("variable", ["DYLD_INSERT_LIBRARIES", "DYLD_FRAMEWORK_PATH", "DYLD_VERSIONED_LIBRARY_PATH",
+                                      "DYLD_VERSIONED_FRAMEWORK_PATH", "DYLD_IMAGE_SUFFIX"])
+def test_a_dyld_variable_that_injects_or_substitutes_code_refuses_the_load(variable: str) -> None:
+    with pytest.raises(PermissionError, match=variable):
+        MacOsNativeLibraryLoader.refuse_shadowing(lambda n: "/tmp/inject.dylib" if n == variable else None, lambda p: False)
+    # Set but empty is the same as unset.
+    MacOsNativeLibraryLoader.refuse_shadowing(lambda n: "" if n == variable else None, lambda p: False)
 
 
 def test_the_loaded_image_must_be_the_verified_file() -> None:

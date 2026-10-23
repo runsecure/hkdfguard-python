@@ -153,12 +153,22 @@ name. Before loading, it requires all of the following:
   and no directory or file is writable by its group or by others. Links are followed one component
   at a time and each target is checked where it lies, so `/lib -> usr/lib` passes and a link into a
   user's directory does not.
-- The dynamic linker's environment can't substitute anything. `dlopen` of an absolute path is
+- The dynamic linker's environment is checked. `dlopen` of an absolute path is
   never searched for, but the library's dependencies are found by name - and `libtss2-esys`
   receives every ECDH shared secret. So every `LD_LIBRARY_PATH` directory, and every path-named
   `LD_PRELOAD` or `LD_AUDIT` object, must pass the same path checks, and none may be relative,
   empty (the working directory) or use `$ORIGIN`-style tokens. Both the environment the process
   started with (`/proc/self/environ`) and the current one (`os.environ`) are checked.
+  This check catches a misconfigured environment. It can't stop someone who controls the
+  service's environment: whatever `LD_PRELOAD` or `LD_AUDIT` loads runs when the process starts,
+  before the check, and can hide from it. Protect the service's environment (its unit file,
+  container spec or launch configuration) as carefully as its binaries.
+
+On macOS the loader also refuses while `DYLD_INSERT_LIBRARIES`, `DYLD_FRAMEWORK_PATH`,
+`DYLD_VERSIONED_LIBRARY_PATH`, `DYLD_VERSIONED_FRAMEWORK_PATH` or `DYLD_IMAGE_SUFFIX` is set: each
+makes dyld inject code or substitute a library the native library calls with every DEK. The same
+limit applies - dyld acts on them at process start - and the real protection is a host signed with
+the Hardened Runtime, which makes dyld ignore them.
 
 After loading, `dladdr` must place the library's export in the verified file, and every object in
 its dependency closure, read from each file's `DT_NEEDED` entries, must be bound to a file that
