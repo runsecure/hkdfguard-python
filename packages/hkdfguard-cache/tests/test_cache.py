@@ -88,6 +88,11 @@ def read(cache: ProtectedReadOnlyCache, name: str, size: int = 64) -> str:
     return result[: cache.decrypt(name, result)].decode()
 
 
+def read_text(cache: ProtectedReadOnlyCache, name: str) -> str:
+    """Decrypts as a caller does: size the buffer, decrypt into it, then decode."""
+    return read(cache, name, cache.find_max_decrypted_length(name) or 0)
+
+
 class PopulatingCache(ProtectedCacheBase):
     """A minimal ProtectedCacheBase subclass whose _try_populate is driven directly by the test, with
     ways to tamper with its entries as a populate bug or an attacker would."""
@@ -124,9 +129,6 @@ class ThrowingReadOnlyCache(ProtectedReadOnlyCache):
     def decrypt(self, name: str, result: WritableBuffer) -> int:
         raise RuntimeError("boom")
 
-    def decrypt_to_str(self, name: str) -> str | None:
-        raise RuntimeError("boom")
-
     def find_max_decrypted_length(self, name: str) -> int | None:
         raise RuntimeError("boom")
 
@@ -145,14 +147,13 @@ def test_bytes_round_trip_and_the_plaintext_is_zeroed(ring: DefaultKeyRing) -> N
 
     view = memoryview(bytearray(b"via a view"))
     cache.add("view", view)
-    assert view.tobytes() == bytes(10) and cache.decrypt_to_str("view") == "via a view"
+    assert view.tobytes() == bytes(10) and read(cache, "view") == "via a view"
 
 
 @pytest.mark.parametrize("value", ["top secret chars", "héllo wörld 日本語", "😀 astral"])
 def test_text_round_trips_including_multi_byte_utf8(ring: DefaultKeyRing, value: str) -> None:
     cache = ProtectedCache(ring)
     cache.add("item", value)
-    assert cache.decrypt_to_str("item") == value
     assert read(cache, "item") == value
 
 
@@ -188,7 +189,6 @@ def test_add_or_update_replaces_the_value_whatever_the_ascii_case(ring: DefaultK
 def test_an_unknown_name_reads_as_nothing(ring: DefaultKeyRing) -> None:
     cache = ProtectedCache(ring)
     assert cache.decrypt("missing", bytearray(16)) == 0
-    assert cache.decrypt_to_str("missing") is None
     assert cache.find_max_decrypted_length("missing") is None
 
 
@@ -210,7 +210,6 @@ def test_every_operation_round_trips_with_sensitive_logging(ring: DefaultKeyRing
     cache.add_or_update("d", "top secret")
     for name in "abcd":
         assert read(cache, name) == "top secret"
-        assert cache.decrypt_to_str(name) == "top secret"
     assert cache.decrypt("missing", bytearray(16)) == 0
 
 
@@ -253,7 +252,7 @@ def test_concurrent_adds_and_decrypts_across_many_names_all_round_trip(ring: Def
     cache = ProtectedCache(ring)
     with ThreadPoolExecutor(8) as pool:
         list(pool.map(lambda i: cache.add(f"item-{i}", bytearray(f"value-{i}".encode())), range(200)))
-        assert list(pool.map(lambda i: cache.decrypt_to_str(f"item-{i}"), range(200))) == [f"value-{i}" for i in range(200)]
+        assert list(pool.map(lambda i: read(cache, f"item-{i}"), range(200))) == [f"value-{i}" for i in range(200)]
 
 
 def test_concurrent_adds_of_one_name_exactly_one_succeeds(ring: DefaultKeyRing) -> None:
@@ -357,9 +356,9 @@ def test_large_values_round_trip_and_the_callers_buffer_is_zeroed(ring: DefaultK
     encoded = bytearray(value.encode())
     cache.add_or_update("big", encoded)
     assert encoded == bytearray(len(encoded))
-    assert cache.decrypt_to_str("big") == value
+    assert read_text(cache, "big") == value
     cache.add_or_update("big-text", value)
-    assert cache.decrypt_to_str("big-text") == value
+    assert read_text(cache, "big-text") == value
 
 
 def test_ascii_case_variants_share_an_entry_and_non_ascii_case_variants_do_not(ring: DefaultKeyRing) -> None:
@@ -387,7 +386,7 @@ def test_a_miss_calls_try_populate_and_returns_the_populated_value(ring: Default
     cache.on_try_populate = populate
     assert read(cache, "item") == "populated value"
     assert cache.try_populate_calls == 1
-    assert cache.decrypt_to_str("item") == "populated value" and cache.try_populate_calls == 1
+    assert read(cache, "item") == "populated value" and cache.try_populate_calls == 1
 
 
 def test_a_cached_value_never_calls_try_populate(ring: DefaultKeyRing) -> None:
@@ -410,7 +409,6 @@ def test_a_try_populate_that_fails_or_lies_reads_as_nothing(ring: DefaultKeyRing
 
     cache.on_try_populate = lambda name: True  # claims success, stores nothing
     assert cache.decrypt("item", bytearray(32)) == 0
-    assert cache.decrypt_to_str("item") is None
 
     cache.on_try_populate = None
     assert cache.decrypt("item", bytearray(32)) == 0
@@ -465,8 +463,6 @@ def test_a_ciphertext_copied_under_another_name_fails_authentication(ring: Defau
 
     with pytest.raises(AuthenticationTagMismatchError):
         cache.decrypt("ConnectionStrings:Reporting", bytearray(64))
-    with pytest.raises(AuthenticationTagMismatchError):
-        cache.decrypt_to_str("ConnectionStrings:Reporting")
     # The original entry still decrypts, under any ASCII-case spelling.
     assert read(cache, "connectionstrings:ADMIN") == "admin-password"
 
@@ -484,7 +480,6 @@ def test_add_returns_the_same_collection_and_refuses_none(ring: DefaultKeyRing) 
 def test_with_no_sources_every_lookup_misses() -> None:
     collection = ProtectedCacheCollection()
     assert collection.decrypt("item", bytearray(16)) == 0
-    assert collection.decrypt_to_str("item") is None
     assert collection.find_max_decrypted_length("item") is None
 
 
@@ -495,7 +490,6 @@ def test_lookups_return_from_the_first_source_that_has_the_name(ring: DefaultKey
     collection = ProtectedCacheCollection().add(first).add(second)
 
     assert read(collection, "item") == "from-first"
-    assert collection.decrypt_to_str("item") == "from-first"
     assert collection.find_max_decrypted_length("item") == first.find_max_decrypted_length("item")
 
 
@@ -505,10 +499,8 @@ def test_lookups_fall_through_to_a_later_source(ring: DefaultKeyRing, second_rin
     collection = ProtectedCacheCollection().add(first).add(second)
 
     assert read(collection, "item") == "from-second"
-    assert collection.decrypt_to_str("item") == "from-second"
     assert (collection.find_max_decrypted_length("item") or 0) > 0
     assert collection.decrypt("missing", bytearray(16)) == 0
-    assert collection.decrypt_to_str("missing") is None
     assert collection.find_max_decrypted_length("missing") is None
 
 
@@ -517,14 +509,11 @@ def test_collection_decrypt_round_trips_with_sensitive_logging(ring: DefaultKeyR
     first.add("item", bytearray(b"top secret"))
     collection = ProtectedCacheCollection().add(first)
     assert read(collection, "item") == "top secret"
-    assert collection.decrypt_to_str("item") == "top secret"
 
 
 def test_a_source_that_raises_propagates() -> None:
     collection = ProtectedCacheCollection().add(ThrowingReadOnlyCache())
     with pytest.raises(RuntimeError, match="boom"):
         collection.decrypt("item", bytearray(16))
-    with pytest.raises(RuntimeError, match="boom"):
-        collection.decrypt_to_str("item")
     with pytest.raises(RuntimeError, match="boom"):
         collection.find_max_decrypted_length("item")

@@ -764,11 +764,17 @@ def pipeline(version: int = VERSION, **kwargs: object) -> AesGcmPipelineDataProt
     return AesGcmPipelineDataProtector(TestFormatProvider(), version, **kwargs)  # type: ignore[arg-type]
 
 
+def reveal(protector: AesGcmPipelineDataProtector, encrypted: str, secret_identifier: str) -> str:
+    """Decrypts as a caller does: size the buffer, decrypt into it, then decode."""
+    result = bytearray(protector.get_max_decrypted_length(encrypted))
+    return result[: protector.decrypt(encrypted, secret_identifier, result)].decode()
+
+
 @pytest.mark.parametrize("plaintext", ["hello", "héllo wörld ✓ 🔐", "", "é-秘密-" * 1500])
 def test_pipeline_round_trips(plaintext: str) -> None:
     with pipeline() as protector:
         formatted = protector.encrypt(plaintext, ID)
-        assert protector.decrypt_to_str(formatted, ID) == plaintext
+        assert reveal(protector, formatted, ID) == plaintext
 
         result = bytearray(protector.get_max_decrypted_length(formatted))
         assert bytes(result[: protector.decrypt(formatted, ID, result)]) == plaintext.encode()
@@ -787,19 +793,19 @@ def test_pipeline_refuses_an_empty_or_invalid_secret_identifier() -> None:
 @pytest.mark.parametrize("lookup", ["pipeline:secret", "PIPELINE:SECRET"])
 def test_pipeline_secret_identifiers_ignore_ascii_case(lookup: str) -> None:
     with pipeline() as protector:
-        assert protector.decrypt_to_str(protector.encrypt("hello", ID), lookup) == "hello"
+        assert reveal(protector, protector.encrypt("hello", ID), lookup) == "hello"
 
 
 def test_pipeline_binds_each_value_to_its_identifier() -> None:
     long_id = ":".join(f"Section{i}" for i in range(60))
     with pipeline() as protector:
         admin = protector.encrypt("admin-secret", "ConnectionStrings:Admin")
-        assert protector.decrypt_to_str(admin, "ConnectionStrings:Admin") == "admin-secret"
+        assert reveal(protector, admin, "ConnectionStrings:Admin") == "admin-secret"
         with pytest.raises(AuthenticationTagMismatchError):
             protector.decrypt(admin, "ConnectionStrings:Reporting", bytearray(32))
 
         value = protector.encrypt("hello", long_id)
-        assert protector.decrypt_to_str(value, long_id) == "hello"
+        assert reveal(protector, value, long_id) == "hello"
         with pytest.raises(CryptographicError):
             protector.decrypt(value, long_id + "X", bytearray(16))
 
@@ -829,7 +835,7 @@ def test_pipeline_with_sensitive_logging_enabled_still_round_trips(spans: InMemo
     HkdfGuardTelemetry.DATA_PROTECTION.sensitive_logging_enabled = True
     try:
         with pipeline() as protector:
-            assert protector.decrypt_to_str(protector.encrypt("hello", ID), ID) == "hello"
+            assert reveal(protector, protector.encrypt("hello", ID), ID) == "hello"
         assert finished(spans, SpanNames.DataProtection.PROTECTOR_ENCRYPT)[0].events
     finally:
         HkdfGuardTelemetry.DATA_PROTECTION.sensitive_logging_enabled = original
@@ -847,7 +853,7 @@ def test_pipeline_key_as_base64_is_a_read_only_view_of_one_buffer_holding_the_ke
 
         formatted = protector.encrypt("hello", ID)
         with pipeline(key=bytearray(base64.b64decode(bytes(first)))) as reader:
-            assert reader.decrypt_to_str(formatted, ID) == "hello"
+            assert reveal(reader, formatted, ID) == "hello"
 
 
 @pytest.mark.parametrize("length", range(1, 7))
@@ -865,7 +871,7 @@ def test_pipeline_counts_against_the_keys_budget() -> None:
         assert protector.encryption_count == 2
         with pytest.raises(CryptographicError):
             protector.encrypt("three", ID)
-        assert protector.decrypt_to_str(formatted, ID) == "one"
+        assert reveal(protector, formatted, ID) == "one"
 
 
 def test_pipeline_close_zeroes_the_key_and_its_base64_and_refuses_later_use() -> None:

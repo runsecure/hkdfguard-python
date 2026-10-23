@@ -108,25 +108,6 @@ class ProtectedCacheBase(ProtectedReadOnlyCache):
                 return 0
             return self._key_ring.get(entry.key_version).decrypt(entry.value, result, aad=self.aad_for(name))
 
-    def decrypt_to_str(self, name: str) -> str | None:
-        """:raises KeyNotFoundError: the entry's key version is no longer in the ring"""
-        telemetry = HkdfGuardTelemetry.ROOT
-        with telemetry.start_span(SpanNames.Cache.DECRYPT) as span:
-            if telemetry.sensitive_logging_enabled:
-                telemetry.log_sensitive_operation(span, SpanNames.Cache.DECRYPT, {AttributeNames.NAME: str(name)})
-
-            entry = self._find_entry(name)
-            if entry is None:
-                return None
-
-            # AEAD ciphertext is never shorter than its plaintext: a safe size for the UTF-8 bytes.
-            plaintext = bytearray(len(entry.value))
-            try:
-                written = self._key_ring.get(entry.key_version).decrypt(entry.value, plaintext, aad=self.aad_for(name))
-                return str(memoryview(plaintext)[:written], "utf-8", "replace")
-            finally:
-                ArrayUtility.zero_memory(plaintext)
-
     def find_max_decrypted_length(self, name: str) -> int | None:
         entry = self._find_entry(name)
         return None if entry is None else len(entry.value)

@@ -117,9 +117,6 @@ class ProtectedCacheCollection(ProtectedReadOnlyCache):
         written = self._first_match(name, lambda source: source.decrypt(name, result) or None)
         return written or 0
 
-    def decrypt_to_str(self, name: str) -> str | None:
-        return self._first_match(name, lambda source: source.decrypt_to_str(name))
-
     def find_max_decrypted_length(self, name: str) -> int | None:
         for source in self._sources:
             max_length = source.find_max_decrypted_length(name)

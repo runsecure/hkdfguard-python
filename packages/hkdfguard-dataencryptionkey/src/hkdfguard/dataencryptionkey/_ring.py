@@ -122,14 +122,6 @@ class _DataProtector(abstractions.DataProtector):
             value = self._format_provider.parse(encrypted)
             return self._key_ring.get(value.key_version).decrypt(value.value, result, aad=self._aad)
 
-    def decrypt_to_str(self, encrypted: str) -> str:
-        buffer = bytearray(self.get_max_decrypted_length(encrypted))
-        try:
-            written = self.decrypt(encrypted, buffer)
-            return str(memoryview(buffer)[:written], "utf-8", "replace")
-        finally:
-            ArrayUtility.zero_memory(buffer)
-
     def get_max_decrypted_length(self, encrypted: str) -> int:
         return self._format_provider.get_max_decrypted_length(encrypted)
 

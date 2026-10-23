@@ -176,6 +176,12 @@ def ring_with_one_key(format_provider: EncryptedFormatProvider | None = None) ->
     return ring
 
 
+def reveal(protector: abstractions.DataProtector, encrypted: str) -> str:
+    """Decrypts as an application does: size the buffer, decrypt into it, then decode."""
+    result = bytearray(protector.get_max_decrypted_length(encrypted))
+    return result[: protector.decrypt(encrypted, result)].decode()
+
+
 # --- Base64ConversionUtility ------------------------------------------------------------------
 
 
@@ -366,7 +372,7 @@ def test_any_int_version_becomes_current_and_round_trips(version: int) -> None:
         ring.add(version, new_key())
         assert ring.current_version == version
         protector = ring.create_protector("range")
-        assert protector.decrypt_to_str(protector.encrypt("value")) == "value"
+        assert reveal(protector, protector.encrypt("value")) == "value"
 
 
 # --- Data protectors --------------------------------------------------------------------------
@@ -397,7 +403,7 @@ def test_a_protector_round_trips_small_and_large_values(plaintext: str, sensitiv
         protector = ring.create_protector("purpose")
         formatted = protector.encrypt(plaintext)
 
-        assert protector.decrypt_to_str(formatted) == plaintext
+        assert reveal(protector, formatted) == plaintext
         result = bytearray(protector.get_max_decrypted_length(formatted))
         assert bytes(result[: protector.decrypt(formatted, result)]) == plaintext.encode()
 
@@ -417,7 +423,7 @@ def test_a_protector_uses_the_rings_format_provider_and_propagates_key_failures(
     recording = RecordingFormatProvider()
     with ring_with_one_key(recording) as ring:
         formatted = ring.create_protector("purpose").encrypt("hello")
-        assert ring.create_protector("purpose").decrypt_to_str(formatted) == "hello"
+        assert reveal(ring.create_protector("purpose"), formatted) == "hello"
         assert recording.format_called and recording.parse_called
 
     class Throwing(TrackingKey):
@@ -477,7 +483,7 @@ def test_build_gives_a_working_ring_whose_highest_version_is_current(tmp_path: P
             .with_format_provider(recording).build() as ring:
         assert ring.current_version == 3
         protector = ring.create_protector("purpose")
-        assert protector.decrypt_to_str(protector.encrypt("hello")) == "hello"
+        assert reveal(protector, protector.encrypt("hello")) == "hello"
         assert recording.format_called
 
 
@@ -584,7 +590,7 @@ def test_a_ring_with_an_ephemeral_key_rotates_and_old_values_still_decrypt() -> 
         # Rotation keeps running in the background, so the version can advance around the encrypt.
         written = int(protector.encrypt("now").split("::")[1].removeprefix("v"))
         assert before <= written <= ring.current_version
-        assert protector.decrypt_to_str(under_v1) == "written under v1"
+        assert reveal(protector, under_v1) == "written under v1"
         assert any(r.levelno == logging.INFO for r in handler.with_event_id(HkdfGuardLog.EPHEMERAL_KEY_ROTATED))
 
 
@@ -696,7 +702,7 @@ def test_a_rotating_ring_retires_superseded_keys_once_their_retention_passes() -
             factory.providers[0].encrypt(bytearray(b"\x01"), bytearray(64))
         current = ring.current_version
         assert current >= 5 and ring.find(current) is not None and ring.find(current - 1) is not None
-        assert protector.decrypt_to_str(protector.encrypt("still works")) == "still works"
+        assert reveal(protector, protector.encrypt("still works")) == "still works"
 
 
 def never_stopping() -> bool:
@@ -821,8 +827,8 @@ def test_pipeline_values_decrypt_through_a_ring_protector_for_the_identifiers_pu
         key = base64.b64decode(bytes(pipeline.get_key_as_base64()))
 
         with ring_holding(key) as ring:
-            assert ring.create_protector(ProtectedConfigurationPurpose.for_key(ID)).decrypt_to_str(formatted) == "hello"
-            assert ring.create_protector(ProtectedConfigurationPurpose.for_key(ID.upper())).decrypt_to_str(formatted) == "hello"
+            assert reveal(ring.create_protector(ProtectedConfigurationPurpose.for_key(ID)), formatted) == "hello"
+            assert reveal(ring.create_protector(ProtectedConfigurationPurpose.for_key(ID.upper())), formatted) == "hello"
             with pytest.raises(AuthenticationTagMismatchError):
                 ring.create_protector(ID).decrypt(formatted, bytearray(16))
             with pytest.raises(AuthenticationTagMismatchError):
@@ -830,7 +836,8 @@ def test_pipeline_values_decrypt_through_a_ring_protector_for_the_identifiers_pu
 
             # And the reverse: what the ring writes under the purpose, the pipeline reads.
             written = ring.create_protector(ProtectedConfigurationPurpose.for_key(ID)).encrypt("from the ring")
-            assert pipeline.decrypt_to_str(written, ID) == "from the ring"
+            result = bytearray(pipeline.get_max_decrypted_length(written))
+            assert result[: pipeline.decrypt(written, ID, result)].decode() == "from the ring"
 
 
 # --- Native end to end ------------------------------------------------------------------------
@@ -876,7 +883,7 @@ def run_pipeline(service: str, directory: Path, secrets: dict[str, str]) -> tupl
 
 
 def read(ring: KeyRing, configuration: dict[str, str], key: str) -> str:
-    return ring.create_protector(ProtectedConfigurationPurpose.for_key(key)).decrypt_to_str(configuration[key])
+    return reveal(ring.create_protector(ProtectedConfigurationPurpose.for_key(key)), configuration[key])
 
 
 def test_a_deployment_decrypts_through_its_natively_wrapped_key_file(native_service: str, key_dir: Path) -> None:
@@ -921,11 +928,12 @@ def test_runtime_keys_generated_through_the_native_kek_protect_values_and_the_ca
         protector = ring.create_protector("session")
         formatted = protector.encrypt("runtime value")
         assert formatted.startswith("enc::v100::")
-        assert protector.decrypt_to_str(formatted) == "runtime value"
+        assert reveal(protector, formatted) == "runtime value"
 
         cache = ProtectedCache(ring)
         cache.add("token", "cached secret")
-        assert cache.decrypt_to_str("token") == "cached secret"
+        result = bytearray(cache.find_max_decrypted_length("token") or 0)
+        assert result[: cache.decrypt("token", result)].decode() == "cached secret"
 
 
 def test_deployed_and_runtime_keys_together_and_refresh_against_the_real_kek(native_service: str, key_dir: Path) -> None:
@@ -940,8 +948,8 @@ def test_deployed_and_runtime_keys_together_and_refresh_against_the_real_kek(nat
         protector = ring.create_protector("refresh")
         before = protector.encrypt("written before the refreshes")
         time.sleep(2.5)  # two background re-reveals through the native KEK
-        assert protector.decrypt_to_str(before) == "written before the refreshes"
-        assert protector.decrypt_to_str(protector.encrypt("written after")) == "written after"
+        assert reveal(protector, before) == "written before the refreshes"
+        assert reveal(protector, protector.encrypt("written after")) == "written after"
 
 
 @pytest.mark.parametrize("version", [-(2**31) - 1, 2**31])

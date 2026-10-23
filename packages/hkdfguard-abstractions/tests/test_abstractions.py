@@ -273,20 +273,25 @@ def decrypt_bytes(cache: ProtectedCacheBase, name: str) -> bytes:
     return bytes(result[: cache.decrypt(name, result)])
 
 
+def decrypt_text(cache: ProtectedCacheBase, name: str) -> str:
+    """Decrypts as a caller does: size the buffer, decrypt into it, then decode."""
+    result = bytearray(cache.find_max_decrypted_length(name) or 0)
+    return result[: cache.decrypt(name, result)].decode()
+
+
 def test_a_stored_value_decrypts_as_bytes_or_text() -> None:
     cache = TestCache()
     cache.store("item", bytearray(b"value"))
     cache.store("text", "héllo")
 
     assert decrypt_bytes(cache, "item") == b"value"
-    assert cache.decrypt_to_str("text") == "héllo"
+    assert decrypt_text(cache, "text") == "héllo"
 
 
 def test_a_missing_name_reads_as_zero_or_none() -> None:
     cache = TestCache()
 
     assert cache.decrypt("missing", bytearray(16)) == 0
-    assert cache.decrypt_to_str("missing") is None
     assert cache.find_max_decrypted_length("missing") is None
 
 
@@ -336,14 +341,12 @@ def test_storing_zeroes_the_callers_buffer_and_refuses_an_empty_value() -> None:
         cache._encrypt_any("item", b"immutable")
 
 
-def test_a_failing_key_propagates_from_both_reads() -> None:
+def test_a_failing_key_propagates_from_decrypt() -> None:
     cache = TestCache(key=MaskingKey(throw_on_decrypt=True))
     cache.store("item", bytearray(b"value"))
 
     with pytest.raises(RuntimeError, match="decrypt failed"):
         cache.decrypt("item", bytearray(16))
-    with pytest.raises(RuntimeError, match="decrypt failed"):
-        cache.decrypt_to_str("item")
 
 
 def test_reads_with_sensitive_logging_enabled_still_work() -> None:
@@ -353,7 +356,6 @@ def test_reads_with_sensitive_logging_enabled_still_work() -> None:
         cache = TestCache()
         cache.store("item", bytearray(b"value"))
         assert decrypt_bytes(cache, "item") == b"value"
-        assert cache.decrypt_to_str("item") == "value"
     finally:
         HkdfGuardTelemetry.ROOT.sensitive_logging_enabled = original
 
@@ -363,7 +365,7 @@ def test_small_and_large_text_values_round_trip(length: int) -> None:
     cache = TestCache()
     cache.store("big", "x" * length)
 
-    assert cache.decrypt_to_str("big") == "x" * length
+    assert decrypt_text(cache, "big") == "x" * length
 
 
 def test_every_value_is_encrypted_and_decrypted_with_its_names_aad() -> None:
@@ -372,7 +374,7 @@ def test_every_value_is_encrypted_and_decrypted_with_its_names_aad() -> None:
 
     cache.store("Item", bytearray(b"value"))
     cache.decrypt("ITEM", bytearray(16))
-    cache.decrypt_to_str("item")
+    cache.decrypt("item", bytearray(16))
 
     expected = ProtectedCacheBase.aad_for("Item")
     assert key.encrypt_aads == [expected]

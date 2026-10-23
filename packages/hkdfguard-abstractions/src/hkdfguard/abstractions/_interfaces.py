@@ -247,11 +247,6 @@ class DataProtector(ABC):
         """
 
     @abstractmethod
-    def decrypt_to_str(self, encrypted: str) -> str:
-        """Parses and decrypts ``encrypted`` into a ``str``. A ``str`` can't be zeroed; prefer
-        :meth:`decrypt` for secrets that should not linger."""
-
-    @abstractmethod
     def get_max_decrypted_length(self, encrypted: str) -> int:
         """An upper bound on the number of bytes :meth:`decrypt` will write."""
 
@@ -281,10 +276,6 @@ class PipelineDataProtector(_Closable):
         """
 
     @abstractmethod
-    def decrypt_to_str(self, encrypted: str, secret_identifier: str) -> str:
-        """:meth:`decrypt` into a ``str``, which can't be zeroed."""
-
-    @abstractmethod
     def get_max_decrypted_length(self, encrypted: str) -> int:
         """An upper bound on the number of bytes :meth:`decrypt` will write."""
 
@@ -307,11 +298,6 @@ class ProtectedReadOnlyCache(ABC):
 
         :returns: the number of bytes written, or 0 if nothing is stored under ``name``
         """
-
-    @abstractmethod
-    def decrypt_to_str(self, name: str) -> str | None:
-        """The value stored under ``name``, decoded as UTF-8; ``None`` if nothing is stored. A
-        ``str`` can't be zeroed; prefer :meth:`decrypt` for secrets that should not linger."""
 
     @abstractmethod
     def find_max_decrypted_length(self, name: str) -> int | None:

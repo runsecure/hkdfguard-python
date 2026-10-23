@@ -1371,7 +1371,9 @@ def test_native_a_key_ring_built_from_a_key_file_reads_it_through_the_native_lib
           .with_key_refresh_interval(60).with_key_file(4, path).build()) as ring:
         assert ring.current_version == 4
         protector = ring.create_protector("native-key-file")
-        assert protector.decrypt_to_str(protector.encrypt("value")) == "value"
+        formatted = protector.encrypt("value")
+        result = bytearray(protector.get_max_decrypted_length(formatted))
+        assert result[: protector.decrypt(formatted, result)].decode() == "value"
 
 
 def test_native_a_key_file_of_the_right_size_with_an_unknown_version_is_malformed(service: str, key_dir: Path) -> None:
