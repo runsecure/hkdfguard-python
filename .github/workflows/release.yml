@@ -47,8 +47,6 @@ jobs:
           TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
         run: python3 scripts/check-dist.py dist ${TAG:+--tag "$TAG"}
 
-      - run: uvx twine check --strict dist/*.whl dist/*.tar.gz
-
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dist
@@ -56,6 +54,11 @@ jobs:
             dist/*.whl
             dist/*.tar.gz
           if-no-files-found: error
+
+      # After the upload, so no tool run here can change what is attested and released; a failure
+      # still fails this job, and nothing downstream runs. twine is pinned by uv.lock (with hashes),
+      # never resolved fresh from PyPI at release time.
+      - run: uv run --locked --only-group dist twine check --strict dist/*.whl dist/*.tar.gz
 
   github-release:
     name: GitHub release with signed provenance
