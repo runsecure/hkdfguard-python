@@ -57,10 +57,10 @@ class NativeHkdfKeyWrapperV1(KeyWrapper):
     unverifiable library raises :class:`NativeLibraryNotFoundError` or ``PermissionError`` on the first call.
     """
 
-    def __init__(self, service_name: str, library: AbstractHkdfGuardKmsLibrary | None = None) -> None:
+    def __init__(self, service_name: str, *, _library: AbstractHkdfGuardKmsLibrary | None = None) -> None:
         """:param service_name: identifies the KEK: 1-128 ASCII letters, digits or '.', not starting
             with '.' and without ".." (see ServiceNames)
-        :param library: tests only - the binding to call instead of this platform's
+        :param _library: for this package's tests only, not public API - the binding to call instead of this platform's
         :raises TypeError: ``service_name`` is ``None``
         :raises ValueError: ``service_name`` breaks a ServiceNames rule
         :raises NotImplementedError: there is no native KMS library for this platform
@@ -68,7 +68,7 @@ class NativeHkdfKeyWrapperV1(KeyWrapper):
         # Checked here, before the name can ever reach native code.
         ServiceNames.require_valid(service_name, "service_name")
         self._service_name = service_name
-        self._library = library if library is not None else native_library()
+        self._library = _library if _library is not None else native_library()
 
     def wrap(self, plaintext: Buffer, result: WritableBuffer) -> int:
         return self._complete(lambda: self._library.wrap_dek(self._service_name, plaintext, result), "wrap", result)
@@ -164,12 +164,12 @@ class NativeProcessHardening:
 
     @staticmethod
     def apply(options: ProcessHardeningOptions | int = ProcessHardeningOptions.NONE, *,
-              library: AbstractHkdfGuardKmsLibrary | None = None) -> None:
+              _library: AbstractHkdfGuardKmsLibrary | None = None) -> None:
         """Applies the hardening with ``options``, loading the native KMS library if it isn't already.
 
         :param options: :attr:`ProcessHardeningOptions.NONE` (the default), or
             :attr:`ProcessHardeningOptions.REQUIRE_PROTECTED_SIGNATURE`
-        :param library: tests only - the binding to call instead of this platform's
+        :param _library: for this package's tests only, not public API - the binding to call instead of this platform's
         :raises TypeError: ``options`` is not an int or :class:`ProcessHardeningOptions`
         :raises ValueError: ``options`` has a flag this library doesn't define - refused before the
             native call
@@ -186,7 +186,7 @@ class NativeProcessHardening:
             raise ValueError(f"Unknown process hardening option: {value}.")
 
         flags = AbstractHkdfGuardKmsLibrary.HARDEN_REQUIRE_PROTECTED_SIGNATURE if value & ProcessHardeningOptions.REQUIRE_PROTECTED_SIGNATURE else 0
-        native = library if library is not None else native_library()
+        native = _library if _library is not None else native_library()
         status = native.harden_process(flags)
         if status == OK:
             return

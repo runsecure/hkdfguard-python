@@ -143,8 +143,12 @@ silently fall back to a default.
     and `AuthenticationTagMismatchError`.
 - **Memory hygiene:** CPython has no pinned or stack allocation, so zeroing erases the live copy of
   a secret but not copies the allocator may have left; `str` values can never be zeroed, and
-  encoding a `str` always passes through a temporary immutable `bytes`. What a library such as
-  `cryptography` keeps inside a call is outside this library's control.
+  encoding a `str` always passes through a temporary immutable `bytes`. `cryptography`'s `AESGCM`
+  also keeps its own copy of the key for as long as the cipher object exists - for a session, until
+  its next refresh retires it - and zeroing this library's key buffer doesn't reach that copy; the
+  session releases the cipher when it closes, and whether the copy is wiped then is up to
+  `cryptography`. Process hardening, which blocks core dumps and debugger attachment, is what keeps
+  such copies out of reach.
 - **Logging:** a `None` logger means the package's own logger (e.g. `hkdfguard.cache`). The event id
   travels as the `hkdfguard_event_id` record attribute; .NET's Critical is `logging.CRITICAL`.
 - **Telemetry** goes to OpenTelemetry's global providers, or to those given to

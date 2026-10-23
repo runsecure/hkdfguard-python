@@ -50,18 +50,19 @@ class AesGcmPipelineDataProtector(PipelineDataProtector):
     key and its base64 form; any use afterwards raises :class:`ObjectClosedError`."""
 
     def __init__(self, format_provider: EncryptedFormatProvider, key_version: int, *,
-                 key: bytearray | None = None, budget: EncryptionBudget | None = None) -> None:
+                 _key: bytearray | None = None, _budget: EncryptionBudget | None = None) -> None:
         """:param format_provider: formats/parses the protected values, e.g. DefaultFormatProvider
         :param key_version: the version stamped on every value - the version this key will be
             registered under once wrapped
-        :param key: tests only - the 32-byte key to use (owned and zeroed by this protector)
-        :param budget: tests only - the encryption count to draw on"""
+        :param _key: for this package's tests only, not public API - the 32-byte key to use (owned
+            and zeroed by this protector)
+        :param _budget: for this package's tests only, not public API - the encryption count to draw on"""
         if format_provider is None:
             raise TypeError("format_provider must not be None.")
         self._format_provider = format_provider
         self._key_version = key_version
-        self._key = key if key is not None else bytearray(os.urandom(KEY_LENGTH))
-        self._budget = budget if budget is not None else EncryptionBudget()
+        self._key = _key if _key is not None else bytearray(os.urandom(KEY_LENGTH))
+        self._budget = _budget if _budget is not None else EncryptionBudget()
         self._session: AesGcmCryptoSession | None = AesGcmCryptoSession(self._key, self._budget)
         self._base64: bytearray | None = None
         self._gate = threading.Lock()
@@ -76,13 +77,14 @@ class AesGcmPipelineDataProtector(PipelineDataProtector):
         return self._budget.count
 
     @property
-    def key(self) -> bytearray:
-        """The key buffer, for tests to check it is zeroed."""
+    def _key_buffer(self) -> bytearray:
+        """The key buffer - for this package's tests, to check it is zeroed. Not public API."""
         return self._key
 
     @property
-    def base64_buffer(self) -> bytearray | None:
-        """The base64 buffer once :meth:`get_key_as_base64` has run, for tests to check it is zeroed."""
+    def _base64_buffer(self) -> bytearray | None:
+        """The base64 buffer once :meth:`get_key_as_base64` has run - for this package's tests, to
+        check it is zeroed. Not public API."""
         return self._base64
 
     def get_key_as_base64(self) -> memoryview:

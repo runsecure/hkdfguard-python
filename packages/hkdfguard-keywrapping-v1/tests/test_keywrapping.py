@@ -139,7 +139,7 @@ def test_wrap_delegates_to_the_library() -> None:
     library.wrap_payload = bytes([10, 20, 30, 40])
     result = bytearray(16)
 
-    assert NativeHkdfKeyWrapperV1("service.a", library).wrap(bytes([1, 2, 3, 4, 5]), result) == 4
+    assert NativeHkdfKeyWrapperV1("service.a", _library=library).wrap(bytes([1, 2, 3, 4, 5]), result) == 4
 
     assert (library.calls, library.last_service, library.last_input) == (["wrap"], "service.a", bytes([1, 2, 3, 4, 5]))
     assert result[:4] == bytes([10, 20, 30, 40])
@@ -151,7 +151,7 @@ def test_a_failing_wrap_raises_naming_the_status(status: int) -> None:
     library.wrap_status = status
 
     with pytest.raises(CryptographicError) as error:
-        NativeHkdfKeyWrapperV1("service.d", library).wrap(bytes(3), bytearray(8))
+        NativeHkdfKeyWrapperV1("service.d", _library=library).wrap(bytes(3), bytearray(8))
 
     assert str(error.value) == f"Native KMS wrap failed for service 'service.d' with status {status}."
 
@@ -162,7 +162,7 @@ def test_a_failure_the_library_can_describe_names_what_the_status_means() -> Non
     library.describe = lambda s: "this account is not authorized to use the KEK" if s == -13 else None
 
     with pytest.raises(CryptographicError) as error:
-        NativeHkdfKeyWrapperV1("service.d", library).unwrap(b"\x01", bytearray(32))
+        NativeHkdfKeyWrapperV1("service.d", _library=library).unwrap(b"\x01", bytearray(32))
 
     assert str(error.value) == ("Native KMS unwrap failed for service 'service.d' with status -13 "
                                 "(this account is not authorized to use the KEK).")
@@ -172,14 +172,14 @@ def test_unwrap_delegates_and_a_failure_zeroes_the_result_buffer() -> None:
     library = FakeKmsLibrary()
     library.unwrap_payload = bytes([1, 2, 3, 4, 5])
     result = bytearray(16)
-    assert NativeHkdfKeyWrapperV1("service.a", library).unwrap(bytes([10, 20]), result) == 5
+    assert NativeHkdfKeyWrapperV1("service.a", _library=library).unwrap(bytes([10, 20]), result) == 5
     assert result[:5] == bytes([1, 2, 3, 4, 5])
 
     library.unwrap_status = -6
     library.unwrap_garbage_on_failure = b"\x09\x09\x09"
     result = bytearray(b"\xff" * 8)
     with pytest.raises(CryptographicError, match=r"unwrap failed for service 'service\.a' with status -6"):
-        NativeHkdfKeyWrapperV1("service.a", library).unwrap(bytes(3), result)
+        NativeHkdfKeyWrapperV1("service.a", _library=library).unwrap(bytes(3), result)
     assert result == bytearray(8)
 
 
@@ -187,12 +187,12 @@ def test_generate_and_wrap_delegates_and_failures_raise() -> None:
     library = FakeKmsLibrary()
     library.generate_payload = bytes([11, 22, 33, 44, 55])
     result = bytearray(16)
-    assert NativeHkdfKeyWrapperV1("service.e", library).generate_and_wrap(result) == 5
+    assert NativeHkdfKeyWrapperV1("service.e", _library=library).generate_and_wrap(result) == 5
     assert result[:5] == bytes([11, 22, 33, 44, 55])
 
     library.generate_status = -40
     with pytest.raises(CryptographicError, match=r"generate-and-wrap failed for service 'service\.e' with status -40\."):
-        NativeHkdfKeyWrapperV1("service.e", library).generate_and_wrap(bytearray(16))
+        NativeHkdfKeyWrapperV1("service.e", _library=library).generate_and_wrap(bytearray(16))
 
 
 @pytest.mark.parametrize("written", [-1, 17])
@@ -210,7 +210,7 @@ def test_a_success_reporting_a_written_count_outside_the_buffer_is_refused_and_z
 
     library = Miscounting()
     library.generate_payload = bytes([7] * 5)
-    wrapper = NativeHkdfKeyWrapperV1("service.f", library)
+    wrapper = NativeHkdfKeyWrapperV1("service.f", _library=library)
     calls: dict[str, Callable[[bytearray], int]] = {
         "wrap": lambda result: wrapper.wrap(bytes([7] * 5), result),
         "unwrap": lambda result: wrapper.unwrap(bytes([7] * 5), result),
@@ -226,7 +226,7 @@ def test_a_success_reporting_a_written_count_outside_the_buffer_is_refused_and_z
 def test_a_library_that_fails_to_load_raises_and_still_zeroes_an_unwrap_buffer() -> None:
     library = FakeKmsLibrary()
     library.throw_on_call = PermissionError("not signed by the HkdfGuard publisher")
-    wrapper = NativeHkdfKeyWrapperV1("service.g", library)
+    wrapper = NativeHkdfKeyWrapperV1("service.g", _library=library)
     result = bytearray(b"\x01\x02\x03")
 
     with pytest.raises(PermissionError):
@@ -238,9 +238,9 @@ def test_a_library_that_fails_to_load_raises_and_still_zeroes_an_unwrap_buffer()
 def test_an_invalid_service_name_is_refused_before_any_native_call(name: str) -> None:
     library = FakeKmsLibrary()
     with pytest.raises(ValueError):
-        NativeHkdfKeyWrapperV1(name, library)
+        NativeHkdfKeyWrapperV1(name, _library=library)
     with pytest.raises(TypeError):
-        NativeHkdfKeyWrapperV1(None, library)  # type: ignore[arg-type]
+        NativeHkdfKeyWrapperV1(None, _library=library)  # type: ignore[arg-type]
     assert library.calls == []
 
 
@@ -423,7 +423,7 @@ def test_a_failure_names_the_status_and_its_shared_meaning() -> None:
     library.unwrap_status = AbstractHkdfGuardKmsLibrary.ERR_KEK_NOT_FOUND
 
     with pytest.raises(CryptographicError) as error:
-        NativeHkdfKeyWrapperV1("service.d", library).unwrap(b"\x01", bytearray(32))
+        NativeHkdfKeyWrapperV1("service.d", _library=library).unwrap(b"\x01", bytearray(32))
 
     assert str(error.value) == ("Native KMS unwrap failed for service 'service.d' with status -17 "
                                 "(no KEK is provisioned for this service; run hkdfguard provision).")
@@ -434,7 +434,7 @@ def test_a_failure_names_the_status_and_its_shared_meaning() -> None:
 
 def test_read_key_file_reads_through_the_native_library_not_python_file_io() -> None:
     library = FakeKmsLibrary()
-    wrapper = NativeHkdfKeyWrapperV1("service.h", library)
+    wrapper = NativeHkdfKeyWrapperV1("service.h", _library=library)
 
     # The path doesn't exist: only the native library is asked about it.
     read = wrapper.read_key_file("C:\\no\\such\\dek.bin")
@@ -446,7 +446,7 @@ def test_read_key_file_reads_through_the_native_library_not_python_file_io() -> 
 
 def test_read_key_file_through_the_abstract_type_reaches_the_native_library_whatever_the_permission_setting() -> None:
     library = FakeKmsLibrary()
-    wrapper: KeyWrapper = NativeHkdfKeyWrapperV1("service.h", library)
+    wrapper: KeyWrapper = NativeHkdfKeyWrapperV1("service.h", _library=library)
 
     wrapper.read_key_file("dek.bin")
 
@@ -458,7 +458,7 @@ def test_read_key_file_surfaces_a_refusal() -> None:
     library.open_file_status = AbstractHkdfGuardKmsLibrary.ERR_FILE_PLAINTEXT_KEY
 
     with pytest.raises(InvalidKeyFileError, match="key exposure") as error:
-        NativeHkdfKeyWrapperV1("service.h", library).read_key_file("dek.bin")
+        NativeHkdfKeyWrapperV1("service.h", _library=library).read_key_file("dek.bin")
 
     assert "'dek.bin'" in str(error.value) and "status -37" in str(error.value)
 
@@ -468,7 +468,7 @@ def test_read_key_file_surfaces_a_library_that_fails_to_load() -> None:
     library.throw_on_call = PermissionError("not signed by the HkdfGuard publisher")
 
     with pytest.raises(PermissionError, match="not signed"):
-        NativeHkdfKeyWrapperV1("service.h", library).read_key_file("dek.bin")
+        NativeHkdfKeyWrapperV1("service.h", _library=library).read_key_file("dek.bin")
 
 
 # --- Windows loader: location ---------------------------------------------------------------

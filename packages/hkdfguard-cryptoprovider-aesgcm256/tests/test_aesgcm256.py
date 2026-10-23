@@ -167,7 +167,7 @@ def finished(exporter: InMemorySpanExporter, name: str) -> list:  # type: ignore
 
 def create(wrapper: KeyWrapper, expiry_seconds: int = 60, max_refresh_failures: int | None = RefreshFailurePolicy.DEFAULT_MAX_REFRESH_FAILURES,
            logger: logging.Logger | None = None, budget: EncryptionBudget | None = None) -> AesGcmCryptoProvider:
-    return AesGcmCryptoProvider.create(wrapper, bytearray(WRAPPED), expiry_seconds, max_refresh_failures, logger, budget=budget)
+    return AesGcmCryptoProvider.create(wrapper, bytearray(WRAPPED), expiry_seconds, max_refresh_failures, logger, _budget=budget)
 
 
 def round_trip(provider: AesGcmCryptoProvider | AesGcmCryptoSession, plaintext: bytes = b"top secret", aad: bytes = b"") -> bytes:
@@ -414,22 +414,22 @@ def test_background_refresh_reveals_the_key_again_and_close_stops_it() -> None:
 def test_close_twice_is_safe_and_zeroes_the_wrapped_payload_and_the_key() -> None:
     wrapped = bytearray(WRAPPED)
     provider = AesGcmCryptoProvider.create(FakeKeyWrapper(), wrapped, 60)
-    session_ = provider.current_session
+    session_ = provider._current_session
     assert session_ is not None
 
     provider.close()
     provider.close()
 
     assert wrapped == bytearray(len(WRAPPED))
-    assert session_.key == bytearray(32)
+    assert session_._key_buffer == bytearray(32)
 
 
 def test_a_refresh_swaps_in_a_new_session_and_retires_the_old_one_an_interval_later() -> None:
     with create(FakeKeyWrapper(os.urandom(32)), 1) as provider:
-        first = provider.current_session
+        first = provider._current_session
         assert first is not None
         time.sleep(1.3)
-        assert provider.current_session is not first
+        assert provider._current_session is not first
         assert not first.closed
         time.sleep(1.0)
         assert first.closed
@@ -864,7 +864,7 @@ def test_pipeline_with_sensitive_logging_enabled_still_round_trips(spans: InMemo
 
 def test_pipeline_key_as_base64_is_a_read_only_view_of_one_buffer_holding_the_key() -> None:
     key = os.urandom(32)
-    with pipeline(key=bytearray(key)) as protector:
+    with pipeline(_key=bytearray(key)) as protector:
         first = protector.get_key_as_base64()
         second = protector.get_key_as_base64()
 
@@ -873,7 +873,7 @@ def test_pipeline_key_as_base64_is_a_read_only_view_of_one_buffer_holding_the_ke
         assert first.obj is second.obj
 
         formatted = protector.encrypt("hello", ID)
-        with pipeline(key=bytearray(base64.b64decode(bytes(first)))) as reader:
+        with pipeline(_key=bytearray(base64.b64decode(bytes(first)))) as reader:
             assert reveal(reader, formatted, ID) == "hello"
 
 
@@ -886,7 +886,7 @@ def test_pipeline_base64_encoding_matches_the_standard_codec_for_every_padding(l
 
 
 def test_pipeline_counts_against_the_keys_budget() -> None:
-    with pipeline(key=bytearray(os.urandom(32)), budget=EncryptionBudget(1, 2)) as protector:
+    with pipeline(_key=bytearray(os.urandom(32)), _budget=EncryptionBudget(1, 2)) as protector:
         formatted = protector.encrypt("one", ID)
         protector.encrypt("two", ID)
         assert protector.encryption_count == 2
@@ -897,9 +897,9 @@ def test_pipeline_counts_against_the_keys_budget() -> None:
 
 def test_pipeline_close_zeroes_the_key_and_its_base64_and_refuses_later_use() -> None:
     key = bytearray(os.urandom(32))
-    protector = pipeline(key=key)
+    protector = pipeline(_key=key)
     protector.get_key_as_base64()
-    base64_buffer = protector.base64_buffer
+    base64_buffer = protector._base64_buffer
     formatted = protector.encrypt("hello", ID)
 
     protector.close()

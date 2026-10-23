@@ -158,7 +158,7 @@ class AesGcmCryptoProvider(CryptoProvider):
     @classmethod
     def create(cls, key_wrapper: KeyWrapper, wrapped: Buffer, expiry_seconds: int,
                max_refresh_failures: int | None = RefreshFailurePolicy.DEFAULT_MAX_REFRESH_FAILURES,
-               logger: logging.Logger | None = None, *, budget: EncryptionBudget | None = None,
+               logger: logging.Logger | None = None, *, _budget: EncryptionBudget | None = None,
                _refresh_timeout: float | None = None) -> AesGcmCryptoProvider:
         """Reveals the DEK through ``key_wrapper`` and starts the background refresh.
 
@@ -170,8 +170,8 @@ class AesGcmCryptoProvider(CryptoProvider):
         :param logger: receives an error per failed refresh, a critical entry when key access is
             suspended, an info entry when it resumes, and a warning near the encryption limit;
             ``None`` for the ``hkdfguard.cryptoprovider.aesgcm256`` logger
-        :param budget: tests only - the encryption count to draw on
-        :param _refresh_timeout: tests only - how long a refresh waits for the key wrapper, in
+        :param _budget: for this package's tests only, not public API - the encryption count to draw on
+        :param _refresh_timeout: for this package's tests only, not public API - how long a refresh waits for the key wrapper, in
             seconds; one refresh interval otherwise
         :raises ValueError: an argument is out of range (before any key wrapper call)
         """
@@ -181,7 +181,7 @@ class AesGcmCryptoProvider(CryptoProvider):
         owned = wrapped if isinstance(wrapped, bytearray) else bytearray(wrapped)
         effective_logger = logger if logger is not None else _DEFAULT_LOGGER
 
-        first = _reveal(key_wrapper, owned, budget, effective_logger)
+        first = _reveal(key_wrapper, owned, _budget, effective_logger)
         return cls(key_wrapper, owned, expiry_seconds, max_refresh_failures, first.budget, first, effective_logger, _refresh_timeout)
 
     @property
@@ -200,8 +200,9 @@ class AesGcmCryptoProvider(CryptoProvider):
         return self._budget.count
 
     @property
-    def current_session(self) -> AesGcmCryptoSession | None:
-        """The session in use, for tests; ``None`` while suspended or after close."""
+    def _current_session(self) -> AesGcmCryptoSession | None:
+        """The session in use - for this package's tests; ``None`` while suspended or after close.
+        Not public API."""
         return self._current
 
     def encrypt(self, plaintext: WritableBuffer, result: WritableBuffer, *, aad: Buffer = b"") -> int:
