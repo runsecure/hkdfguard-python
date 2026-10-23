@@ -1395,3 +1395,15 @@ def test_native_a_key_file_of_the_right_size_with_an_unknown_version_is_malforme
 
     with pytest.raises(InvalidKeyFileError, match="status -38"):
         reader().read_key_file(path)
+
+
+def test_the_revocation_pass_refuses_only_a_definite_revocation() -> None:
+    path = r"C:\Program Files\HkdfGuard\v1\HkdfGuard.dll"
+    with pytest.raises(PermissionError, match="revoked"):
+        WindowsNativeLibraryLoader.verify_not_revoked(path, 0x800B010C)  # CERT_E_REVOKED
+    with pytest.raises(PermissionError, match="revoked"):
+        WindowsNativeLibraryLoader.verify_not_revoked(path, 0x800B010C - (1 << 32))  # as a signed LONG
+    # Success, offline, no revocation data, revocation status unknown, anything else: the load continues.
+    for status in (0, 0x80092013, 0x80092012, 0x800B010E, 0x80096010):
+        WindowsNativeLibraryLoader.verify_not_revoked(path, status)
+

@@ -294,6 +294,9 @@ _STATE_ACTION_VERIFY: Final = 1
 _STATE_ACTION_CLOSE: Final = 2
 _CACHE_ONLY_URL_RETRIEVAL: Final = 0x1000
 _NO_SIGNER_CERT: Final = 0x80096002
+_REVOKE_WHOLECHAIN: Final = 1
+_STATE_ACTION_IGNORE: Final = 0
+_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT: Final = 0x80
 
 
 @dataclass(frozen=True)
@@ -342,6 +345,31 @@ def verify_embedded_signature(path: str) -> SignatureVerification:
         # Release the state the verify call allocated, whatever it returned.
         data.dwStateAction = _STATE_ACTION_CLOSE
         wintrust.WinVerifyTrust(no_interactive_user, byref(action), byref(data))
+
+
+def revocation_status(path: str) -> int:
+    """A second, separate WinVerifyTrust pass, run once every other check has passed: the same generic
+    Authenticode policy, checking revocation across the whole chain except the root, with network
+    retrieval of revocation data allowed (not cache-only) and no state kept. Returns WinVerifyTrust's
+    HRESULT; the caller refuses only CERT_E_REVOKED. Lifetime signing is deliberately not requested:
+    Artifact Signing certificates live about three days, and it would make every timestamped signature
+    expire with them."""
+    wintrust = _system32("wintrust.dll")
+    wintrust.WinVerifyTrust.argtypes = [c_void_p, POINTER(_Guid), POINTER(_WintrustData)]
+    wintrust.WinVerifyTrust.restype = ctypes.c_long
+
+    file_info = _WintrustFileInfo(ctypes.sizeof(_WintrustFileInfo), path, None, None)
+    data = _WintrustData()
+    data.cbStruct = ctypes.sizeof(_WintrustData)
+    data.dwUIChoice = _UI_NONE
+    data.fdwRevocationChecks = _REVOKE_WHOLECHAIN
+    data.dwUnionChoice = _CHOICE_FILE
+    data.pFile = ctypes.pointer(file_info)
+    data.dwStateAction = _STATE_ACTION_IGNORE
+    data.dwProvFlags = _REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT
+    action = _Guid.of(_GENERIC_VERIFY_V2)
+    no_interactive_user = c_void_p(-1)  # INVALID_HANDLE_VALUE
+    return int(wintrust.WinVerifyTrust(no_interactive_user, byref(action), byref(data)) & 0xFFFFFFFF)
 
 
 def _read_signer_chain(wintrust: Any, state_data: int | None) -> tuple[bytes, bytes] | None:

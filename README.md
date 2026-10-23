@@ -169,6 +169,20 @@ the package is installed.
 | Linux    | `/usr/lib/<multiarch>/libhkdfguard.so.1`, or `/usr/lib64/libhkdfguard.so.1`, from the `libhkdfguard1` package (`hkdfguard-libs` on RPM distributions); x64 and arm64 | `/usr/bin/hkdfguard` |
 | macOS    | `/Library/Application Support/HkdfGuard/v1/libhkdfguard.dylib`, or `~/.hkdfguard/v1/libhkdfguard.dylib` | `hkdfguard` |
 
+On **macOS** the per-user location is used only when there is no system install. Its home folder
+comes from the account database (`pwd.getpwuid`), never `$HOME`, so setting the environment can't
+move it. Either install must be version 0.9.0 or later - the library's `LC_ID_DYLIB` current
+version, which its signature covers - so an older signed release can't be planted in its place.
+
+Certificate revocation: on Windows, once the signature and its pins have passed, the loader asks
+WinVerifyTrust once more, now checking revocation across the signing chain and allowed to fetch
+revocation data over the network. It refuses the library only when a certificate is definitely
+revoked; if revocation can't be determined (offline, no data), it loads. A host whose network
+silently drops traffic, rather than refusing it, may stall once, on the first load, until that
+lookup times out. On macOS revocation isn't checked: the defences are the Developer ID and Team ID
+pins, the admin-only system install, and the minimum library version. A compromised signing
+identity is answered by a new release and a raised minimum version.
+
 On **Linux**, `LinuxNativeLibraryLoader` uses the package's file in the Debian multiarch directory
 (`/usr/lib/x86_64-linux-gnu` or `/usr/lib/aarch64-linux-gnu`, by the interpreter's architecture) if
 it is there, otherwise the one in `/usr/lib64`. Only "nothing is there" moves on; a location that
