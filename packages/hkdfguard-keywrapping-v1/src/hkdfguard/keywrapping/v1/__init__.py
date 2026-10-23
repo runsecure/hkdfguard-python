@@ -5,7 +5,6 @@ provider on Linux - called through ctypes."""
 from __future__ import annotations
 
 import enum
-import logging
 import os
 import sys
 import threading
@@ -85,14 +84,12 @@ class NativeHkdfKeyWrapperV1(KeyWrapper):
     def generate_and_wrap(self, result: WritableBuffer) -> int:
         return self._complete(lambda: self._library.generate_and_wrap_dek(self._service_name, result), "generate-and-wrap", result)
 
-    def read_key_file(self, path: str | os.PathLike[str], *, verify_permissions: bool = True,
-                      logger: logging.Logger | None = None) -> bytearray:
+    def read_key_file(self, path: str | os.PathLike[str]) -> bytearray:
         """Reads a key file through the native library's hkdfguard_open_file rather than Python file
         I/O. Besides the size and format checks, the native library refuses a file another account
         could have written or replaced - its path, owner and permissions are checked the way only the
         platform can - and one holding what looks like an unwrapped key. The bytes come back still
-        wrapped, ready for :meth:`unwrap`. The native checks can't be turned off, so
-        ``verify_permissions`` and ``logger`` are ignored.
+        wrapped, ready for :meth:`unwrap`. The checks can't be turned off.
 
         :raises FileNotFoundError: the file, or a folder in its path, does not exist
         :raises PermissionError: this account may not read the file, or its path is not trusted

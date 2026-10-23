@@ -3,8 +3,6 @@ from __future__ import annotations
 import base64
 import logging
 import os
-import re
-import stat
 import threading
 import time
 from collections.abc import Buffer, Iterator
@@ -27,11 +25,9 @@ from hkdfguard.abstractions import (
     ObjectClosedError,
     ProtectedCacheBase,
     ProtectedConfigurationPurpose,
-    WrappedKeyFile,
     WrappedKeyLimits,
     WritableBuffer,
 )
-from hkdfguard.abstractions._wrapped_key_file import KeyFilePermissions, PathStatus
 from hkdfguard.cryptoprovider.aesgcm256 import AesGcmCryptoProvider, AesGcmCryptoProviderFactory, AesGcmPipelineDataProtector
 from hkdfguard.dataencryptionkey import Base64ConversionUtility, DataEncryptionKey, DefaultFormatProvider, KeyRing, KeyRingBuilder
 from hkdfguard.diagnostics import AttributeNames, HkdfGuardLog, HkdfGuardTelemetry, SpanNames
@@ -61,6 +57,11 @@ class FixedKeyWrapper(KeyWrapper):
     def generate_and_wrap(self, result: WritableBuffer) -> int:
         memoryview(result).cast("B")[:32] = self.key
         return 32
+
+    def read_key_file(self, path: str | os.PathLike[str]) -> bytearray:
+        # Test double: a plain read. A real key wrapper must refuse a file another account could replace.
+        with open(path, "rb") as file:
+            return bytearray(file.read())
 
 
 def new_key() -> DataEncryptionKey:
@@ -538,22 +539,15 @@ def test_key_files_up_to_the_limit_are_read_whole(tmp_path: Path, length: int) -
         assert factory.wrapped == [content]
 
 
-@pytest.mark.parametrize(("length", "message"), [(0, "is empty"), (WrappedKeyLimits.MAX_BYTES + 1, "larger than 512 bytes"),
-                                                 (10 * 1024 * 1024, "larger than 512 bytes")])
-def test_empty_or_oversized_key_files_are_refused(tmp_path: Path, length: int, message: str) -> None:
+@pytest.mark.parametrize("length", [0, WrappedKeyLimits.MAX_BYTES + 1])
+def test_a_wrapped_key_that_is_empty_or_over_the_limit_is_refused_whatever_the_key_wrapper(tmp_path: Path, length: int) -> None:
     path = tmp_path / "v1.bin"
     path.write_bytes(bytes(length))
-    with pytest.raises(InvalidKeyFileError, match=message):
-        builder().with_key_file(1, path).build()
-    with pytest.raises(OSError, match=message):  # still an OSError, as it always was
-        WrappedKeyFile.read(path)
+    factory = RecordingFactory()
 
-
-def test_the_default_read_refuses_a_missing_path_before_opening_anything() -> None:
-    with pytest.raises(TypeError):
-        WrappedKeyFile.read(None)  # type: ignore[arg-type]
-    with pytest.raises(ValueError):
-        WrappedKeyFile.read("")
+    with pytest.raises(InvalidKeyFileError):
+        builder(factory).with_key_file(1, path).build()
+    assert factory.wrapped == []
 
 
 # --- Ephemeral key rotation -------------------------------------------------------------------
@@ -966,104 +960,6 @@ def test_a_version_outside_the_signed_32_bit_range_is_refused_everywhere(version
         KeyRingBuilder().with_ephemeral_key(version)
 
 
-def _status(owner: int, mode: int) -> PathStatus:
-    return PathStatus(owner, mode)
-
-
-_FILE = stat.S_IFREG
-_DIR = stat.S_IFDIR
-
-
-@pytest.mark.parametrize(("owner", "mode"), [(1000, _FILE | 0o600), (1000, _FILE | 0o644), (0, _FILE | 0o644), (0, _FILE | 0o400)])
-def test_a_key_file_owned_by_root_or_the_user_and_writable_by_no_one_else_passes(owner: int, mode: int) -> None:
-    KeyFilePermissions.verify_file("/etc/k.bin", _status(owner, mode), {0, 1000})
-
-
-@pytest.mark.parametrize(("owner", "mode", "message"), [
-    (1001, _FILE | 0o600, "owned by uid 1001"),
-    (1000, _FILE | 0o660, "writable by its group"),
-    (1000, _FILE | 0o666, "writable by its group or by every user"),
-    (1000, _FILE | 0o602, "writable by its group or by every user"),
-    (1000, _FILE | stat.S_ISVTX | 0o666, "writable"),  # the sticky exemption is for directories only
-    (1000, stat.S_IFLNK | 0o777, "not a regular file"),
-    (1000, _DIR | 0o700, "not a regular file"),
-])
-def test_a_key_file_that_someone_else_owns_or_can_write_is_refused(owner: int, mode: int, message: str) -> None:
-    with pytest.raises(PermissionError, match=message):
-        KeyFilePermissions.verify_file("/etc/k.bin", _status(owner, mode), {0, 1000})
-
-
-def test_every_directory_above_a_key_file_is_checked_up_to_the_root() -> None:
-    tree = {"/": _status(0, _DIR | 0o755), "/srv": _status(0, _DIR | 0o755), "/srv/app": _status(1000, _DIR | 0o700)}
-    seen: list[str] = []
-
-    def get(path: str) -> PathStatus:
-        seen.append(path)
-        return tree[path]
-
-    KeyFilePermissions.verify_directories("/srv/app/k.bin", get, {0, 1000})
-    assert seen == ["/srv/app", "/srv", "/"]
-
-    cases = (("/srv/app", _status(1000, _DIR | 0o770)), ("/srv", _status(1002, _DIR | 0o755)), ("/", _status(0, _DIR | 0o757)),
-             ("/srv", _status(0, stat.S_IFLNK | 0o777)))
-    for bad_path, bad_status in cases:
-        broken = {**tree, bad_path: bad_status}
-        with pytest.raises(PermissionError, match=re.escape(f"'{bad_path}'")):
-            KeyFilePermissions.verify_directories("/srv/app/k.bin", broken.__getitem__, {0, 1000})
-
-
-def test_a_sticky_world_writable_directory_such_as_tmp_is_allowed_above_a_key_file() -> None:
-    tree = {"/": _status(0, _DIR | 0o755), "/tmp": _status(0, _DIR | stat.S_ISVTX | 0o777)}
-    KeyFilePermissions.verify_directories("/tmp/k.bin", tree.__getitem__, {0, 1000})
-    tree["/tmp"] = _status(0, _DIR | 0o777)
-    with pytest.raises(PermissionError, match="writable"):
-        KeyFilePermissions.verify_directories("/tmp/k.bin", tree.__getitem__, {0, 1000})
-
-
-@pytest.mark.skipif(not hasattr(os, "geteuid"), reason="POSIX ownership and permission bits")
-def test_a_group_writable_key_file_stops_the_build_unless_the_checks_are_turned_off(tmp_path: Path) -> None:
-    path = tmp_path / "k.bin"
-    path.write_bytes(b"wrapped")
-    path.chmod(0o664)
-    tmp_path.chmod(0o700)
-
-    with pytest.raises(PermissionError, match="writable by its group"):
-        builder().with_key_file(1, path).build()
-    with builder().with_key_file(1, path).without_key_file_permission_checks().build():
-        pass
-
-
-@pytest.mark.skipif(not hasattr(os, "geteuid"), reason="POSIX ownership and permission bits")
-def test_a_symlinked_key_file_is_judged_by_what_it_points_to(tmp_path: Path) -> None:
-    target = tmp_path / "real.bin"
-    target.write_bytes(b"wrapped")
-    target.chmod(0o666)
-    link = tmp_path / "link.bin"
-    link.symlink_to(target)
-
-    with pytest.raises(PermissionError, match=r"real\.bin"):
-        builder().with_key_file(1, link).build()
-
-
-@pytest.mark.skipif(hasattr(os, "geteuid"), reason="only platforms without the POSIX checks warn")
-def test_a_platform_without_the_checks_warns_rather_than_pretending(tmp_path: Path) -> None:
-    path = tmp_path / "k.bin"
-    path.write_bytes(b"wrapped")
-    logger, handler = recording_logger()
-
-    assert WrappedKeyFile.read(path, verify_permissions=True, logger=logger) == b"wrapped"
-    assert any("not permission-checked" in r.getMessage() for r in handler.records)
-
-    handler.records.clear()
-    WrappedKeyFile.read(str(path), verify_permissions=False, logger=logger)
-    assert handler.records == []
-
-    # The builder hands its own logger to the key wrapper's read.
-    handler.records.clear()
-    with builder().with_logger(logger).with_key_file(1, path).build():
-        assert any("not permission-checked" in r.getMessage() for r in handler.records)
-
-
 # --- Key files are read through the key wrapper ----------------------------------------------------
 
 
@@ -1074,11 +970,10 @@ class FileReadingKeyWrapper(FixedKeyWrapper):
         super().__init__()
         self.payload = payload
         self.error = error
-        self.reads: list[tuple[str, bool]] = []
+        self.reads: list[str] = []
 
-    def read_key_file(self, path: str | os.PathLike[str], *, verify_permissions: bool = True,
-                      logger: logging.Logger | None = None) -> bytearray:
-        self.reads.append((os.fspath(path), verify_permissions))
+    def read_key_file(self, path: str | os.PathLike[str]) -> bytearray:
+        self.reads.append(os.fspath(path))
         if self.error is not None:
             raise self.error
         return bytearray(self.payload)
@@ -1097,17 +992,8 @@ def test_build_reads_every_key_file_through_the_key_wrapper(tmp_path: Path) -> N
     with wrapper_builder(wrapper, factory).with_key_file(2, tmp_path / "v2.bin").with_key_file(1, tmp_path / "v1.bin").build() as ring:
         assert ring.current_version == 2
 
-    assert wrapper.reads == [(str(tmp_path / "v1.bin"), True), (str(tmp_path / "v2.bin"), True)]
+    assert wrapper.reads == [str(tmp_path / "v1.bin"), str(tmp_path / "v2.bin")]
     assert factory.wrapped == [b"read-by-the-wrapper", b"read-by-the-wrapper"]
-
-
-def test_build_passes_the_permission_setting_to_the_key_wrapper(tmp_path: Path) -> None:
-    wrapper = FileReadingKeyWrapper()
-
-    with wrapper_builder(wrapper).with_key_file(1, tmp_path / "v1.bin").without_key_file_permission_checks().build():
-        pass
-
-    assert wrapper.reads == [(str(tmp_path / "v1.bin"), False)]
 
 
 @pytest.mark.parametrize("error", [InvalidKeyFileError("Key file 'v1.bin' was refused with status -37."), PermissionError("untrusted"),
@@ -1121,14 +1007,3 @@ def test_a_key_wrapper_refusing_a_key_file_stops_the_build_before_any_key_is_cre
 
     assert raised.value is error
     assert factory.providers == []
-
-
-def test_a_key_wrapper_without_its_own_read_uses_the_default_file_read(tmp_path: Path) -> None:
-    path = tmp_path / "v1.bin"
-    path.write_bytes(b"wrapped-on-disk")
-    wrapper = FixedKeyWrapper()
-
-    assert wrapper.read_key_file(path, verify_permissions=False) == bytearray(b"wrapped-on-disk")
-    assert type(wrapper.read_key_file(path, verify_permissions=False)) is bytearray
-    with pytest.raises(FileNotFoundError):
-        wrapper.read_key_file(tmp_path / "missing.bin")

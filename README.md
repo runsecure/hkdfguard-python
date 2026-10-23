@@ -201,9 +201,9 @@ an unwrapped DEK - 32 raw bytes, or 64 hex digits or base64, with optional white
 as a key exposure) - a right-size file that isn't a valid wrapped payload (-38), and an untrusted
 path (-39): a symbolic link, junction or other reparse point, an 8.3 short name, a UNC, mapped or
 SUBST path, or a file or folder another account could write or replace. These checks can't be
-turned off; `without_key_file_permission_checks()` only affects a key wrapper that keeps the default
-`read_key_file`, `WrappedKeyFile.read` (ordinary file I/O, refusing empty files and files over
-`WrappedKeyLimits.MAX_BYTES`, plus the POSIX ownership rule).
+turned off. `read_key_file` has no default implementation: a custom key wrapper must read key
+files itself, and must refuse a file another account could have written or replaced, since whoever
+can replace a key file chooses the key new data is encrypted under.
 
 ### Process hardening
 

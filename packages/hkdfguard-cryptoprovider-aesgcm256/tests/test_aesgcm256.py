@@ -51,6 +51,8 @@ class FakeKeyWrapper(KeyWrapper):
         self.generate_calls = 0
         self.throw_on_unwrap: BaseException | None = None
         self.bytes_written_override: int | None = None
+        # When set, unwrap blocks until it is: a key wrapper that hangs rather than failing.
+        self.block: threading.Event | None = None
         self._lock = threading.Lock()
 
     def wrap(self, plaintext: Buffer, result: WritableBuffer) -> int:
@@ -59,6 +61,9 @@ class FakeKeyWrapper(KeyWrapper):
     def unwrap(self, wrapped: Buffer, result: WritableBuffer) -> int:
         with self._lock:
             self.unwrap_calls += 1
+        block = self.block
+        if block is not None:
+            block.wait()
         if self.throw_on_unwrap is not None:
             raise self.throw_on_unwrap
         view = memoryview(result).cast("B")
@@ -71,6 +76,11 @@ class FakeKeyWrapper(KeyWrapper):
         self.generate_calls += 1
         memoryview(result).cast("B")[:32] = bytes([7] * 32)
         return 32
+
+    def read_key_file(self, path: str | os.PathLike[str]) -> bytearray:
+        # Test double: a plain read. A real key wrapper must refuse a file another account could replace.
+        with open(path, "rb") as file:
+            return bytearray(file.read())
 
 
 class GatedKeyWrapper(KeyWrapper):
@@ -93,6 +103,11 @@ class GatedKeyWrapper(KeyWrapper):
     def generate_and_wrap(self, result: WritableBuffer) -> int:
         memoryview(result).cast("B")[:7] = WRAPPED
         return 7
+
+    def read_key_file(self, path: str | os.PathLike[str]) -> bytearray:
+        # Test double: a plain read. A real key wrapper must refuse a file another account could replace.
+        with open(path, "rb") as file:
+            return bytearray(file.read())
 
 
 class RecordingHandler(logging.Handler):
@@ -930,3 +945,70 @@ def test_encrypt_accepts_adjacent_views_of_one_buffer() -> None:
     plaintext = bytearray(6)
     assert cipher.decrypt(view[6 : 6 + written], plaintext) == 6
     assert plaintext == b"secret"
+
+
+class ThrowingLogger(logging.Logger):
+    """A logger whose every record raises - a broken sink or filter that logging doesn't swallow."""
+
+    def handle(self, record: logging.LogRecord) -> None:
+        raise RuntimeError("logging sink is down")
+
+
+def test_fail_closed_still_suspends_at_the_limit_when_the_logger_raises() -> None:
+    wrapper = FakeKeyWrapper(os.urandom(32))
+    with create(wrapper, 1, 2, ThrowingLogger("throwing")) as provider:
+        wrapper.throw_on_unwrap = CryptographicError("KEK revoked")  # ticks ~1 s and ~2 s fail
+        time.sleep(2.6)
+        assert provider.key_access_suspended
+
+        # A raising "resumed" log can't turn a successful refresh into a failure, nor stop the refreshes.
+        wrapper.throw_on_unwrap = None  # tick ~3 s succeeds
+        time.sleep(1.0)
+        assert not provider.key_access_suspended
+
+
+def test_fail_closed_counts_each_timed_out_refresh_while_the_key_wrapper_hangs_without_piling_up_calls() -> None:
+    logger, handler = recording_logger()
+    wrapper = FakeKeyWrapper(os.urandom(32))
+    gate = threading.Event()
+    with AesGcmCryptoProvider.create(wrapper, bytearray(WRAPPED), 1, 2, logger, _refresh_timeout=0.3) as provider:
+        ciphertext = bytearray(36)
+        provider.encrypt(bytearray(b"survives"), ciphertext)
+        wrapper.block = gate
+        calls_before = wrapper.unwrap_calls
+
+        # Tick ~1 s hangs and times out at ~1.3 s (failure 1); tick ~2 s finds it still running
+        # (failure 2) rather than starting another call.
+        time.sleep(2.6)
+        assert provider.key_access_suspended
+        assert wrapper.unwrap_calls == calls_before + 1
+        failures = handler.with_event_id(HkdfGuardLog.KEY_REFRESH_FAILED)
+        assert len(failures) == 2
+        assert all(r.exc_info and isinstance(r.exc_info[1], TimeoutError) for r in failures)
+
+        # The key wrapper recovers: the abandoned call returns, its key discarded, and tick ~3 s resumes.
+        wrapper.block = None
+        gate.set()
+        time.sleep(1.0)
+        assert not provider.key_access_suspended
+        result = bytearray(8)
+        provider.decrypt(ciphertext, result)
+        assert result == b"survives"
+
+
+def test_close_does_not_wait_for_a_key_wrapper_that_hangs() -> None:
+    wrapper = FakeKeyWrapper()
+    gate = threading.Event()
+    provider = create(wrapper, 1)
+    wrapper.block = gate
+    time.sleep(1.2)  # the refresh at ~1 s is now stuck in the key wrapper
+
+    started = time.monotonic()
+    provider.close()
+    elapsed = time.monotonic() - started
+    gate.set()
+
+    assert elapsed < 0.5, f"close took {elapsed:.2f} s"
+    with pytest.raises(ObjectClosedError):
+        provider.encrypt(bytearray(b"x"), bytearray(64))
+

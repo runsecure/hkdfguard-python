@@ -34,6 +34,11 @@ class FixedKeyWrapper(KeyWrapper):
         memoryview(result).cast("B")[:32] = self.key
         return 32
 
+    def read_key_file(self, path: str | os.PathLike[str]) -> bytearray:
+        # Test double: a plain read. A real key wrapper must refuse a file another account could replace.
+        with open(path, "rb") as file:
+            return bytearray(file.read())
+
 
 def finish(builder: KeyRingBuilder) -> KeyRingBuilder:
     return builder.with_key_wrapper(FixedKeyWrapper()).with_crypto_provider_factory(AesGcmCryptoProviderFactory()).with_key_refresh_interval(60)

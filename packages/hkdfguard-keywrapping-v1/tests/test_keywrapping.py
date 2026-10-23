@@ -448,7 +448,7 @@ def test_read_key_file_through_the_abstract_type_reaches_the_native_library_what
     library = FakeKmsLibrary()
     wrapper: KeyWrapper = NativeHkdfKeyWrapperV1("service.h", library)
 
-    wrapper.read_key_file("dek.bin", verify_permissions=False)
+    wrapper.read_key_file("dek.bin")
 
     assert library.calls == ["open_file"]
 

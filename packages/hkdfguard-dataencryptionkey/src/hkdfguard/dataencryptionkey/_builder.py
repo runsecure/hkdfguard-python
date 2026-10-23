@@ -12,10 +12,12 @@ from hkdfguard.abstractions import (
     CryptoProvider,
     CryptoProviderFactory,
     EncryptedFormatProvider,
+    InvalidKeyFileError,
     KeyVersions,
     KeyWrapper,
     RefreshFailurePolicy,
     ServiceNames,
+    WrappedKeyLimits,
 )
 from hkdfguard.dataencryptionkey._format import DefaultFormatProvider
 from hkdfguard.dataencryptionkey._ring import DataEncryptionKey, KeyRing
@@ -52,7 +54,6 @@ class KeyRingBuilder:
         self._key_wrapper: KeyWrapper | None = None
         self._factory: CryptoProviderFactory | None = None
         self._format_provider: EncryptedFormatProvider = DefaultFormatProvider()
-        self._verify_key_file_permissions = True
         self._logger: logging.Logger | None = None
         self.service_name: str | None = None
         """The service name identifying this ring's KEK, if one was given."""
@@ -158,18 +159,6 @@ class KeyRingBuilder:
         self._key_files[version] = os.fspath(path)
         return self
 
-    def without_key_file_permission_checks(self) -> Self:
-        """Reads key files without checking who owns them and who can write them. Key files are read
-        through the key wrapper (:meth:`KeyWrapper.read_key_file`), and this only reaches a wrapper
-        that reads with ordinary file I/O (the default, :meth:`WrappedKeyFile.read`): there, on a POSIX
-        system, a key file and every directory above its real path must be owned by root or the
-        current user and writable by no one else (a sticky directory such as /tmp excepted), since
-        whoever can replace the file chooses the DEK the process encrypts under; Windows is not checked
-        that way. Turn this off only where permissions are enforced some other way. The native key
-        wrapper reads through the native library's own checks, which can't be turned off."""
-        self._verify_key_file_permissions = False
-        return self
-
     def with_ephemeral_key(self, version: int) -> Self:
         """Registers a version whose DEK is generated at build time and never written to disk.
 
@@ -219,8 +208,13 @@ class KeyRingBuilder:
             for version in sorted(self._key_files):
                 # Read through the key wrapper: a native KMS reads its own key files, with its own
                 # checks on who could have written them.
-                wrapped = wrapper.read_key_file(self._key_files[version], verify_permissions=self._verify_key_file_permissions,
-                                                logger=self._logger or _DEFAULT_LOGGER)
+                wrapped = wrapper.read_key_file(self._key_files[version])
+                # Whatever the key wrapper, a wrapped key is never empty and never over the limit.
+                if not wrapped:
+                    raise InvalidKeyFileError(f"Key file '{self._key_files[version]}' is empty.")
+                if len(wrapped) > WrappedKeyLimits.MAX_BYTES:
+                    raise InvalidKeyFileError(f"Key file '{self._key_files[version]}' is larger than {WrappedKeyLimits.MAX_BYTES} bytes "
+                                              "(WrappedKeyLimits.MAX_BYTES); a wrapped key never is.")
                 provider = factory.create(wrapper, wrapped, interval, failures)
                 _add_owned(ring, version, provider)
 
