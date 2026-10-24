@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import threading
 import time
-from collections.abc import Buffer
-from typing import Final
+from collections.abc import Buffer, Callable
+from typing import TYPE_CHECKING, Final
 
 from hkdfguard.abstractions import (
     ArrayUtility,
@@ -22,14 +23,18 @@ from hkdfguard.abstractions import (
 from hkdfguard.cryptoprovider.aesgcm256._session import KEY_LENGTH, NONCE_SIZE, TAG_SIZE, AesGcmCryptoSession, EncryptionBudget
 from hkdfguard.diagnostics import AttributeNames, EventNames, HkdfGuardLog, HkdfGuardTelemetry, SpanNames, record_exception
 
+if TYPE_CHECKING:
+    from opentelemetry.trace import Span
+
 _DEFAULT_LOGGER: Final = logging.getLogger("hkdfguard.cryptoprovider.aesgcm256")
 
 
 def _validate(expiry_seconds: int, max_refresh_failures: int | None) -> None:
     if not 1 <= expiry_seconds <= 300:
         raise ValueError(f"expiry_seconds must be between 1 and 300; it is {expiry_seconds}.")
-    if max_refresh_failures is not None and max_refresh_failures < 1:
-        raise ValueError(f"max_refresh_failures must be at least 1; it is {max_refresh_failures}.")
+    limit = RefreshFailurePolicy.MAX_ALLOWED_REFRESH_FAILURES
+    if max_refresh_failures is not None and not 1 <= max_refresh_failures <= limit:
+        raise ValueError(f"max_refresh_failures must be between 1 and {limit}; it is {max_refresh_failures}.")
 
 
 def _reveal(key_wrapper: KeyWrapper, wrapped: Buffer, budget: EncryptionBudget | None, logger: logging.Logger) -> AesGcmCryptoSession:
@@ -48,6 +53,59 @@ def _reveal(key_wrapper: KeyWrapper, wrapped: Buffer, budget: EncryptionBudget |
         raise
 
 
+def _quietly(action: Callable[[], object]) -> None:
+    """Runs code the application supplies (its logger, its tracer) so that an exception from it can
+    never decide whether the key stays in use."""
+    with contextlib.suppress(Exception):
+        action()
+
+
+class _Reveal:
+    """One reveal of the key on a worker thread, which a refresh can stop waiting for.
+
+    The key wrapper's call may block (the native one does), and a call can't be cancelled. So it runs
+    here, and a refresh that gives up on it calls :meth:`abandon`: whatever key it later reveals is
+    zeroed as soon as it arrives, never put into use."""
+
+    def __init__(self, key_wrapper: KeyWrapper, wrapped: Buffer, budget: EncryptionBudget, logger: logging.Logger) -> None:
+        # Its own copy: close zeroes the provider's wrapped payload without waiting for this call.
+        self._wrapped = bytearray(wrapped)
+        self._key_wrapper = key_wrapper
+        self._budget = budget
+        self._logger = logger
+        self._lock = threading.Lock()
+        self._abandoned = False
+        self.session: AesGcmCryptoSession | None = None
+        self.error: Exception | None = None
+        self.finished = threading.Event()
+        # Set when the reveal finishes, or by close so a refresh waiting on it stops at once.
+        self.wake = threading.Event()
+        threading.Thread(target=self._run, name="hkdfguard-aesgcm-reveal", daemon=True).start()
+
+    def _run(self) -> None:
+        try:
+            session = _reveal(self._key_wrapper, self._wrapped, self._budget, self._logger)
+        except Exception as error:  # handed to the waiting refresh
+            self.error = error
+        else:
+            with self._lock:
+                if self._abandoned:
+                    session.close()
+                else:
+                    self.session = session
+        finally:
+            ArrayUtility.zero_memory(self._wrapped)
+            self.finished.set()
+            self.wake.set()
+
+    def abandon(self) -> None:
+        with self._lock:
+            self._abandoned = True
+            session, self.session = self.session, None
+        if session is not None:
+            session.close()
+
+
 class AesGcmCryptoProvider(CryptoProvider):
     """Tracks one cached :class:`AesGcmCryptoSession`, bound to a single wrapped DEK. A background
     thread, ticking every ``expiry_seconds``, reveals the DEK afresh through the key wrapper and swaps
@@ -60,7 +118,8 @@ class AesGcmCryptoProvider(CryptoProvider):
     :attr:`RefreshFailurePolicy.DEFAULT_MAX_REFRESH_FAILURES` consecutive failures close every session
     (zeroing the DEK) and suspend encrypt/decrypt - they raise :class:`CryptographicError` - until a
     later refresh succeeds. A ``None`` ``max_refresh_failures`` keeps the last good session in use
-    (fail open).
+    (fail open). A refresh that takes longer than one refresh interval counts as failed, so a key
+    wrapper that hangs instead of failing still suspends key access on schedule.
     """
 
     MAX_ENCRYPTIONS_PER_KEY: Final = EncryptionBudget.DEFAULT_LIMIT
@@ -71,11 +130,14 @@ class AesGcmCryptoProvider(CryptoProvider):
     """Encryptions after which an :attr:`EventNames.ENCRYPTION_BUDGET_WARNING` event is raised, once."""
 
     def __init__(self, key_wrapper: KeyWrapper, wrapped: bytearray, expiry_seconds: int, max_refresh_failures: int | None,  # noqa: PLR0917 - private, called by create
-                 budget: EncryptionBudget, first_session: AesGcmCryptoSession, logger: logging.Logger) -> None:
+                 budget: EncryptionBudget, first_session: AesGcmCryptoSession, logger: logging.Logger,
+                 refresh_timeout: float | None = None) -> None:
         """Use :meth:`create`, which reveals the first key before constructing."""
         self._key_wrapper = key_wrapper
         self._wrapped = wrapped
         self._interval = float(expiry_seconds)
+        # How long a refresh waits for the key wrapper: one refresh interval.
+        self._refresh_timeout = refresh_timeout if refresh_timeout is not None else self._interval
         self._max_refresh_failures = max_refresh_failures
         self._budget = budget
         self._logger = logger
@@ -84,6 +146,10 @@ class AesGcmCryptoProvider(CryptoProvider):
         # The session a refresh replaced: closed one interval later, on the next swap or on close.
         self._retiring: AesGcmCryptoSession | None = None
         self._consecutive_failures = 0
+        # A reveal a refresh stopped waiting for, while it may still be running; and the one a
+        # refresh is waiting on now, so close can wake it. See _refresh_once.
+        self._abandoned: _Reveal | None = None
+        self._waiting: _Reveal | None = None
         self._closed = False
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run_refresh_loop, name="hkdfguard-aesgcm-refresh", daemon=True)
@@ -92,18 +158,21 @@ class AesGcmCryptoProvider(CryptoProvider):
     @classmethod
     def create(cls, key_wrapper: KeyWrapper, wrapped: Buffer, expiry_seconds: int,
                max_refresh_failures: int | None = RefreshFailurePolicy.DEFAULT_MAX_REFRESH_FAILURES,
-               logger: logging.Logger | None = None, *, budget: EncryptionBudget | None = None) -> AesGcmCryptoProvider:
+               logger: logging.Logger | None = None, *, _budget: EncryptionBudget | None = None,
+               _refresh_timeout: float | None = None) -> AesGcmCryptoProvider:
         """Reveals the DEK through ``key_wrapper`` and starts the background refresh.
 
         :param wrapped: the wrapped DEK payload. A ``bytearray`` is owned by the provider from here
             on and zeroed when it closes; other buffers are copied.
         :param expiry_seconds: how long each session is used before the next refresh, 1-300
         :param max_refresh_failures: consecutive failed refreshes tolerated before failing closed,
-            at least 1; ``None`` to fail open
+            1 to :attr:`RefreshFailurePolicy.MAX_ALLOWED_REFRESH_FAILURES` (100); ``None`` to fail open
         :param logger: receives an error per failed refresh, a critical entry when key access is
             suspended, an info entry when it resumes, and a warning near the encryption limit;
             ``None`` for the ``hkdfguard.cryptoprovider.aesgcm256`` logger
-        :param budget: tests only - the encryption count to draw on
+        :param _budget: for this package's tests only, not public API - the encryption count to draw on
+        :param _refresh_timeout: for this package's tests only, not public API - how long a refresh waits for the key wrapper, in
+            seconds; one refresh interval otherwise
         :raises ValueError: an argument is out of range (before any key wrapper call)
         """
         if key_wrapper is None:
@@ -112,8 +181,8 @@ class AesGcmCryptoProvider(CryptoProvider):
         owned = wrapped if isinstance(wrapped, bytearray) else bytearray(wrapped)
         effective_logger = logger if logger is not None else _DEFAULT_LOGGER
 
-        first = _reveal(key_wrapper, owned, budget, effective_logger)
-        return cls(key_wrapper, owned, expiry_seconds, max_refresh_failures, first.budget, first, effective_logger)
+        first = _reveal(key_wrapper, owned, _budget, effective_logger)
+        return cls(key_wrapper, owned, expiry_seconds, max_refresh_failures, first.budget, first, effective_logger, _refresh_timeout)
 
     @property
     def max_refresh_failures(self) -> int | None:
@@ -131,8 +200,9 @@ class AesGcmCryptoProvider(CryptoProvider):
         return self._budget.count
 
     @property
-    def current_session(self) -> AesGcmCryptoSession | None:
-        """The session in use, for tests; ``None`` while suspended or after close."""
+    def _current_session(self) -> AesGcmCryptoSession | None:
+        """The session in use - for this package's tests; ``None`` while suspended or after close.
+        Not public API."""
         return self._current
 
     def encrypt(self, plaintext: WritableBuffer, result: WritableBuffer, *, aad: Buffer = b"") -> int:
@@ -179,27 +249,55 @@ class AesGcmCryptoProvider(CryptoProvider):
         next_tick = time.monotonic() + self._interval
         while not self._stop.wait(max(0.0, next_tick - time.monotonic())):
             next_tick = max(next_tick + self._interval, time.monotonic())
-            self._refresh_once()
+            try:
+                self._refresh_once()
+            except Exception as error:
+                # Never let one refresh end the loop: with no more refreshes, the key would stay in
+                # use for good. Whatever went wrong counts as a failed refresh.
+                self._refresh_failed(None, error)
 
     def _refresh_once(self) -> None:
+        """Re-reveals the key, waiting at most one refresh interval for the key wrapper.
+
+        A wrapper that hangs rather than failing (a busy TPM resource manager, a keychain prompt
+        nobody can answer, a KMS endpoint that never replies) must still count towards the
+        refresh-failure policy, or a revoked KEK would never suspend key access. A reveal that misses
+        its deadline is abandoned, not cancelled - a native call can't be - and until it returns no
+        new one starts, so a stuck wrapper never accumulates calls; each tick in the meantime is a
+        failed refresh."""
         telemetry = HkdfGuardTelemetry.CRYPTO_PROVIDER_AES_GCM256
         with telemetry.tracer.start_as_current_span(SpanNames.CryptoProviderAesGcm256.BACKGROUND_REFRESH, record_exception=False,
                                                     set_status_on_exception=False) as span:
-            try:
-                fresh = _reveal(self._key_wrapper, self._wrapped, self._budget, self._logger)
-            except Exception as error:
-                if self._stop.is_set():
-                    # Shutdown: whatever an in-flight refresh raised on the way out is not a failure.
+            if self._abandoned is not None:
+                if not self._abandoned.finished.is_set():
+                    self._refresh_failed(span, TimeoutError(
+                        "The key wrapper has still not returned from a refresh that timed out; no new refresh starts until it does."))
                     return
-                record_exception(span, error)
-                self._consecutive_failures += 1
-                failures = self._consecutive_failures
-                HkdfGuardLog.key_refresh_failed(self._logger, failures, self._policy_description(), error)
-                if self._max_refresh_failures is not None and failures == self._max_refresh_failures:
-                    self._suspend_key_access()
-                    span.add_event(EventNames.KEY_ACCESS_SUSPENDED, {AttributeNames.CONSECUTIVE_FAILURES: failures})
-                    HkdfGuardLog.key_access_suspended(self._logger, failures)
+                self._abandoned = None
+
+            reveal = _Reveal(self._key_wrapper, self._wrapped, self._budget, self._logger)
+            with self._gate:
+                self._waiting = reveal
+            try:
+                reveal.wake.wait(self._refresh_timeout)
+            finally:
+                with self._gate:
+                    self._waiting = None
+
+            if self._stop.is_set():
+                # Shutdown: whatever the in-flight refresh did or will do is not a failure.
+                reveal.abandon()
                 return
+            if not reveal.finished.is_set():
+                reveal.abandon()
+                self._abandoned = reveal
+                self._refresh_failed(span, TimeoutError(f"The key wrapper did not reveal the key within {self._refresh_timeout:g} seconds."))
+                return
+            if reveal.error is not None:
+                self._refresh_failed(span, reveal.error)
+                return
+            fresh = reveal.session
+            assert fresh is not None  # finished without an error means a session
 
             with self._gate:
                 # close may have run while the key was being revealed: never put a session back.
@@ -213,30 +311,58 @@ class AesGcmCryptoProvider(CryptoProvider):
 
             previous, self._consecutive_failures = self._consecutive_failures, 0
             if self._max_refresh_failures is not None and previous >= self._max_refresh_failures:
-                HkdfGuardLog.key_access_resumed(self._logger, previous)
+                _quietly(lambda: HkdfGuardLog.key_access_resumed(self._logger, previous))
+
+    def _refresh_failed(self, span: Span | None, error: Exception) -> None:
+        self._consecutive_failures += 1
+        failures = self._consecutive_failures
+
+        # Enforce the policy before anything that runs application code (telemetry, the logger), so
+        # an exception there can't leave the key in use past the limit. >= rather than ==, and a
+        # suspend that is a no-op once suspended, so no tick can step over it.
+        suspended_now = (self._max_refresh_failures is not None and failures >= self._max_refresh_failures
+                         and self._suspend_key_access())
+
+        if span is not None:
+            _quietly(lambda: record_exception(span, error))
+        # Logged on every failure, whatever the policy: under fail-open it is the only sign the KEK is gone.
+        _quietly(lambda: HkdfGuardLog.key_refresh_failed(self._logger, failures, self._policy_description(), error))
+        if suspended_now:
+            if span is not None:
+                _quietly(lambda: span.add_event(EventNames.KEY_ACCESS_SUSPENDED, {AttributeNames.CONSECUTIVE_FAILURES: failures}))
+            _quietly(lambda: HkdfGuardLog.key_access_suspended(self._logger, failures))
 
     def _policy_description(self) -> str:
         if self._max_refresh_failures is not None:
             return f"fail closed after {self._max_refresh_failures} consecutive failures"
         return "fail open (the last good key stays in use)"
 
-    def _suspend_key_access(self) -> None:
-        # Fail closed: zero every revealed copy of the DEK until a refresh succeeds.
+    def _suspend_key_access(self) -> bool:
+        """Fails closed: zeroes every revealed copy of the DEK until a refresh succeeds. Returns whether
+        this call suspended access - ``False`` if it already was, or the provider is closed."""
         with self._gate:
+            if self._closed:
+                return False
             retiring, self._retiring = self._retiring, None
             current, self._current = self._current, None
         for session in (retiring, current):
             if session is not None:
                 session.close()
+        return current is not None
 
     def close(self) -> None:
-        """Stops the background refresh, waiting for one already in flight, then zeroes the wrapped
-        payload and every revealed key. Safe to call more than once, from any thread."""
+        """Stops the background refresh, then zeroes the wrapped payload and every revealed key. A
+        refresh still waiting on the key wrapper is abandoned rather than waited for, so a stuck
+        wrapper can't block close; whatever key it later reveals is zeroed when it arrives. Safe to
+        call more than once, from any thread."""
         with self._gate:
             if self._closed:
                 return
             self._closed = True
+            waiting = self._waiting
         self._stop.set()
+        if waiting is not None:
+            waiting.wake.set()
         if threading.current_thread() is not self._thread:
             self._thread.join()
 

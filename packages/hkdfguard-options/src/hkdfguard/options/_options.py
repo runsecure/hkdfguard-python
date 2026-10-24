@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import ClassVar, Self
 
-from hkdfguard.abstractions import KeyVersions, ServiceNames
+from hkdfguard.abstractions import KeyVersions, RefreshFailurePolicy, ServiceNames
 from hkdfguard.dataencryptionkey import KeyRingBuilder
 
 _INTEGER: re.Pattern[str] = re.compile(r"[+-]?\d+")
@@ -138,8 +138,9 @@ class HkdfGuardOptions:
         if self.key_refresh_interval is not None and not 1 <= self.key_refresh_interval <= 300:
             failures.append("key_refresh_interval must be between 1 and 300 seconds.")
 
-        if self.max_refresh_failures is not None and self.max_refresh_failures < 1:
-            failures.append("max_refresh_failures must be at least 1.")
+        limit = RefreshFailurePolicy.MAX_ALLOWED_REFRESH_FAILURES
+        if self.max_refresh_failures is not None and not 1 <= self.max_refresh_failures <= limit:
+            failures.append(f"max_refresh_failures must be between 1 and {limit}.")
 
         if self.ephemeral_key_rotation_hours is not None and not 1 <= self.ephemeral_key_rotation_hours <= self.MAX_EPHEMERAL_KEY_ROTATION_HOURS:
             failures.append(f"ephemeral_key_rotation_hours must be between 1 and {self.MAX_EPHEMERAL_KEY_ROTATION_HOURS}.")

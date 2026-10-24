@@ -56,4 +56,5 @@ jobs:
           done
       - run: uv build --all-packages --out-dir dist
       - run: python3 scripts/check-dist.py dist
-      - run: uvx twine check --strict dist/*.whl dist/*.tar.gz
+      # Pinned by uv.lock, as in the release workflow.
+      - run: uv run --locked --only-group dist twine check --strict dist/*.whl dist/*.tar.gz

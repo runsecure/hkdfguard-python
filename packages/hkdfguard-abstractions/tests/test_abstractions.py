@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Buffer, Callable
-from pathlib import Path
 
 import pytest
 from hkdfguard.abstractions import (
@@ -18,7 +17,6 @@ from hkdfguard.abstractions import (
     ServiceNames,
     Utf8,
     VersionedKey,
-    WrappedKeyFile,
     WrappedKeyLimits,
     WritableBuffer,
 )
@@ -484,19 +482,8 @@ class _MinimalKeyWrapper(KeyWrapper):
         raise NotImplementedError
 
 
-def test_a_key_wrapper_reads_key_files_with_the_default_read_unless_it_has_its_own(tmp_path: Path) -> None:
-    path = tmp_path / "dek.bin"
-    path.write_bytes(b"\x01wrapped")
-
-    assert _MinimalKeyWrapper().read_key_file(path, verify_permissions=False) == WrappedKeyFile.read(path, verify_permissions=False) \
-        == bytearray(b"\x01wrapped")
-
-
-@pytest.mark.parametrize(("size", "message"), [(0, "is empty"), (WrappedKeyLimits.MAX_BYTES + 1, "larger than 512 bytes")])
-def test_the_default_read_refuses_an_empty_or_oversized_file_as_invalid_data(tmp_path: Path, size: int, message: str) -> None:
-    path = tmp_path / "dek.bin"
-    path.write_bytes(b"\x7f" * size)
-
-    with pytest.raises(InvalidKeyFileError, match=message):
-        _MinimalKeyWrapper().read_key_file(path, verify_permissions=False)
+def test_a_key_wrapper_must_read_its_own_key_files_there_is_no_unchecked_default() -> None:
+    # Whoever can replace a key file chooses the DEK, so every key wrapper decides how it trusts one.
+    with pytest.raises(TypeError, match="read_key_file"):
+        _MinimalKeyWrapper()  # type: ignore[abstract]
     assert issubclass(InvalidKeyFileError, OSError)

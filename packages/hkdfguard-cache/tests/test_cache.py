@@ -44,6 +44,11 @@ class FixedKeyWrapper(KeyWrapper):
     def generate_and_wrap(self, result: WritableBuffer) -> int:
         raise NotImplementedError
 
+    def read_key_file(self, path: str | os.PathLike[str]) -> bytearray:
+        # Test double: a plain read. A real key wrapper must refuse a file another account could replace.
+        with open(path, "rb") as file:
+            return bytearray(file.read())
+
 
 def new_key() -> DataEncryptionKey:
     return DataEncryptionKey(AesGcmCryptoProvider.create(FixedKeyWrapper(os.urandom(32)), b"wrapped", 60))

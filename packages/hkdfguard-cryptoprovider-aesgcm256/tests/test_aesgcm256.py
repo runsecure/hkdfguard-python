@@ -51,6 +51,8 @@ class FakeKeyWrapper(KeyWrapper):
         self.generate_calls = 0
         self.throw_on_unwrap: BaseException | None = None
         self.bytes_written_override: int | None = None
+        # When set, unwrap blocks until it is: a key wrapper that hangs rather than failing.
+        self.block: threading.Event | None = None
         self._lock = threading.Lock()
 
     def wrap(self, plaintext: Buffer, result: WritableBuffer) -> int:
@@ -59,6 +61,9 @@ class FakeKeyWrapper(KeyWrapper):
     def unwrap(self, wrapped: Buffer, result: WritableBuffer) -> int:
         with self._lock:
             self.unwrap_calls += 1
+        block = self.block
+        if block is not None:
+            block.wait()
         if self.throw_on_unwrap is not None:
             raise self.throw_on_unwrap
         view = memoryview(result).cast("B")
@@ -71,6 +76,11 @@ class FakeKeyWrapper(KeyWrapper):
         self.generate_calls += 1
         memoryview(result).cast("B")[:32] = bytes([7] * 32)
         return 32
+
+    def read_key_file(self, path: str | os.PathLike[str]) -> bytearray:
+        # Test double: a plain read. A real key wrapper must refuse a file another account could replace.
+        with open(path, "rb") as file:
+            return bytearray(file.read())
 
 
 class GatedKeyWrapper(KeyWrapper):
@@ -93,6 +103,11 @@ class GatedKeyWrapper(KeyWrapper):
     def generate_and_wrap(self, result: WritableBuffer) -> int:
         memoryview(result).cast("B")[:7] = WRAPPED
         return 7
+
+    def read_key_file(self, path: str | os.PathLike[str]) -> bytearray:
+        # Test double: a plain read. A real key wrapper must refuse a file another account could replace.
+        with open(path, "rb") as file:
+            return bytearray(file.read())
 
 
 class RecordingHandler(logging.Handler):
@@ -152,7 +167,7 @@ def finished(exporter: InMemorySpanExporter, name: str) -> list:  # type: ignore
 
 def create(wrapper: KeyWrapper, expiry_seconds: int = 60, max_refresh_failures: int | None = RefreshFailurePolicy.DEFAULT_MAX_REFRESH_FAILURES,
            logger: logging.Logger | None = None, budget: EncryptionBudget | None = None) -> AesGcmCryptoProvider:
-    return AesGcmCryptoProvider.create(wrapper, bytearray(WRAPPED), expiry_seconds, max_refresh_failures, logger, budget=budget)
+    return AesGcmCryptoProvider.create(wrapper, bytearray(WRAPPED), expiry_seconds, max_refresh_failures, logger, _budget=budget)
 
 
 def round_trip(provider: AesGcmCryptoProvider | AesGcmCryptoSession, plaintext: bytes = b"top secret", aad: bytes = b"") -> bytes:
@@ -356,10 +371,16 @@ def test_create_refuses_an_expiry_out_of_range_before_any_unwrap(expiry: int) ->
     assert wrapper.unwrap_calls == 0
 
 
-@pytest.mark.parametrize("failures", [0, -1])
-def test_create_refuses_max_refresh_failures_below_one(failures: int) -> None:
-    with pytest.raises(ValueError):
+@pytest.mark.parametrize("failures", [0, -1, 101, 2**31])
+def test_create_refuses_max_refresh_failures_outside_one_to_one_hundred(failures: int) -> None:
+    with pytest.raises(ValueError, match="between 1 and 100"):
         create(FakeKeyWrapper(), max_refresh_failures=failures)
+
+
+def test_create_accepts_the_largest_allowed_max_refresh_failures() -> None:
+    assert RefreshFailurePolicy.MAX_ALLOWED_REFRESH_FAILURES == 100
+    with create(FakeKeyWrapper(), max_refresh_failures=100) as provider:
+        assert provider.max_refresh_failures == 100
 
 
 @pytest.mark.parametrize("written", [0, 16, 31, 33])
@@ -393,22 +414,22 @@ def test_background_refresh_reveals_the_key_again_and_close_stops_it() -> None:
 def test_close_twice_is_safe_and_zeroes_the_wrapped_payload_and_the_key() -> None:
     wrapped = bytearray(WRAPPED)
     provider = AesGcmCryptoProvider.create(FakeKeyWrapper(), wrapped, 60)
-    session_ = provider.current_session
+    session_ = provider._current_session
     assert session_ is not None
 
     provider.close()
     provider.close()
 
     assert wrapped == bytearray(len(WRAPPED))
-    assert session_.key == bytearray(32)
+    assert session_._key_buffer == bytearray(32)
 
 
 def test_a_refresh_swaps_in_a_new_session_and_retires_the_old_one_an_interval_later() -> None:
     with create(FakeKeyWrapper(os.urandom(32)), 1) as provider:
-        first = provider.current_session
+        first = provider._current_session
         assert first is not None
         time.sleep(1.3)
-        assert provider.current_session is not first
+        assert provider._current_session is not first
         assert not first.closed
         time.sleep(1.0)
         assert first.closed
@@ -843,7 +864,7 @@ def test_pipeline_with_sensitive_logging_enabled_still_round_trips(spans: InMemo
 
 def test_pipeline_key_as_base64_is_a_read_only_view_of_one_buffer_holding_the_key() -> None:
     key = os.urandom(32)
-    with pipeline(key=bytearray(key)) as protector:
+    with pipeline(_key=bytearray(key)) as protector:
         first = protector.get_key_as_base64()
         second = protector.get_key_as_base64()
 
@@ -852,7 +873,7 @@ def test_pipeline_key_as_base64_is_a_read_only_view_of_one_buffer_holding_the_ke
         assert first.obj is second.obj
 
         formatted = protector.encrypt("hello", ID)
-        with pipeline(key=bytearray(base64.b64decode(bytes(first)))) as reader:
+        with pipeline(_key=bytearray(base64.b64decode(bytes(first)))) as reader:
             assert reveal(reader, formatted, ID) == "hello"
 
 
@@ -865,7 +886,7 @@ def test_pipeline_base64_encoding_matches_the_standard_codec_for_every_padding(l
 
 
 def test_pipeline_counts_against_the_keys_budget() -> None:
-    with pipeline(key=bytearray(os.urandom(32)), budget=EncryptionBudget(1, 2)) as protector:
+    with pipeline(_key=bytearray(os.urandom(32)), _budget=EncryptionBudget(1, 2)) as protector:
         formatted = protector.encrypt("one", ID)
         protector.encrypt("two", ID)
         assert protector.encryption_count == 2
@@ -876,9 +897,9 @@ def test_pipeline_counts_against_the_keys_budget() -> None:
 
 def test_pipeline_close_zeroes_the_key_and_its_base64_and_refuses_later_use() -> None:
     key = bytearray(os.urandom(32))
-    protector = pipeline(key=key)
+    protector = pipeline(_key=key)
     protector.get_key_as_base64()
-    base64_buffer = protector.base64_buffer
+    base64_buffer = protector._base64_buffer
     formatted = protector.encrypt("hello", ID)
 
     protector.close()
@@ -930,3 +951,70 @@ def test_encrypt_accepts_adjacent_views_of_one_buffer() -> None:
     plaintext = bytearray(6)
     assert cipher.decrypt(view[6 : 6 + written], plaintext) == 6
     assert plaintext == b"secret"
+
+
+class ThrowingLogger(logging.Logger):
+    """A logger whose every record raises - a broken sink or filter that logging doesn't swallow."""
+
+    def handle(self, record: logging.LogRecord) -> None:
+        raise RuntimeError("logging sink is down")
+
+
+def test_fail_closed_still_suspends_at_the_limit_when_the_logger_raises() -> None:
+    wrapper = FakeKeyWrapper(os.urandom(32))
+    with create(wrapper, 1, 2, ThrowingLogger("throwing")) as provider:
+        wrapper.throw_on_unwrap = CryptographicError("KEK revoked")  # ticks ~1 s and ~2 s fail
+        time.sleep(2.6)
+        assert provider.key_access_suspended
+
+        # A raising "resumed" log can't turn a successful refresh into a failure, nor stop the refreshes.
+        wrapper.throw_on_unwrap = None  # tick ~3 s succeeds
+        time.sleep(1.0)
+        assert not provider.key_access_suspended
+
+
+def test_fail_closed_counts_each_timed_out_refresh_while_the_key_wrapper_hangs_without_piling_up_calls() -> None:
+    logger, handler = recording_logger()
+    wrapper = FakeKeyWrapper(os.urandom(32))
+    gate = threading.Event()
+    with AesGcmCryptoProvider.create(wrapper, bytearray(WRAPPED), 1, 2, logger, _refresh_timeout=0.3) as provider:
+        ciphertext = bytearray(36)
+        provider.encrypt(bytearray(b"survives"), ciphertext)
+        wrapper.block = gate
+        calls_before = wrapper.unwrap_calls
+
+        # Tick ~1 s hangs and times out at ~1.3 s (failure 1); tick ~2 s finds it still running
+        # (failure 2) rather than starting another call.
+        time.sleep(2.6)
+        assert provider.key_access_suspended
+        assert wrapper.unwrap_calls == calls_before + 1
+        failures = handler.with_event_id(HkdfGuardLog.KEY_REFRESH_FAILED)
+        assert len(failures) == 2
+        assert all(r.exc_info and isinstance(r.exc_info[1], TimeoutError) for r in failures)
+
+        # The key wrapper recovers: the abandoned call returns, its key discarded, and tick ~3 s resumes.
+        wrapper.block = None
+        gate.set()
+        time.sleep(1.0)
+        assert not provider.key_access_suspended
+        result = bytearray(8)
+        provider.decrypt(ciphertext, result)
+        assert result == b"survives"
+
+
+def test_close_does_not_wait_for_a_key_wrapper_that_hangs() -> None:
+    wrapper = FakeKeyWrapper()
+    gate = threading.Event()
+    provider = create(wrapper, 1)
+    wrapper.block = gate
+    time.sleep(1.2)  # the refresh at ~1 s is now stuck in the key wrapper
+
+    started = time.monotonic()
+    provider.close()
+    elapsed = time.monotonic() - started
+    gate.set()
+
+    assert elapsed < 0.5, f"close took {elapsed:.2f} s"
+    with pytest.raises(ObjectClosedError):
+        provider.encrypt(bytearray(b"x"), bytearray(64))
+

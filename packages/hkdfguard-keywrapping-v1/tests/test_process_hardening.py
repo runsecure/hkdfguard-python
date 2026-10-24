@@ -55,7 +55,7 @@ class FakeHardeningLibrary(AbstractHkdfGuardKmsLibrary):
 def test_apply_succeeds_when_the_library_reports_ok() -> None:
     library = FakeHardeningLibrary()
 
-    NativeProcessHardening.apply(library=library)
+    NativeProcessHardening.apply(_library=library)
 
     assert library.harden_call_count == 1
 
@@ -63,7 +63,7 @@ def test_apply_succeeds_when_the_library_reports_ok() -> None:
 def test_apply_by_default_passes_no_flags() -> None:
     library = FakeHardeningLibrary()
 
-    NativeProcessHardening.apply(library=library)
+    NativeProcessHardening.apply(_library=library)
 
     assert library.last_harden_flags == 0
 
@@ -71,7 +71,7 @@ def test_apply_by_default_passes_no_flags() -> None:
 def test_apply_require_protected_signature_passes_the_native_flag() -> None:
     library = FakeHardeningLibrary()
 
-    NativeProcessHardening.apply(ProcessHardeningOptions.REQUIRE_PROTECTED_SIGNATURE, library=library)
+    NativeProcessHardening.apply(ProcessHardeningOptions.REQUIRE_PROTECTED_SIGNATURE, _library=library)
 
     assert library.last_harden_flags == AbstractHkdfGuardKmsLibrary.HARDEN_REQUIRE_PROTECTED_SIGNATURE
     assert AbstractHkdfGuardKmsLibrary.HARDEN_REQUIRE_PROTECTED_SIGNATURE == 0x1
@@ -84,7 +84,7 @@ def test_apply_refuses_an_unknown_option_before_reaching_the_native_library(opti
     library = FakeHardeningLibrary()
 
     with pytest.raises(ValueError, match="Unknown process hardening option"):
-        NativeProcessHardening.apply(options, library=library)
+        NativeProcessHardening.apply(options, _library=library)
     assert library.harden_call_count == 0
 
 
@@ -93,7 +93,7 @@ def test_apply_refuses_options_that_are_not_flags(options: object) -> None:
     library = FakeHardeningLibrary()
 
     with pytest.raises(TypeError):
-        NativeProcessHardening.apply(options, library=library)  # type: ignore[arg-type]
+        NativeProcessHardening.apply(options, _library=library)  # type: ignore[arg-type]
     assert library.harden_call_count == 0
 
 
@@ -103,7 +103,7 @@ def test_apply_raises_naming_the_status_and_its_meaning() -> None:
         lambda s: "could not disable core dumps" if s == AbstractHkdfGuardKmsLibrary.ERR_PROCESS_HARDENING_FAILED else None)
 
     with pytest.raises(RuntimeError) as raised:
-        NativeProcessHardening.apply(library=library)
+        NativeProcessHardening.apply(_library=library)
 
     assert str(raised.value) == "Native process hardening failed with status -20 (could not disable core dumps)."
 
@@ -112,7 +112,7 @@ def test_apply_raises_with_just_the_status_when_its_meaning_is_unknown() -> None
     library = FakeHardeningLibrary(-150)
 
     with pytest.raises(RuntimeError) as raised:
-        NativeProcessHardening.apply(library=library)
+        NativeProcessHardening.apply(_library=library)
 
     assert str(raised.value).endswith("status -150.")
 
@@ -121,7 +121,7 @@ def test_an_unknown_flag_the_native_library_refuses_is_reported_too() -> None:
     library = FakeHardeningLibrary(AbstractHkdfGuardKmsLibrary.ERR_INVALID_ARGUMENT)
 
     with pytest.raises(RuntimeError, match="status -1 "):
-        NativeProcessHardening.apply(library=library)
+        NativeProcessHardening.apply(_library=library)
 
 
 @pytest.mark.parametrize(("create", "hint"), [

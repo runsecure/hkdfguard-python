@@ -52,6 +52,27 @@ with (KeyRingBuilder()
     ...  # use result[:length], then zero it
 ```
 
+## Encryption budget
+
+With random 96-bit nonces, AES-GCM is safe for about 2^32 encryptions under one key (NIST
+SP 800-38D). Each crypto provider counts the encryptions under its key, warns at 2^28, and
+refuses to encrypt past 2^31 (`AesGcmCryptoProvider.MAX_ENCRYPTIONS_PER_KEY`). Decryption is never limited.
+
+That count is kept per process, by design. It is exact for the key an application should encrypt
+with at runtime: an ephemeral key, generated at startup and held only in that process's memory, so
+no other process or restart ever adds to its use. Key files are different. They carry what the
+deployment pipeline encrypted and are meant to be decrypted at runtime; every process that loads a
+key file, and every restart, starts a fresh count for it.
+
+**For encrypt operations, add an ephemeral key** at a version above every key file
+(`KeyRingBuilder.with_ephemeral_key(2)` beside `with_key_file(1, ...)`). New values are then encrypted under it, while the pipeline's values still decrypt
+under their key files. A value encrypted under an ephemeral key can't be decrypted once the process
+exits, which suits caches and other in-process data; never persist it.
+
+If an application does encrypt values that must outlive the process under a key file, its
+encryptions under that file are not counted together across instances and restarts. Bound them by
+deploying a new key file at a higher version regularly.
+
 ## Configuration
 
 `hkdfguard-options` lets a configuration file describe the ring. `HkdfGuardOptions.from_mapping`
@@ -122,8 +143,12 @@ silently fall back to a default.
     and `AuthenticationTagMismatchError`.
 - **Memory hygiene:** CPython has no pinned or stack allocation, so zeroing erases the live copy of
   a secret but not copies the allocator may have left; `str` values can never be zeroed, and
-  encoding a `str` always passes through a temporary immutable `bytes`. What a library such as
-  `cryptography` keeps inside a call is outside this library's control.
+  encoding a `str` always passes through a temporary immutable `bytes`. `cryptography`'s `AESGCM`
+  also keeps its own copy of the key for as long as the cipher object exists - for a session, until
+  its next refresh retires it - and zeroing this library's key buffer doesn't reach that copy; the
+  session releases the cipher when it closes, and whether the copy is wiped then is up to
+  `cryptography`. Process hardening, which blocks core dumps and debugger attachment, is what keeps
+  such copies out of reach.
 - **Logging:** a `None` logger means the package's own logger (e.g. `hkdfguard.cache`). The event id
   travels as the `hkdfguard_event_id` record attribute; .NET's Critical is `logging.CRITICAL`.
 - **Telemetry** goes to OpenTelemetry's global providers, or to those given to
@@ -144,6 +169,20 @@ the package is installed.
 | Linux    | `/usr/lib/<multiarch>/libhkdfguard.so.1`, or `/usr/lib64/libhkdfguard.so.1`, from the `libhkdfguard1` package (`hkdfguard-libs` on RPM distributions); x64 and arm64 | `/usr/bin/hkdfguard` |
 | macOS    | `/Library/Application Support/HkdfGuard/v1/libhkdfguard.dylib`, or `~/.hkdfguard/v1/libhkdfguard.dylib` | `hkdfguard` |
 
+On **macOS** the per-user location is used only when there is no system install. Its home folder
+comes from the account database (`pwd.getpwuid`), never `$HOME`, so setting the environment can't
+move it. Either install must be version 0.9.0 or later - the library's `LC_ID_DYLIB` current
+version, which its signature covers - so an older signed release can't be planted in its place.
+
+Certificate revocation: on Windows, once the signature and its pins have passed, the loader asks
+WinVerifyTrust once more, now checking revocation across the signing chain and allowed to fetch
+revocation data over the network. It refuses the library only when a certificate is definitely
+revoked; if revocation can't be determined (offline, no data), it loads. A host whose network
+silently drops traffic, rather than refusing it, may stall once, on the first load, until that
+lookup times out. On macOS revocation isn't checked: the defences are the Developer ID and Team ID
+pins, the admin-only system install, and the minimum library version. A compromised signing
+identity is answered by a new release and a raised minimum version.
+
 On **Linux**, `LinuxNativeLibraryLoader` uses the package's file in the Debian multiarch directory
 (`/usr/lib/x86_64-linux-gnu` or `/usr/lib/aarch64-linux-gnu`, by the interpreter's architecture) if
 it is there, otherwise the one in `/usr/lib64`. Only "nothing is there" moves on; a location that
@@ -153,12 +192,22 @@ name. Before loading, it requires all of the following:
   and no directory or file is writable by its group or by others. Links are followed one component
   at a time and each target is checked where it lies, so `/lib -> usr/lib` passes and a link into a
   user's directory does not.
-- The dynamic linker's environment can't substitute anything. `dlopen` of an absolute path is
+- The dynamic linker's environment is checked. `dlopen` of an absolute path is
   never searched for, but the library's dependencies are found by name - and `libtss2-esys`
   receives every ECDH shared secret. So every `LD_LIBRARY_PATH` directory, and every path-named
   `LD_PRELOAD` or `LD_AUDIT` object, must pass the same path checks, and none may be relative,
   empty (the working directory) or use `$ORIGIN`-style tokens. Both the environment the process
   started with (`/proc/self/environ`) and the current one (`os.environ`) are checked.
+  This check catches a misconfigured environment. It can't stop someone who controls the
+  service's environment: whatever `LD_PRELOAD` or `LD_AUDIT` loads runs when the process starts,
+  before the check, and can hide from it. Protect the service's environment (its unit file,
+  container spec or launch configuration) as carefully as its binaries.
+
+On macOS the loader also refuses while `DYLD_INSERT_LIBRARIES`, `DYLD_FRAMEWORK_PATH`,
+`DYLD_VERSIONED_LIBRARY_PATH`, `DYLD_VERSIONED_FRAMEWORK_PATH` or `DYLD_IMAGE_SUFFIX` is set: each
+makes dyld inject code or substitute a library the native library calls with every DEK. The same
+limit applies - dyld acts on them at process start - and the real protection is a host signed with
+the Hardened Runtime, which makes dyld ignore them.
 
 After loading, `dladdr` must place the library's export in the verified file, and every object in
 its dependency closure, read from each file's `DT_NEEDED` entries, must be bound to a file that
@@ -201,9 +250,9 @@ an unwrapped DEK - 32 raw bytes, or 64 hex digits or base64, with optional white
 as a key exposure) - a right-size file that isn't a valid wrapped payload (-38), and an untrusted
 path (-39): a symbolic link, junction or other reparse point, an 8.3 short name, a UNC, mapped or
 SUBST path, or a file or folder another account could write or replace. These checks can't be
-turned off; `without_key_file_permission_checks()` only affects a key wrapper that keeps the default
-`read_key_file`, `WrappedKeyFile.read` (ordinary file I/O, refusing empty files and files over
-`WrappedKeyLimits.MAX_BYTES`, plus the POSIX ownership rule).
+turned off. `read_key_file` has no default implementation: a custom key wrapper must read key
+files itself, and must refuse a file another account could have written or replaced, since whoever
+can replace a key file chooses the key new data is encrypted under.
 
 ### Process hardening
 
