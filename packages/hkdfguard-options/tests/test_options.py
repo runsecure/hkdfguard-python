@@ -34,6 +34,11 @@ class FixedKeyWrapper(KeyWrapper):
         memoryview(result).cast("B")[:32] = self.key
         return 32
 
+    def read_key_file(self, path: str | os.PathLike[str]) -> bytearray:
+        # Test double: a plain read. A real key wrapper must refuse a file another account could replace.
+        with open(path, "rb") as file:
+            return bytearray(file.read())
+
 
 def finish(builder: KeyRingBuilder) -> KeyRingBuilder:
     return builder.with_key_wrapper(FixedKeyWrapper()).with_crypto_provider_factory(AesGcmCryptoProviderFactory()).with_key_refresh_interval(60)
@@ -287,6 +292,16 @@ def test_fail_open_with_max_refresh_failures_fails() -> None:
 def test_validate_reports_every_failure_at_once() -> None:
     failures = HkdfGuardOptions(service_name="bad..name", key_refresh_interval=0, max_refresh_failures=0).validate()
     assert len(failures) == 4  # service name, interval, max failures, and no keys
+
+
+@pytest.mark.parametrize(("failures", "valid"), [(1, True), (100, True), (0, False), (101, False)])
+def test_max_refresh_failures_must_be_from_one_to_one_hundred(failures: int, valid: bool) -> None:
+    options = valid_options()
+    options.max_refresh_failures = failures
+    problems = options.validate()
+    assert (problems == []) is valid
+    if not valid:
+        assert problems == ["max_refresh_failures must be between 1 and 100."]
 
 
 def test_require_valid_returns_the_same_options() -> None:

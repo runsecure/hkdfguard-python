@@ -21,6 +21,9 @@ dev = [
     "ruff>=0.17",
     "mypy>=2.4",
 ]
+dist = [
+    "twine>=7.0.0",
+]
 
 [tool.uv]
 package = false

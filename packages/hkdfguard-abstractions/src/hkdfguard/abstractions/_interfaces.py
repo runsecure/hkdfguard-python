@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 import os
 from abc import ABC, abstractmethod
 from collections.abc import Buffer
@@ -12,7 +11,6 @@ from typing import NamedTuple, Self
 
 from hkdfguard.abstractions._buffers import WritableBuffer
 from hkdfguard.abstractions._rules import RefreshFailurePolicy
-from hkdfguard.abstractions._wrapped_key_file import WrappedKeyFile
 
 
 class _Closable(ABC):
@@ -76,16 +74,17 @@ class KeyWrapper(ABC):
         :returns: the number of bytes of wrapped key written to ``result``
         """
 
-    def read_key_file(self, path: str | os.PathLike[str], *, verify_permissions: bool = True,
-                      logger: logging.Logger | None = None) -> bytearray:
+    @abstractmethod
+    def read_key_file(self, path: str | os.PathLike[str]) -> bytearray:
         """Reads a key file holding a key this instance wrapped, returning its bytes still wrapped -
-        ready for :meth:`unwrap`. KeyRingBuilder reads every key file through its key wrapper, so a
-        wrapper backed by a native KMS can read through that KMS's own checks (the native library
-        refuses a file another account could have replaced, or one holding what looks like an
-        unwrapped key). The default reads it with ordinary file I/O (:meth:`WrappedKeyFile.read`),
-        applying the POSIX permission rule unless ``verify_permissions`` is off, and logging to
-        ``logger`` where there is no such rule; a wrapper whose own checks can't be turned off ignores
-        both.
+        ready for :meth:`unwrap`. KeyRingBuilder reads every key file through its key wrapper.
+
+        Whoever can replace a key file chooses the DEK the application encrypts new data under, so
+        an implementation must refuse a file that another account could have written or replaced -
+        the file, and every folder on its path - and should refuse one that holds what looks like an
+        unwrapped key. There is deliberately no default: a key wrapper decides how it trusts a file.
+        The native key wrapper reads through the native library's ``hkdfguard_open_file``, which
+        makes these checks the way only the platform can.
 
         :returns: the wrapped key the file holds; the caller owns it
         :raises FileNotFoundError: the file, or a folder in its path, does not exist
@@ -95,7 +94,6 @@ class KeyWrapper(ABC):
             valid payload (an ``OSError``)
         :raises OSError: the file can't be read for another reason
         """
-        return WrappedKeyFile.read(path, verify_permissions=verify_permissions, logger=logger)
 
 
 class CryptoProvider(_Closable):

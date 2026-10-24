@@ -33,7 +33,6 @@ from hkdfguard.abstractions._rules import (
     WrappedKeyLimits,
     ascii_upper,
 )
-from hkdfguard.abstractions._wrapped_key_file import WrappedKeyFile
 
 __all__ = [
     "ArrayUtility",
@@ -61,7 +60,6 @@ __all__ = [
     "ServiceNames",
     "Utf8",
     "VersionedKey",
-    "WrappedKeyFile",
     "WrappedKeyLimits",
     "WritableBuffer",
     "ascii_upper",

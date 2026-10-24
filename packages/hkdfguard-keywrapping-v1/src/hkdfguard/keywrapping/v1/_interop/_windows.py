@@ -110,6 +110,8 @@ class WindowsNativeLibraryLoader:
         cls.verify_location(path)
         cls.verify_signature(path, expected_publisher)
         cls.verify_image_kind(path)
+        # A second, separate pass, now checking revocation (network allowed); only a definite revocation refuses.
+        cls.verify_not_revoked(path, _win32.revocation_status(path))
         # Absolute path, so no probing for the library itself; its own imports come from System32 only.
         return ctypes.CDLL(os.path.abspath(path), winmode=_win32.LOAD_LIBRARY_SEARCH_SYSTEM32)
 
@@ -202,6 +204,20 @@ class WindowsNativeLibraryLoader:
         except Exception as error:
             raise PermissionError(f"Could not read the Authenticode signer of '{path}'; refusing to load it.") from error
         cls.verify_signer_identity(path, signer.leaf_subject, signer.leaf_eku_oids, signer.root_sha256, expected_publisher)
+
+    CERT_E_REVOKED: Final = 0x800B010C
+    """WinVerifyTrust's answer when a certificate in the signer's chain has definitely been revoked."""
+
+    @classmethod
+    def verify_not_revoked(cls, path: str, status: int) -> None:
+        """The rule for the revocation pass: refuse only a definite revocation. Every other result -
+        success, revocation servers offline (CRYPT_E_REVOCATION_OFFLINE), no revocation check possible
+        (CRYPT_E_NO_REVOCATION_CHECK), CERT_E_REVOCATION_FAILURE, or anything else - lets the load
+        continue: the first pass already validated the signature and its pins, and an offline host must
+        still start."""
+        if status & 0xFFFFFFFF == cls.CERT_E_REVOKED:
+            raise PermissionError(f"'{path}' is signed with a certificate that has been revoked; refusing to load it. "
+                                  "Install a current release.")
 
     @classmethod
     def verify_signer_identity(cls, path: str, leaf_subject: str, leaf_eku_oids: Collection[str], root_sha256: str,

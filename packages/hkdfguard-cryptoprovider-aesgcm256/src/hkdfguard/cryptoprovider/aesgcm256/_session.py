@@ -81,7 +81,8 @@ class EncryptionBudget:
 class AesGcmCryptoSession:
     """An AES-256-GCM cipher bound to a single 32-byte key, held for a while - by the provider until
     its next background refresh, or by the pipeline protector for its whole lifetime - then closed,
-    zeroing the key.
+    zeroing the key. ``cryptography``'s AESGCM keeps its own copy of the key, which that zeroing
+    doesn't reach; closing releases the cipher holding it.
 
     Thread-safe: ``cryptography``'s AESGCM keeps no per-operation state between calls, so one
     instance serves concurrent operations. An operation that started before close completes on the
@@ -105,8 +106,8 @@ class AesGcmCryptoSession:
         self._lock = threading.Lock()
 
     @property
-    def key(self) -> bytearray:
-        """The key buffer, for tests to check it is zeroed."""
+    def _key_buffer(self) -> bytearray:
+        """The key buffer - for this package's tests, to check it is zeroed. Not public API."""
         return self._key
 
     @property
@@ -196,7 +197,8 @@ class AesGcmCryptoSession:
             return length
 
     def close(self) -> None:
-        """Releases the cipher and zeroes the key. Safe to call more than once."""
+        """Releases the cipher, and with it ``cryptography``'s own copy of the key, and zeroes this
+        session's key buffer. Safe to call more than once."""
         with self._lock:
             if self._aes is None:
                 return

@@ -7,6 +7,7 @@ import errno
 import os
 import platform
 import stat
+import struct
 import threading
 from collections.abc import Callable, Collection
 from dataclasses import dataclass
@@ -14,6 +15,32 @@ from typing import Any, ClassVar, Final
 
 from hkdfguard.keywrapping.v1._interop._kms import CpuArchitecture, KmsFunctions, NativeKmsLibrary, NativeLibraryNotFoundError
 from hkdfguard.keywrapping.v1._interop._unix import UnixFileStatus, UnixFileType, probe
+
+_MH_MAGIC_64: Final = 0xFEEDFACF  # little-endian on arm64
+_FAT_MAGIC: Final = 0xCAFEBABE  # big-endian
+_FAT_MAGIC_64: Final = 0xCAFEBABF
+_CPU_TYPE_ARM64: Final = 0x0100000C
+_LC_ID_DYLIB: Final = 0xD
+
+
+def _account_home() -> str | None:
+    """The effective user's home folder from the account database, never ``$HOME``; ``None`` if there
+    is no entry. ``pwd`` exists only on Unix, so it is imported here, where only the macOS loader runs."""
+    import pwd  # noqa: PLC0415
+
+    try:
+        return pwd.getpwuid(os.geteuid()).pw_dir  # type: ignore[attr-defined,unused-ignore]
+    except (KeyError, OSError):
+        return None
+
+
+def _read_start(path: str, limit: int) -> bytes:
+    """Up to ``limit`` bytes from the start of the verified file, for its version."""
+    try:
+        with open(path, "rb") as file:
+            return file.read(limit)
+    except OSError as error:
+        raise PermissionError(f"could not read '{path}' to find its version ({error})") from None
 
 
 @dataclass(frozen=True)
@@ -27,12 +54,16 @@ class MacOsNativeLibraryLoader:
 
     1. **Location.** The system install, :attr:`SYSTEM_DIRECTORY`, whenever it exists; the per-user
        install, ``~/.hkdfguard/v1``, only when there is no system install - and never as a fallback
-       when the system install fails a check or merely can't be examined.
+       when the system install fails a check or merely can't be examined. The home folder comes from
+       the account database (``getpwuid``), never ``$HOME``, so whoever sets the process's environment
+       can't choose where the library is loaded from.
     2. **Path integrity.** No component from the file up to / may be a symbolic link, or writable by
        anyone but its owner - except the system directories above an install, which may also be
        writable by wheel or admin when root owns them. A system install is root-owned throughout; a
        user install root- or user-owned.
     3. **Code signature.** Valid, and satisfying :attr:`CODE_REQUIREMENT` - signed by the HkdfGuard team.
+       Its version - ``LC_ID_DYLIB``'s current_version, which the signature covers - must be at least
+       :attr:`MINIMUM_LIBRARY_VERSION`, so an older genuine release can't be planted in its place.
     4. **What dyld loaded.** Refuses if a DYLD_LIBRARY_PATH directory holds a :attr:`FILE_NAME`, and
        after dlopen asks dyld (dladdr) which file it mapped; anything else is unloaded and refused.
 
@@ -40,6 +71,11 @@ class MacOsNativeLibraryLoader:
     """
 
     FILE_NAME: Final = "libhkdfguard.dylib"
+    REFUSED_DYLD_VARIABLES: Final = ("DYLD_INSERT_LIBRARIES", "DYLD_FRAMEWORK_PATH", "DYLD_VERSIONED_LIBRARY_PATH",
+                                     "DYLD_VERSIONED_FRAMEWORK_PATH", "DYLD_IMAGE_SUFFIX")
+    """The dyld variables whose presence alone refuses the load: each makes dyld inject code into this process,
+    or load another file in place of a library it names - including the frameworks the HkdfGuard native library
+    calls with every DEK. None is set on a production host."""
     SYSTEM_DIRECTORY: Final = "/Library/Application Support/HkdfGuard/v1"
     USER_DIRECTORY_UNDER_HOME: Final = ".hkdfguard/v1"
     TEAM_ID: Final = "MFW3T8R8J3"
@@ -49,6 +85,12 @@ class MacOsNativeLibraryLoader:
         " and certificate leaf[field.1.2.840.113635.100.6.1.13] exists"  # Developer ID Application leaf
         f' and certificate leaf[subject.OU] = "{TEAM_ID}"')
     MINIMUM_MAC_OS_MAJOR_VERSION: Final = 13
+    MINIMUM_LIBRARY_VERSION: Final = (0 << 16) | (9 << 8) | 0
+    """The oldest native library release this package loads, in Mach-O's packed form
+    (major << 16 | minor << 8 | patch): 0.9.0. A release that fixes a security problem in the library
+    raises it, so an older, genuinely signed copy can't be put back in its place."""
+    VERSION_READ_LIMIT: Final = 64 * 1024
+    """How much of the file is read to find its version."""
     PROBE_EXPORT: Final = "hkdfguard_wrap_dek"
 
     # wheel and admin may write to root-owned system directories - only these, above an install.
@@ -78,10 +120,11 @@ class MacOsNativeLibraryLoader:
                 return cls._library
 
             cls.require_supported_platform(CpuArchitecture.current(), platform.mac_ver()[0])
-            choice = cls.choose_path(probe, os.path.expanduser("~"))
+            choice = cls.choose_path(probe, cls.home_from_account(_account_home()))
             owners = [0] if choice.is_system else [0, os.geteuid()]  # type: ignore[attr-defined,unused-ignore]
             cls.verify_location(choice.path, UnixFileStatus.of, owners)
             cls.verify_signature(choice.path, _check_code_signature)
+            cls.require_minimum_version(choice.path, _read_start(choice.path, cls.VERSION_READ_LIMIT))
             cls.refuse_shadowing(os.environ.get, os.path.exists)
 
             library = ctypes.CDLL(choice.path, mode=os.RTLD_NOW | os.RTLD_LOCAL)  # type: ignore[attr-defined,unused-ignore]
@@ -93,6 +136,96 @@ class MacOsNativeLibraryLoader:
                 raise
             cls._library = library
             return library
+
+    @staticmethod
+    def home_from_account(home: str | None) -> str:
+        """The per-user install's base: the home folder the account database gives this process's
+        effective user, or ``""`` - no per-user install - if the lookup failed or gave anything but an
+        absolute path."""
+        return home if home is not None and home.startswith("/") else ""
+
+    @staticmethod
+    def format_version(version: int) -> str:
+        """A packed Mach-O version as major.minor.patch."""
+        return f"{version >> 16}.{(version >> 8) & 0xFF}.{version & 0xFF}"
+
+    @classmethod
+    def dylib_current_version(cls, data: bytes) -> int:
+        """``LC_ID_DYLIB``'s current_version, read from the start of a Mach-O file: a thin arm64 image, or
+        the arm64 slice of a fat one. ``data`` is at most the first :attr:`VERSION_READ_LIMIT` bytes.
+
+        :raises ValueError: malformed, truncated, or not arm64
+        """
+        if len(data) < 4:
+            raise ValueError("too short to be a Mach-O file")
+        (magic,) = struct.unpack_from(">I", data, 0)
+        if magic in (_FAT_MAGIC, _FAT_MAGIC_64):
+            return cls._fat_arm64_version(data, wide=magic == _FAT_MAGIC_64)
+        return cls._thin_arm64_version(data)
+
+    @classmethod
+    def _fat_arm64_version(cls, data: bytes, *, wide: bool) -> int:
+        if len(data) < 8:
+            raise ValueError("truncated fat header")
+        (count,) = struct.unpack_from(">I", data, 4)
+        entry_size = 32 if wide else 20
+        if count * entry_size + 8 > len(data):
+            raise ValueError(f"fat header lists {count} architectures, more than were read")
+        for i in range(count):
+            entry = 8 + i * entry_size
+            (cputype,) = struct.unpack_from(">I", data, entry)
+            if cputype != _CPU_TYPE_ARM64:
+                continue
+            (offset,) = struct.unpack_from(">Q" if wide else ">I", data, entry + 8)
+            if offset >= len(data):
+                raise ValueError(f"the arm64 slice starts at {offset}, beyond the {len(data)} bytes read")
+            return cls._thin_arm64_version(data[offset:])
+        raise ValueError("no arm64 slice")
+
+    @staticmethod
+    def _thin_arm64_version(data: bytes) -> int:
+        header_size = 32  # mach_header_64
+        if len(data) < header_size:
+            raise ValueError("truncated Mach-O header")
+        magic, cputype = struct.unpack_from("<II", data, 0)
+        if magic != _MH_MAGIC_64:
+            raise ValueError("not a 64-bit Mach-O file")
+        if cputype != _CPU_TYPE_ARM64:
+            raise ValueError("not an arm64 image")
+        ncmds, sizeofcmds = struct.unpack_from("<II", data, 16)
+        end = header_size + sizeofcmds
+        if end > len(data):
+            raise ValueError("load commands run past the bytes read")
+        at = header_size
+        for i in range(ncmds):
+            if at + 8 > end:
+                raise ValueError(f"load command {i} runs past the load commands")
+            cmd, size = struct.unpack_from("<II", data, at)
+            if size < 8 or size % 8 != 0 or at + size > end:
+                raise ValueError(f"load command {i} has an invalid size {size}")
+            if cmd == _LC_ID_DYLIB:
+                # cmd, cmdsize, name offset, timestamp, current_version, compatibility_version
+                if size < 24:
+                    raise ValueError("LC_ID_DYLIB is too short")
+                (version,) = struct.unpack_from("<I", data, at + 16)
+                return int(version)
+            at += size
+        raise ValueError("no LC_ID_DYLIB load command")
+
+    @classmethod
+    def require_minimum_version(cls, path: str, data: bytes) -> None:
+        """Refuses a library whose version, read from ``data`` (the start of the verified file at
+        ``path``), is missing, unreadable or below :attr:`MINIMUM_LIBRARY_VERSION`.
+
+        :raises PermissionError: it is
+        """
+        try:
+            version = cls.dylib_current_version(data)
+        except ValueError as error:
+            raise PermissionError(f"Could not read the version of the HkdfGuard native library '{path}' ({error}); refusing to load it.") from None
+        if version < cls.MINIMUM_LIBRARY_VERSION:
+            raise PermissionError(f"'{path}' is HkdfGuard native library version {cls.format_version(version)}, older than the minimum this "
+                                  f"package accepts ({cls.format_version(cls.MINIMUM_LIBRARY_VERSION)}); install a current release.")
 
     @classmethod
     def require_supported_platform(cls, architecture: CpuArchitecture, os_version: str) -> None:
@@ -142,7 +275,17 @@ class MacOsNativeLibraryLoader:
 
     @classmethod
     def refuse_shadowing(cls, get_environment_variable: Callable[[str], str | None], exists: Callable[[str], bool]) -> None:
-        """Refuses before anything is loaded if a DYLD_LIBRARY_PATH directory holds a :attr:`FILE_NAME`."""
+        """Refuses before anything is loaded if one of :attr:`REFUSED_DYLD_VARIABLES` is set, or a
+        DYLD_LIBRARY_PATH directory holds a :attr:`FILE_NAME`.
+
+        A guard against a misconfigured environment, not against whoever controls it: dyld acts on these
+        variables when the process starts, so code they injected has already run - and can hide - by the
+        time this looks. Running the host with the Hardened Runtime, which makes dyld ignore them, is what
+        keeps that code out."""
+        for name in cls.REFUSED_DYLD_VARIABLES:
+            if get_environment_variable(name):
+                raise PermissionError(f"{name} is set, so dyld may inject code into this process or substitute a library the HkdfGuard "
+                                      f"native library uses; refusing to load it. Unset {name}.")
         search_path = get_environment_variable("DYLD_LIBRARY_PATH")
         if not search_path:
             return
