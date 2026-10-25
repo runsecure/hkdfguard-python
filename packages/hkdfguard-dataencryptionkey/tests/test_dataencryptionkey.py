@@ -798,6 +798,47 @@ def test_rotate_during_shutdown_reraises_and_still_closes_its_key() -> None:
         assert made.closed
 
 
+def test_rotate_keeps_the_new_key_open_when_the_applications_logger_raises_after_it_was_added() -> None:
+    logger, _ = recording_logger()
+
+    def raising_filter(record: logging.LogRecord) -> bool:
+        raise RuntimeError("the application's log filter failed")
+
+    logger.addFilter(raising_filter)
+    with KeyRing(DefaultFormatProvider()) as ring:
+        ring.add(1, TrackingKey())
+        made = TrackingKey()
+
+        assert ring._rotate_ephemeral_key(lambda: made, logger, never_stopping)
+        assert ring.current_version == 2 and ring.find(2) is made and not made.closed
+
+
+def test_rotation_thread_keeps_rotating_after_an_escaping_failure() -> None:
+    logger, handler = recording_logger()
+    with KeyRing(DefaultFormatProvider()) as ring:
+        ring.add(1, TrackingKey())
+        calls: list[int] = []
+        second_call = threading.Event()
+
+        def fail_once(create_key: object, log: object, stopping: object) -> bool:
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError("the application's tracer failed")
+            second_call.set()
+            return True
+
+        ring._rotate_ephemeral_key = fail_once  # type: ignore[method-assign, assignment]
+        thread = threading.Thread(target=ring._run_rotation, args=(0.01, TrackingKey, logger), daemon=True)
+        thread.start()
+        assert second_call.wait(5)
+        ring.close()
+        thread.join(5)
+
+    assert not thread.is_alive()
+    (failure, *_) = handler.with_event_id(HkdfGuardLog.EPHEMERAL_KEY_ROTATION_FAILED)
+    assert failure.exc_info is not None and "tracer failed" in str(failure.exc_info[1])
+
+
 def test_rotate_records_a_span_tagged_with_the_new_version(spans: InMemorySpanExporter) -> None:
     with KeyRing(DefaultFormatProvider()) as ring:
         ring.add(41, TrackingKey())

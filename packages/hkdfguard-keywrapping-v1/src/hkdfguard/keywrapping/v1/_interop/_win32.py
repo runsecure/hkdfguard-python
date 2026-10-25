@@ -91,6 +91,54 @@ def program_files_directory() -> str:
         ole32.CoTaskMemFree(ctypes.cast(path, c_void_p))
 
 
+def file_version(path: str) -> tuple[int, int, int] | None:
+    """(major, minor, patch) from the file's version resource, read through version.dll from
+    System32; ``None`` if it has none or it can't be read."""
+    version = _system32("version.dll")
+    version.GetFileVersionInfoSizeW.argtypes = [c_wchar_p, c_void_p]
+    version.GetFileVersionInfoSizeW.restype = c_uint32
+    version.GetFileVersionInfoW.argtypes = [c_wchar_p, c_uint32, c_uint32, c_void_p]
+    version.GetFileVersionInfoW.restype = ctypes.c_int
+    version.VerQueryValueW.argtypes = [c_void_p, c_wchar_p, POINTER(c_void_p), POINTER(c_uint32)]
+    version.VerQueryValueW.restype = ctypes.c_int
+
+    size = int(version.GetFileVersionInfoSizeW(path, None))
+    if size == 0:
+        return None
+    block = ctypes.create_string_buffer(size)
+    if not version.GetFileVersionInfoW(path, 0, size, block):
+        return None
+    info = c_void_p()
+    length = c_uint32()
+    if not version.VerQueryValueW(block, "\\", byref(info), byref(length)) or not info.value or length.value < 52:
+        return None
+    # VS_FIXEDFILEINFO: signature, struct version, file version MS, file version LS, ...
+    signature, _, file_ms, file_ls = (c_uint32 * 4).from_address(info.value)
+    if signature != 0xFEEF04BD:
+        return None
+    return file_ms >> 16, file_ms & 0xFFFF, file_ls >> 16
+
+
+def module_file_name(module: int) -> str:
+    """GetModuleFileNameW: the file Windows mapped a loaded module from."""
+    kernel32 = _kernel32()
+    kernel32.GetModuleFileNameW.argtypes = [c_void_p, c_wchar_p, c_uint32]
+    kernel32.GetModuleFileNameW.restype = c_uint32
+    buffer = ctypes.create_unicode_buffer(32768)  # the longest path Windows supports, plus its terminator
+    length = int(kernel32.GetModuleFileNameW(module, buffer, len(buffer)))
+    if length <= 0 or length >= len(buffer):
+        raise OSError(f"GetModuleFileNameW failed with error {ctypes.get_last_error()}.")  # type: ignore[attr-defined,unused-ignore]
+    return buffer.value
+
+
+def free_library(module: int) -> None:
+    """FreeLibrary: releases a reference a load took."""
+    kernel32 = _kernel32()
+    kernel32.FreeLibrary.argtypes = [c_void_p]
+    kernel32.FreeLibrary.restype = ctypes.c_int
+    kernel32.FreeLibrary(module)
+
+
 def file_attributes(path: str) -> int:
     """GetFileAttributesW: the item's own attributes (a link is not followed), or INVALID_FILE_ATTRIBUTES."""
     kernel32 = _kernel32()

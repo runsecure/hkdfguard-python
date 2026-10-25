@@ -158,7 +158,8 @@ silently fall back to a default.
 
 `hkdfguard-keywrapping-v1` calls the native KMS library through `ctypes`. The library is installed
 separately and loaded only from its verified location, exactly as in .NET and Java: path ACLs,
-Authenticode signer, root and EKU, and PE checks on Windows; ownership, code signature and dyld
+Authenticode signer, root and EKU, and PE checks on Windows, then that the module Windows mapped is
+the verified file; ownership, code signature and dyld
 checks on macOS; root ownership, dynamic-linker environment and dependency checks on Linux, where
 the library is not content-pinned and a release's authenticity is verified with Sigstore/cosign when
 the package is installed.
@@ -173,6 +174,8 @@ On **macOS** the per-user location is used only when there is no system install.
 comes from the account database (`pwd.getpwuid`), never `$HOME`, so setting the environment can't
 move it. Either install must be version 0.9.0 or later - the library's `LC_ID_DYLIB` current
 version, which its signature covers - so an older signed release can't be planted in its place.
+On **Windows** the same 0.9.0 floor applies to `HkdfGuard.dll`'s signed version resource, and a DLL
+with none is refused.
 
 Certificate revocation: on Windows, once the signature and its pins have passed, the loader asks
 WinVerifyTrust once more, now checking revocation across the signing chain and allowed to fetch
