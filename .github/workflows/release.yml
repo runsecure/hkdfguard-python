@@ -40,7 +40,9 @@ jobs:
           git merge-base --is-ancestor "refs/tags/${TAG}" origin/main \
             || { echo "::error::Tag ${TAG} is not on main; refusing to release it."; exit 1; }
 
-      - run: uv build --all-packages --out-dir dist
+      # The backend that builds what gets attested and published is pinned by version and hash
+      # (build-constraints.txt); uv.lock doesn't reach uv build's isolated build environment.
+      - run: uv build --all-packages --out-dir dist --build-constraints build-constraints.txt --require-hashes
 
       - name: Check the distributions (versions, licence, namespace, tag)
         env:

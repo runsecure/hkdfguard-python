@@ -314,7 +314,7 @@ uv sync                 # create .venv with every package (editable) and the dev
 uv run pytest           # all tests
 uv run ruff check packages
 uv run mypy packages    # strict
-uv build --all-packages # wheels and sdists into dist/
+uv build --all-packages --build-constraints build-constraints.txt --require-hashes # wheels and sdists into dist/
 ```
 
 ## Releasing
@@ -329,7 +329,13 @@ To release: set the same version in every `packages/*/pyproject.toml`, merge to 
 from any package's version. Running it by hand from the Actions tab builds and checks only.
 Verify a downloaded file with `gh attestation verify <file> --repo runsecure/hkdfguard-python`.
 
-`python scripts/check-dist.py dist --tag v1.0.0` runs the same checks locally after `uv build --all-packages`.
+`python scripts/check-dist.py dist --tag v1.0.0` runs the same checks locally after the `uv build` above.
+
+The build backend, hatchling, and everything it installs are pinned by version and hash in
+`build-constraints.txt`; CI and the release build with `--build-constraints build-constraints.txt
+--require-hashes`, so the wheels that are attested and published come from a known backend, not
+whatever PyPI serves that day (`uv.lock` doesn't cover the isolated build environment). The file's
+header says how to regenerate it for a newer hatchling.
 
 One-time setup, before the first release:
 

@@ -54,7 +54,8 @@ jobs:
           for directory in packages/*/; do
             cmp LICENSE "${directory}LICENSE"
           done
-      - run: uv build --all-packages --out-dir dist
+      # The build backend is hash-pinned by build-constraints.txt, as in the release workflow.
+      - run: uv build --all-packages --out-dir dist --build-constraints build-constraints.txt --require-hashes
       - run: python3 scripts/check-dist.py dist
       # Pinned by uv.lock, as in the release workflow.
       - run: uv run --locked --only-group dist twine check --strict dist/*.whl dist/*.tar.gz
