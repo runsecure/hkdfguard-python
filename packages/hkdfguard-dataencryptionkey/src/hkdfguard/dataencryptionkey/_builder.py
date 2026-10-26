@@ -112,6 +112,13 @@ class KeyRingBuilder:
         """Seconds between re-reveals of each key through the KEK, 1-300 - a revocation check, not a
         limit on how long the DEK is in memory.
 
+        It is also each refresh's deadline: a reveal that takes longer than one interval counts as a
+        failed refresh, so a hung key wrapper can't keep a revoked KEK's key in use. A short interval
+        is therefore a short deadline. A TPM-backed KEK can take more than a second to answer, longer
+        while other processes share the TPM, and a locked macOS keychain stalls the call; under the
+        default fail-closed policy, that many slow answers in a row suspend the key though the KEK is
+        healthy. Keep it at 10 seconds or more for TPM-backed keys.
+
         :raises ValueError: not between 1 and 300
         """
         if not 1 <= key_refresh_interval <= 300:

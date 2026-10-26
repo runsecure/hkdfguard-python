@@ -6,6 +6,7 @@ import ctypes
 import errno
 import os
 import re
+import subprocess
 import threading
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, ClassVar, Final
@@ -37,12 +38,20 @@ class LinuxNativeLibraryLoader:
        (the working directory) or use $ORIGIN-style substitutions. Both the environment the process
        started with (/proc/self/environ, what the dynamic linker read) and the current one
        (``os.environ``) are checked.
-    4. **What was loaded.** After dlopen, dladdr must place the library's export in the verified
+    4. **What would be loaded.** Before dlopen, the process's own dynamic linker (PT_INTERP of
+       /proc/self/exe, which must pass the path checks) is asked, in list mode (``ld.so --list``,
+       the mechanism ldd uses), where it would find every object the library pulls in, under the
+       LD_LIBRARY_PATH and LD_PRELOAD the process started with. List mode resolves exactly as
+       dlopen would - RUNPATH, ld.so.cache and all - but runs none of the libraries' code, so every
+       path it reports must pass the path checks before any of it can run here. A name it can't
+       find refuses the load.
+    5. **What was loaded.** After dlopen, dladdr must place the library's export in the verified
        file, and every object in its dependency closure (read from each file's DT_NEEDED entries)
-       must be bound to a file that passes the path checks. This catches a dependency the process
-       had already loaded from somewhere else under the same name. On failure the library is
-       unloaded - though, as on macOS, any initializer an impostor had has already run; the
-       environment check exists so that it never gets that far in practice.
+       must be bound to a file that passes the path checks. This catches what list mode can't see:
+       a dependency name the process had already bound to some other object before the library was
+       loaded. On failure the library is unloaded - though, as on macOS, any initializer an
+       impostor had has already run; the checks before it exist so that it never gets that far in
+       practice.
 
     The file is not content-pinned: a release's authenticity is verified with Sigstore/cosign when
     the package is installed, so path integrity is what this loader enforces.
@@ -73,6 +82,12 @@ class LinuxNativeLibraryLoader:
     MAX_SYMBOLIC_LINKS: Final = 40
     """The kernel's own limit on symbolic links followed in one lookup."""
 
+    SELF_EXECUTABLE: Final = "/proc/self/exe"
+    """This process's executable, whose PT_INTERP names the dynamic linker it runs under."""
+
+    LISTING_TIMEOUT_SECONDS: Final = 30
+    """Bounds the dynamic linker's list run: it only maps files and reads headers."""
+
     _lock: ClassVar = threading.Lock()
     _library: ClassVar[Any] = None
 
@@ -100,8 +115,10 @@ class LinuxNativeLibraryLoader:
             candidates = cls.candidate_paths(CpuArchitecture.current())
             path = trusted(cls.choose_path(candidates, probe))
 
-            environment = cls.read_environment(os.environ.get, read_initial_environment())
+            initial_environment = read_initial_environment()
+            environment = cls.read_environment(os.environ.get, initial_environment)
             cls.verify_environment(environment, lambda p, kind: cls.resolve_trusted(p, kind, get_status_or_none, read_link, allow_missing=True))
+            cls.verify_before_loading(path, initial_environment, ElfDependencies.read_interpreter, trusted, list_dependencies)
 
             try:
                 library = ctypes.CDLL(path, mode=os.RTLD_NOW | os.RTLD_LOCAL)  # type: ignore[attr-defined,unused-ignore]
@@ -323,6 +340,100 @@ class LinuxNativeLibraryLoader:
                                "dependencies from there. Refusing to load it.")
 
     @classmethod
+    def verify_before_loading(cls, library: str, initial_environment: bytes | None, read_interpreter: Callable[[str], str | None],
+                              resolve_trusted: Callable[[str], str], list_dependencies: Callable[[str, str, Mapping[str, str]], str]) -> None:
+        """Asks this process's own dynamic linker, in list mode, where it would find everything
+        ``library`` pulls in, and requires each of those files to pass the path checks - before
+        dlopen, so nothing that would fail them ever runs here.
+
+        :param library: the verified library
+        :param initial_environment: /proc/self/environ's block, or ``None`` if it couldn't be read
+        :param read_interpreter: an ELF file's PT_INTERP path, or ``None`` if it has none
+        :param resolve_trusted: resolves a path, raising unless it passes the path checks
+        :param list_dependencies: runs ``interpreter --list library`` with exactly the given
+            environment and returns what it printed (see :func:`list_dependencies`)
+        :raises PermissionError: the dynamic linker can't be identified, trusted or asked, or it
+            would load something that isn't trusted
+        """
+        try:
+            interpreter = read_interpreter(cls.SELF_EXECUTABLE)
+        except OSError as error:  # PermissionError (malformed) is an OSError too
+            raise PermissionError(f"Could not read which dynamic linker this process runs under: {error}") from error
+        if interpreter is None:
+            raise PermissionError(f"This process has no dynamic linker (a statically linked executable), so it can't be asked what '{library}' "
+                                  "would load; refusing to load it.")
+        try:
+            trusted_interpreter = resolve_trusted(interpreter)
+        except OSError as error:
+            raise PermissionError(f"This process's dynamic linker '{interpreter}' is not trusted, so it can't be asked what '{library}' would "
+                                  f"load: {error}") from error
+
+        output = list_dependencies(trusted_interpreter, library, cls.listing_environment(initial_environment))
+        cls.verify_listing(library, cls.parse_listing(library, output), resolve_trusted)
+
+    @classmethod
+    def listing_environment(cls, initial_environment: bytes | None) -> dict[str, str]:
+        """The whole environment the dynamic linker's list mode runs with: the LD_LIBRARY_PATH and
+        LD_PRELOAD the process started with (``initial_environment``, /proc/self/environ's block) -
+        what dlopen itself uses, since the linker reads them once at startup - and nothing else.
+        LD_AUDIT is left out: an audit module is code the list run would execute, and its locations
+        were already checked before this runs."""
+        environment: dict[str, str] = {}
+        for entry in (initial_environment or b"").split(b"\0"):
+            # Decoded as os.environ would be; subprocess encodes it back to the same bytes.
+            name, equals, value = os.fsdecode(entry).partition("=")
+            if equals and name in (cls.LIBRARY_PATH_VARIABLE, cls.PRELOAD_VARIABLE):
+                # A variable set twice keeps its last value, as the dynamic linker does.
+                environment[name] = value
+        return environment
+
+    @staticmethod
+    def parse_listing(library: str, output: str) -> list[str]:
+        """Every file path in the output of the dynamic linker's list mode, in order. Its lines are
+        ``\\tname => /path (0xaddress)``, ``\\t/path (0xaddress)`` (the linker itself and preloaded
+        objects) and ``\\tname (0xaddress)`` (the vDSO, which has no file).
+
+        :raises PermissionError: a name it couldn't find (``=> not found``), or any line in another
+            form: what can't be read can't be checked
+        """
+        paths: list[str] = []
+        for raw_line in output.split("\n"):
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line.endswith(" => not found"):
+                name = line.removesuffix(" => not found")
+                raise PermissionError(f"The dynamic linker can't find '{name}', which '{library}' needs; refusing to load it.")
+            address = line.rfind(" (0x")
+            if address < 0 or not line.endswith(")"):
+                raise PermissionError(f"The dynamic linker's list of what '{library}' would load has a line this loader doesn't understand "
+                                      f"('{line}'); refusing to load it.")
+            entry = line[:address]
+            _, arrow, path = entry.partition(" => ")
+            if arrow:
+                entry = path
+            if not entry.startswith("/"):
+                if "/" in entry or " " in entry:
+                    raise PermissionError(f"The dynamic linker would load '{entry}' for '{library}', which is not an absolute path; refusing to "
+                                          "load it.")
+                continue  # the vDSO: in the kernel, not a file
+            paths.append(entry)
+        return paths
+
+    @staticmethod
+    def verify_listing(library: str, paths: Sequence[str], resolve_trusted: Callable[[str], str]) -> None:
+        """Requires every path the dynamic linker's list mode reported to pass the path checks.
+
+        :param resolve_trusted: resolves a path, raising unless it passes the path checks
+        :raises PermissionError: the first path that doesn't
+        """
+        for path in paths:
+            try:
+                resolve_trusted(path)
+            except OSError as error:
+                raise PermissionError(f"Loading '{library}' would also load '{path}', which is not trusted; nothing was loaded: {error}") from error
+
+    @classmethod
     def verify_loaded_image(cls, expected_path: str, loaded_path: str | None) -> None:
         """Requires that the file the dynamic linker reports having loaded is the one that was verified.
 
@@ -410,6 +521,36 @@ def read_initial_environment() -> bytes | None:
             return environ.read()
     except OSError:
         return None
+
+
+def list_dependencies(interpreter: str, library: str, environment: Mapping[str, str]) -> str:
+    """Runs ``interpreter --list library`` - the dynamic linker's list mode - with exactly
+    ``environment``, and returns what it printed.
+
+    This is the package's one child process, a deliberate and narrow exception: only the dynamic
+    linker itself can say where dlopen would find each dependency (RUNPATH, ld.so.cache, hwcaps
+    subdirectories, its own compiled-in defaults), and list mode answers without running any of the
+    libraries' code, which dlopen would. So it runs a verified absolute path, never through a shell,
+    with a fixed argument list and an environment built from scratch (never ``os.environ``), bounded
+    by a timeout.
+
+    :raises PermissionError: it could not be started, failed or timed out
+    """
+    seconds = LinuxNativeLibraryLoader.LISTING_TIMEOUT_SECONDS
+    try:
+        # env={} is an empty environment; only None would inherit this process's.
+        completed = subprocess.run([interpreter, "--list", library], shell=False, env=dict(environment),  # noqa: S603 - see above
+                                   capture_output=True, timeout=seconds, check=False)
+    except subprocess.TimeoutExpired as error:
+        raise PermissionError(f"The dynamic linker did not say within {seconds} seconds what '{library}' would load; refusing to load "
+                              "it.") from error
+    except OSError as error:
+        raise PermissionError(f"The dynamic linker '{interpreter}' could not be run to say what '{library}' would load: {error}") from error
+    if completed.returncode != 0:
+        stderr = completed.stderr.decode("utf-8", "replace").strip()
+        raise PermissionError(f"The dynamic linker could not say what '{library}' would load ({stderr}): exit status {completed.returncode}; "
+                              "refusing to load it.")
+    return os.fsdecode(completed.stdout)
 
 
 def _libc() -> Any:

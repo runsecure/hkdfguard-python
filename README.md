@@ -147,8 +147,13 @@ silently fall back to a default.
   also keeps its own copy of the key for as long as the cipher object exists - for a session, until
   its next refresh retires it - and zeroing this library's key buffer doesn't reach that copy; the
   session releases the cipher when it closes, and whether the copy is wiped then is up to
-  `cryptography`. Process hardening, which blocks core dumps and debugger attachment, is what keeps
-  such copies out of reach.
+  `cryptography`. The same goes for the encryption budget: each new session (every reveal or
+  refresh, unless a budget is passed in) looks up its key's shared budget by an HMAC-SHA256 of the
+  DEK under a per-process random key (`EncryptionBudget.for_key`), which feeds the DEK into
+  `cryptography`'s HMAC context. This library can't zero that context's copy of it either; whether
+  it is wiped when the context is finalized and freed is up to `cryptography` and OpenSSL. Process
+  hardening, which blocks core dumps and debugger attachment, is what keeps such copies out of
+  reach.
 - **Logging:** a `None` logger means the package's own logger (e.g. `hkdfguard.cache`). The event id
   travels as the `hkdfguard_event_id` record attribute; .NET's Critical is `logging.CRITICAL`.
 - **Telemetry** goes to OpenTelemetry's global providers, or to those given to
@@ -212,10 +217,15 @@ makes dyld inject code or substitute a library the native library calls with eve
 limit applies - dyld acts on them at process start - and the real protection is a host signed with
 the Hardened Runtime, which makes dyld ignore them.
 
-After loading, `dladdr` must place the library's export in the verified file, and every object in
-its dependency closure, read from each file's `DT_NEEDED` entries, must be bound to a file that
-passes the path checks. That catches a dependency the process had already loaded from somewhere
-else under the same name; the library is then unloaded and the load refused. Any failed check
+On Linux, before loading, the process's own dynamic linker is asked in list mode (`ld.so --list`,
+what `ldd` uses) where it would find every library `libhkdfguard.so.1` pulls in, under the
+`LD_LIBRARY_PATH` and `LD_PRELOAD` the process started with; each must pass the same path checks,
+so a dependency found somewhere writable is refused before any of its code runs. (This is the
+package's only child process: the verified linker, run without a shell, in an environment holding
+just those two variables.) After loading, `dladdr` must place the library's export in the verified
+file, and every object in its dependency closure, read from each file's `DT_NEEDED` entries, must
+be bound to a file that passes the path checks. That catches a dependency the process had already
+loaded from somewhere else under the same name; the library is then unloaded and the load refused. Any failed check
 raises `PermissionError`; a library that isn't installed raises `NativeLibraryNotFoundError`, and an
 interpreter that is neither x64 nor arm64 an `OSError` with errno `ENOTSUP`. There is no fallback
 and no override. Two things are outside the loader's reach: the TPM transport module tpm2-tss loads
