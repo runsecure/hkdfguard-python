@@ -7,8 +7,8 @@ decrypt with the others: the wire format, AAD rules, AES-GCM layout, span/metric
 event ids are identical.
 
 Requires **Python 3.12** or later. Cryptography is [`cryptography`](https://cryptography.io);
-telemetry is the OpenTelemetry API; logging is the standard `logging` module; native KMS calls use
-`ctypes`.
+telemetry is the OpenTelemetry API; logging is the standard `logging` module; native KMS calls, and
+the Windows key-file checks, use `ctypes`; AWS KMS calls go through `botocore`.
 
 ## Packages
 
@@ -20,6 +20,8 @@ Each distribution installs one subpackage of the `hkdfguard` namespace package.
 | `hkdfguard-abstractions`              | `hkdfguard.abstractions`                | HkdfGuard.Abstractions               | `CryptoProvider`, `KeyWrapper`, `KeyRing`, `DataProtector`, ... ; `ProtectedCacheBase`, `ServiceNames`, `ProtectedConfigurationPurpose`, the exception types |
 | `hkdfguard-cryptoprovider-aesgcm256`  | `hkdfguard.cryptoprovider.aesgcm256`    | HkdfGuard.CryptoProvider.AesGcm256   | `AesGcmCryptoProvider`, `AesGcmCryptoProviderFactory`, `AesGcmPipelineDataProtector` |
 | `hkdfguard-keywrapping-v1`            | `hkdfguard.keywrapping.v1`              | HkdfGuard.KeyWrapping.V1             | `NativeHkdfKeyWrapperV1` over the native KMS library |
+| `hkdfguard-securefile`                | `hkdfguard.securefile`                  | HkdfGuard.SecureFile                 | `TrustedKeyFile`, `KeyFileTrust`: the native library's key-file location and content checks, in Python |
+| `hkdfguard-keywrapping-awskms`        | `hkdfguard.keywrapping.awskms`          | HkdfGuard.KeyWrapping.AwsKms         | `AwsKmsKeyWrapper` over one symmetric AWS KMS key, through a botocore client |
 | `hkdfguard-dataencryptionkey`         | `hkdfguard.dataencryptionkey`           | HkdfGuard.DataEncryptionKey          | `KeyRing`, `KeyRingBuilder`, `DataEncryptionKey`, `DefaultFormatProvider` |
 | `hkdfguard-cache`                     | `hkdfguard.cache`                       | HkdfGuard.Cache                      | `ProtectedCache`, `ProtectedCacheCollection` |
 | `hkdfguard-options`                   | `hkdfguard.options`                     | HkdfGuard.Options                    | `HkdfGuardOptions`, `KeyFileOptions`, `OptionsValidationError` |
@@ -138,7 +140,11 @@ silently fall back to a default.
     `OSError`. The native library's refusals map by status: -32 `FileNotFoundError`; -33 and -39
     `PermissionError`; -35, -36, -37 and -38 `InvalidKeyFileError`; -1 `ValueError`; -34 and any
     other status `OSError`. An empty path is a `ValueError` (and `None` a `TypeError`) before
-    anything is read.
+    anything is read. `TrustedKeyFile` (`hkdfguard-securefile`) raises the same types for the same
+    refusals, and a `KeyFileTrust` naming a principal that can't be trusted is a `ValueError`
+    (.NET's `ArgumentException`).
+  - `PlatformNotSupportedException` -> `NotImplementedError`, as `NativeHkdfKeyWrapperV1` reports a
+    platform with no native library.
   - `CryptographicException` and `AuthenticationTagMismatchException` become `CryptographicError`
     and `AuthenticationTagMismatchError`.
 - **Memory hygiene:** CPython has no pinned or stack allocation, so zeroing erases the live copy of
@@ -151,7 +157,9 @@ silently fall back to a default.
   refresh, unless a budget is passed in) looks up its key's shared budget by an HMAC-SHA256 of the
   DEK under a per-process random key (`EncryptionBudget.for_key`), which feeds the DEK into
   `cryptography`'s HMAC context. This library can't zero that context's copy of it either; whether
-  it is wiped when the context is finalized and freed is up to `cryptography` and OpenSSL. Process
+  it is wiped when the context is finalized and freed is up to `cryptography` and OpenSSL. Likewise
+  `AwsKmsKeyWrapper`: botocore returns Decrypt's plaintext as an immutable `bytes`, which is copied
+  into the caller's buffer but can't be zeroed (see *Wrapping under AWS KMS instead*). Process
   hardening, which blocks core dumps and debugger attachment, is what keeps such copies out of
   reach.
 - **Logging:** a `None` logger means the package's own logger (e.g. `hkdfguard.cache`). The event id
@@ -265,7 +273,9 @@ path (-39): a symbolic link, junction or other reparse point, an 8.3 short name,
 SUBST path, or a file or folder another account could write or replace. These checks can't be
 turned off. `read_key_file` has no default implementation: a custom key wrapper must read key
 files itself, and must refuse a file another account could have written or replaced, since whoever
-can replace a key file chooses the key new data is encrypted under.
+can replace a key file chooses the key new data is encrypted under. A key wrapper with no native
+library to read through can use `TrustedKeyFile.read` from `hkdfguard-securefile`, which makes the
+same location and content checks in Python, as `AwsKmsKeyWrapper` does.
 
 ### Process hardening
 
@@ -315,6 +325,70 @@ process, until something starts one: `threading`, `concurrent.futures`, asyncio'
 gRPC or database driver). A long-running program almost always does, so **use
 `REQUIRE_PROTECTED_SIGNATURE` for a Windows service**: it closes later threads too.
 
+## Wrapping under AWS KMS instead
+
+`AwsKmsKeyWrapper` (distribution `hkdfguard-keywrapping-awskms`) is a `KeyWrapper` over one
+symmetric AWS KMS key. Use it in place of `NativeHkdfKeyWrapperV1` wherever a wrapper is taken.
+Every call is a KMS request, authorized by the process's IAM credentials and recorded in CloudTrail:
+
+```python
+import boto3
+from hkdfguard.keywrapping.awskms import AwsKmsKeyWrapper
+
+# The application creates the client, keeps it while anything uses the wrapper, and closes it.
+kms = boto3.client("kms")                                # default credential and region chain
+wrapper = AwsKmsKeyWrapper(kms,
+                           "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+                           {"purpose": "my.service"})
+```
+
+- `generate_and_wrap` calls `GenerateDataKeyWithoutPlaintext` for an AES-256 key, so the plaintext
+  DEK never leaves KMS on that call. `wrap` calls `Encrypt` and `unwrap` calls `Decrypt`.
+- The key is pinned on every `Decrypt`. A symmetric ciphertext names its own key, and without the pin
+  a substituted key file wrapped under any other key the principal may use would still be revealed.
+  Prefer a key ARN to an alias: `Decrypt` resolves an alias when it is called, so re-pointing the
+  alias makes DEKs wrapped under the old key unreadable. KMS's automatic key rotation keeps the
+  ARN and needs nothing here.
+- The optional encryption context is KMS's AAD. It is bound into every wrapped DEK, required again
+  to reveal it, and can be required by the key policy (`kms:EncryptionContext:purpose`). CloudTrail
+  logs it in plaintext, so it must never hold a secret.
+- Calls block until KMS answers (botocore is synchronous; there is nothing to cancel). Failures raise
+  `CryptographicError` naming the operation, the key, KMS's error code (for example
+  `AccessDeniedException` or `InvalidCiphertextException`) and the HTTP status, with botocore's
+  `ClientError` as its `__cause__`; a client-side failure (`BotoCoreError`: no credentials, an
+  unreachable endpoint) raises `CryptographicError` with botocore's message. Argument errors raise
+  `ValueError` or `TypeError`. A failed unwrap zeroes the caller's buffer.
+- Key files are read only from where no untrusted account could have written or replaced them, by
+  the native library's rules, checked in Python by `hkdfguard-securefile`: on Windows, a local fixed
+  drive, reached through no link, junction or substituted drive, with the file and every folder
+  above it owned and modifiable only by SYSTEM, Administrators or TrustedInstaller; on Linux and
+  macOS (Apple silicon), the file and every directory above it owned by root and writable by no one
+  else, following only root-owned links. A `KeyFileTrust` passed to the constructor adds the
+  deployment's own account or group. A file that looks like an unwrapped key is refused too. A KMS
+  ciphertext is about 184 bytes, well inside `WrappedKeyLimits.MAX_BYTES`.
+- Plaintext the wrapper owns is zeroed: its `bytearray` copy of the key sent to `Encrypt` (passed to
+  botocore as is, never turned into `bytes`), once the call has returned, and the caller's buffer
+  when an unwrap fails. botocore base64-encodes that key into the JSON request body, and returns
+  `Decrypt`'s plaintext as an immutable `bytes` decoded from the response's base64; neither is
+  exposed to be zeroed, and both live until collected.
+- The principal needs `kms:Encrypt`, `kms:Decrypt` and `kms:GenerateDataKeyWithoutPlaintext` on the key.
+  A process that only reads existing key files needs only `kms:Decrypt`.
+
+**Dependencies.** The distribution depends on `botocore` (with its own `jmespath`,
+`python-dateutil` and `urllib3`), not on `boto3`: the wrapper makes three calls on a client, and the
+client is a botocore client whether the application creates it with `boto3.client("kms")` or
+`botocore.session.get_session().create_client("kms")`, so `boto3`'s resource layer and `s3transfer`
+would be dead weight for an application that doesn't already use them. The client is typed with
+`KmsClient`, a `Protocol` of those three calls, rather than with a stub package: botocore ships no
+type information, and a typed `mypy_boto3_kms.KMSClient` satisfies `KmsClient` too. There is no
+configuration integration for it (as in .NET, whose dependency-injection package doesn't wire AWS
+either): create the wrapper and pass it to `KeyRingBuilder.with_key_wrapper`.
+
+[Wrap keys with AWS KMS](docs/how-to/use-aws-kms.md) walks through creating the key, the IAM
+permissions for each role, credentials, and creating key files.
+[Run the AWS KMS integration tests](docs/how-to/run-aws-kms-integration-tests.md) sets up a key of
+your own for `test_awskms_integration.py`, which is otherwise reported as skipped.
+
 ## Building
 
 Uses a [uv](https://docs.astral.sh/uv/) workspace:
@@ -331,7 +405,7 @@ uv build --all-packages --build-constraints build-constraints.txt --require-hash
 
 `.github/workflows/ci.yml` tests every push and pull request on Linux, Windows and macOS with Python
 3.12 to 3.14, lints, and builds and checks the packages. `.github/workflows/release.yml` publishes all
-seven distributions together as a GitHub Release, with Sigstore-signed build provenance and no stored
+nine distributions together as a GitHub Release, with Sigstore-signed build provenance and no stored
 token. Nothing is published to PyPI yet.
 
 To release: set the same version in every `packages/*/pyproject.toml`, merge to `main`, then push a tag
@@ -436,3 +510,19 @@ and only where the platform's native library is installed. Run them in their own
 ```bash
 HKDFGUARD_TEST_PROCESS_HARDENING=1 uv run pytest -k "apply_on_windows or apply_on_linux"
 ```
+
+## AWS KMS integration tests
+
+`test_awskms_integration.py` in `hkdfguard-keywrapping-awskms` makes real calls against a symmetric
+KMS key. Its tests are reported as skipped, never passed, unless `HKDFGUARD_TEST_AWS_KMS_KEY_ID`
+names one - the same variable the .NET and Java integration tests read. Credentials and region come
+from botocore's usual chain. The tests never create, alter or delete a key:
+
+```bash
+HKDFGUARD_TEST_AWS_KMS_KEY_ID=arn:aws:kms:us-east-1:111122223333:key/... AWS_REGION=us-east-1 \
+uv run pytest packages/hkdfguard-keywrapping-awskms
+```
+
+[Run the AWS KMS integration tests](docs/how-to/run-aws-kms-integration-tests.md) sets up a test
+key and a low-privilege IAM user for them. Every other AWS KMS test runs against an in-process fake
+KMS, or a real botocore client whose responses are stubbed, and sends nothing to AWS.
