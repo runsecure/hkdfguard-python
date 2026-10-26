@@ -30,7 +30,7 @@ from hkdfguard.cryptoprovider.aesgcm256 import (
     AesGcmPipelineDataProtector,
     EncryptionBudget,
 )
-from hkdfguard.diagnostics import AttributeNames, EventNames, HkdfGuardLog, HkdfGuardTelemetry, SpanNames
+from hkdfguard.diagnostics import AttributeNames, EventNames, HkdfGuardEventId, HkdfGuardLog, HkdfGuardTelemetry, SpanNames
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -523,7 +523,7 @@ def test_crossing_the_warning_threshold_raises_one_event_and_one_log_entry(spans
     assert len(warnings) == 1
     assert warnings[0].attributes[AttributeNames.ENCRYPTION_COUNT] == 2
     assert warnings[0].attributes[AttributeNames.ENCRYPTION_LIMIT] == 7919
-    (entry,) = handler.with_event_id(HkdfGuardLog.ENCRYPTION_BUDGET_WARNING)
+    (entry,) = handler.with_event_id(HkdfGuardEventId.ENCRYPTION_BUDGET_WARNING)
     assert entry.levelno == logging.WARNING
     assert "2 encryptions of its 7919" in entry.getMessage()
 
@@ -563,11 +563,11 @@ def test_fail_closed_suspends_after_consecutive_failures_and_resumes_on_success(
                      if e.name == EventNames.KEY_ACCESS_SUSPENDED]
         assert len(suspended) == 1
         assert suspended[0].attributes[AttributeNames.CONSECUTIVE_FAILURES] == 2
-        failures = handler.with_event_id(HkdfGuardLog.KEY_REFRESH_FAILED)
+        failures = handler.with_event_id(HkdfGuardEventId.KEY_REFRESH_FAILED)
         assert len(failures) == 2
         assert all(r.levelno == logging.ERROR and r.exc_info and r.exc_info[1] is revoked for r in failures)
         assert all("fail closed after 2 consecutive failures" in r.getMessage() for r in failures)
-        (critical,) = handler.with_event_id(HkdfGuardLog.KEY_ACCESS_SUSPENDED)
+        (critical,) = handler.with_event_id(HkdfGuardEventId.KEY_ACCESS_SUSPENDED)
         assert critical.levelno == logging.CRITICAL
 
         wrapper.throw_on_unwrap = None  # tick ~3 s succeeds
@@ -577,7 +577,7 @@ def test_fail_closed_suspends_after_consecutive_failures_and_resumes_on_success(
         result = bytearray(8)
         provider.decrypt(ciphertext, result)
         assert result == b"survives"
-        (resumed,) = handler.with_event_id(HkdfGuardLog.KEY_ACCESS_RESUMED)
+        (resumed,) = handler.with_event_id(HkdfGuardEventId.KEY_ACCESS_RESUMED)
         assert resumed.levelno == logging.INFO
 
 
@@ -588,16 +588,16 @@ def test_fail_open_logs_every_failure_but_never_suspends() -> None:
         wrapper.throw_on_unwrap = CryptographicError("KEK unreachable")
         time.sleep(2.6)
 
-        failures = handler.with_event_id(HkdfGuardLog.KEY_REFRESH_FAILED)
+        failures = handler.with_event_id(HkdfGuardEventId.KEY_REFRESH_FAILED)
         assert len(failures) >= 2
         assert all("fail open" in r.getMessage() for r in failures)
         assert any("(2 consecutive)" in r.getMessage() for r in failures)
-        assert not handler.with_event_id(HkdfGuardLog.KEY_ACCESS_SUSPENDED)
+        assert not handler.with_event_id(HkdfGuardEventId.KEY_ACCESS_SUSPENDED)
         assert not provider.key_access_suspended
 
         wrapper.throw_on_unwrap = None
         time.sleep(1.2)
-        assert not handler.with_event_id(HkdfGuardLog.KEY_ACCESS_RESUMED)
+        assert not handler.with_event_id(HkdfGuardEventId.KEY_ACCESS_RESUMED)
 
 
 def test_successful_refreshes_log_nothing() -> None:
@@ -736,7 +736,7 @@ def test_factory_hands_its_logger_to_every_provider() -> None:
     with factory.create(wrapper, bytearray(WRAPPED), 1), factory.create_ephemeral(wrapper, 1):
         wrapper.throw_on_unwrap = CryptographicError("KEK revoked")
         time.sleep(1.4)
-        assert len(handler.with_event_id(HkdfGuardLog.KEY_REFRESH_FAILED)) >= 2
+        assert len(handler.with_event_id(HkdfGuardEventId.KEY_REFRESH_FAILED)) >= 2
 
 
 @pytest.mark.parametrize(("expiry", "failures"), [(0, None), (301, None), (60, 0)])
@@ -988,7 +988,7 @@ def test_fail_closed_counts_each_timed_out_refresh_while_the_key_wrapper_hangs_w
         time.sleep(2.6)
         assert provider.key_access_suspended
         assert wrapper.unwrap_calls == calls_before + 1
-        failures = handler.with_event_id(HkdfGuardLog.KEY_REFRESH_FAILED)
+        failures = handler.with_event_id(HkdfGuardEventId.KEY_REFRESH_FAILED)
         assert len(failures) == 2
         assert all(r.exc_info and isinstance(r.exc_info[1], TimeoutError) for r in failures)
 

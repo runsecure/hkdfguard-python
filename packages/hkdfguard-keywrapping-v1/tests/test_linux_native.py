@@ -145,7 +145,10 @@ def test_wrapping_the_same_dek_twice_gives_different_payloads() -> None:
     # A fresh salt per payload: equal DEKs must not be recognizable from their wrapped form.
     dek = os.urandom(DEK_LENGTH)
 
-    assert wrap(dek) != wrap(dek)
+    first = wrap(dek)
+    second = wrap(dek)
+
+    assert first != second
 
 
 @linux_native_integration()

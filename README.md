@@ -163,7 +163,9 @@ silently fall back to a default.
   hardening, which blocks core dumps and debugger attachment, is what keeps such copies out of
   reach.
 - **Logging:** a `None` logger means the package's own logger (e.g. `hkdfguard.cache`). The event id
-  travels as the `hkdfguard_event_id` record attribute; .NET's Critical is `logging.CRITICAL`.
+  travels as the `hkdfguard_event_id` record attribute, a plain `int`; compare it with the members of
+  `hkdfguard.diagnostics.HkdfGuardEventId` (for example `HkdfGuardEventId.KEY_REFRESH_FAILED`) to
+  filter on one entry. .NET's Critical is `logging.CRITICAL`.
 - **Telemetry** goes to OpenTelemetry's global providers, or to those given to
   `HkdfGuardTelemetry.set_tracer_provider` / `set_meter_provider`.
 
