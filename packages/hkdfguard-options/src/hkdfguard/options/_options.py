@@ -62,7 +62,10 @@ class HkdfGuardOptions:
     """How often, in seconds (1-300), each key is re-revealed through the KEK to confirm the KEK is
     still available. A revocation check, not a limit on how long the DEK stays in memory. Together
     with :attr:`max_refresh_failures` it sets how quickly a revoked KEK stops a running process -
-    about max_refresh_failures x key_refresh_interval."""
+    about max_refresh_failures x key_refresh_interval. It is also each refresh's deadline: a reveal
+    slower than one interval counts as a failed refresh, so keep it at 10 seconds or more for a
+    TPM-backed KEK, which can be slow to answer while busy (see
+    ``KeyRingBuilder.with_key_refresh_interval``)."""
 
     max_refresh_failures: int | None = None
     """How many consecutive failed refreshes are tolerated before a key's provider fails closed -

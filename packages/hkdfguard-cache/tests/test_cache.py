@@ -19,7 +19,7 @@ from hkdfguard.cache import ProtectedCache, ProtectedCacheCollection
 from hkdfguard.cryptoprovider.aesgcm256 import AesGcmCryptoProvider
 from hkdfguard.dataencryptionkey import DataEncryptionKey, DefaultFormatProvider
 from hkdfguard.dataencryptionkey import KeyRing as DefaultKeyRing
-from hkdfguard.diagnostics import AttributeNames, HkdfGuardLog, HkdfGuardTelemetry, MetricNames, SpanNames
+from hkdfguard.diagnostics import AttributeNames, HkdfGuardEventId, HkdfGuardLog, HkdfGuardTelemetry, MetricNames, SpanNames
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader, NumberDataPoint
 from opentelemetry.sdk.trace import TracerProvider
@@ -283,7 +283,7 @@ def test_with_sensitive_logging_each_write_logs_one_debug_entry_naming_the_item(
 
     (entry,) = handler.records
     assert entry.levelno == logging.DEBUG
-    assert getattr(entry, HkdfGuardLog.EVENT_ID_KEY) == HkdfGuardLog.SENSITIVE_OPERATION_LOGGED
+    assert getattr(entry, HkdfGuardLog.EVENT_ID_KEY) == HkdfGuardEventId.SENSITIVE_OPERATION_LOGGED
     assert "item" in entry.getMessage()
 
 
@@ -310,7 +310,7 @@ def test_a_failed_write_logs_operation_failed_with_the_exception(ring: DefaultKe
     errors = [r for r in handler.records if r.levelno == logging.ERROR]
     assert len(errors) == 4
     for error in errors:
-        assert getattr(error, HkdfGuardLog.EVENT_ID_KEY) == HkdfGuardLog.OPERATION_FAILED
+        assert getattr(error, HkdfGuardLog.EVENT_ID_KEY) == HkdfGuardEventId.OPERATION_FAILED
         assert error.exc_info is not None and isinstance(error.exc_info[1], ValueError)
 
 

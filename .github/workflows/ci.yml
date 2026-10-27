@@ -26,9 +26,11 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       # --locked fails if uv.lock is out of date, so CI always tests the versions that were reviewed.
-      - run: uv sync --locked
+      # --no-build installs third-party packages from wheels only, so no dependency's setup script
+      # runs here (this workspace's own packages are still built, from this checkout).
+      - run: uv sync --locked --no-build
       # The native KMS tests skip themselves on a runner with no provisioned KEK; they are never reported as passed.
-      - run: uv run pytest
+      - run: uv run --locked --no-build pytest
 
   lint:
     runs-on: ubuntu-latest
@@ -37,9 +39,9 @@ jobs:
         with:
           persist-credentials: false
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
-      - run: uv sync --locked
-      - run: uv run ruff check packages scripts
-      - run: uv run mypy packages
+      - run: uv sync --locked --no-build
+      - run: uv run --locked --no-build ruff check packages scripts
+      - run: uv run --locked --no-build mypy packages
 
   package:
     name: build and check the packages
@@ -54,7 +56,8 @@ jobs:
           for directory in packages/*/; do
             cmp LICENSE "${directory}LICENSE"
           done
-      - run: uv build --all-packages --out-dir dist
+      # The build backend is hash-pinned by build-constraints.txt, as in the release workflow.
+      - run: uv build --all-packages --out-dir dist --build-constraints build-constraints.txt --require-hashes
       - run: python3 scripts/check-dist.py dist
       # Pinned by uv.lock, as in the release workflow.
-      - run: uv run --locked --only-group dist twine check --strict dist/*.whl dist/*.tar.gz
+      - run: uv run --locked --no-build --only-group dist twine check --strict dist/*.whl dist/*.tar.gz

@@ -637,6 +637,156 @@ def test_reads_from_a_file() -> None:
         os.remove(path)
 
 
+# --- PT_INTERP parsing (ElfDependencies) ----------------------------------------------------------
+
+
+def elf_with_interpreter(interpreter: bytes | None, *, size_override: int | None = None) -> bytearray:
+    """A minimal 64-bit little-endian ELF image with one program header: PT_INTERP holding
+    ``interpreter`` (raw, so tests can omit its NUL), or PT_NOTE if ``interpreter`` is ``None``."""
+    header, phdr = 64, 56
+    data = interpreter or b""
+    image = bytearray(header + phdr + len(data))
+    image[0:7] = b"\x7fELF\x02\x01\x01"
+    struct.pack_into("<Q", image, 32, header)  # e_phoff
+    struct.pack_into("<H", image, 54, phdr)    # e_phentsize
+    struct.pack_into("<H", image, 56, 1)       # e_phnum
+    struct.pack_into("<I", image, header, 3 if interpreter is not None else 4)
+    struct.pack_into("<Q", image, header + 8, header + phdr)
+    struct.pack_into("<Q", image, header + 32, size_override if size_override is not None else len(data))
+    image[header + phdr:] = data
+    return image
+
+
+def parse_interpreter(image: bytes | bytearray) -> str | None:
+    return ElfDependencies.read_interpreter_from(
+        "test", lambda offset, count: bytes(image[offset:offset + count]) if offset + count <= len(image) else None)
+
+
+def test_reads_the_interpreter_path() -> None:
+    assert parse_interpreter(elf_with_interpreter(b"/lib64/ld-linux-x86-64.so.2\0")) == "/lib64/ld-linux-x86-64.so.2"
+
+
+def test_an_executable_without_an_interpreter_has_none() -> None:
+    assert parse_interpreter(elf_with_interpreter(None)) is None
+    assert parse_interpreter(elf(["libc.so.6"])) is None  # a shared object: PT_LOAD and PT_DYNAMIC only
+
+
+@pytest.mark.parametrize(("reason", "image"), [
+    ("empty or implausibly long", elf_with_interpreter(b"")),
+    ("empty or implausibly long", elf_with_interpreter(b"/x\0", size_override=ElfDependencies.MAX_INTERPRETER_BYTES + 1)),
+    ("not a NUL-terminated string", elf_with_interpreter(b"/lib64/ld-linux-x86-64.so.2")),
+    ("not a NUL-terminated string", elf_with_interpreter(b"\0/lib64/ld-linux-x86-64.so.2")),
+    ("runs past the end", elf_with_interpreter(b"/x\0", size_override=64)),
+    ("not an ELF file", bytearray(64)),
+])
+def test_a_malformed_interpreter_is_refused(reason: str, image: bytes) -> None:
+    with pytest.raises(PermissionError, match=reason):
+        parse_interpreter(image)
+
+
+def test_reads_the_interpreter_from_a_file() -> None:
+    descriptor, path = tempfile.mkstemp()
+    os.close(descriptor)
+    try:
+        with open(path, "wb") as file:
+            file.write(elf_with_interpreter(b"/lib/ld-linux-aarch64.so.1\0"))
+        assert ElfDependencies.read_interpreter(path) == "/lib/ld-linux-aarch64.so.1"
+    finally:
+        os.remove(path)
+
+
+# --- What would be loaded (the dynamic linker's list mode) ----------------------------------------
+
+LISTING = ("\tlinux-vdso.so.1 (0x00007ffd2a5f2000)\n"
+           "\tlibtss2-esys.so.0 => /lib/x86_64-linux-gnu/libtss2-esys.so.0 (0x00007f1c2a000000)\n"
+           "\t/usr/lib/libpreloaded.so (0x00007f1c29e00000)\n"
+           "\tlibc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007f1c29c00000)\n"
+           "\t/lib64/ld-linux-x86-64.so.2 (0x00007f1c2a200000)\n")
+
+
+def test_parse_listing_returns_every_file_skipping_the_vdso() -> None:
+    assert Loader.parse_listing("lib", LISTING) == [
+        "/lib/x86_64-linux-gnu/libtss2-esys.so.0", "/usr/lib/libpreloaded.so", "/lib/x86_64-linux-gnu/libc.so.6", "/lib64/ld-linux-x86-64.so.2"]
+
+
+@pytest.mark.parametrize(("output", "reason"), [
+    ("\tlibmissing.so.1 => not found\n", "can't find 'libmissing.so.1'"),
+    ("\tstatically linked\n", "doesn't understand"),
+    ("\tlibx.so => relative/libx.so (0x1000)\n", "not an absolute path"),
+    ("\tlibx.so => lib x.so (0x1000)\n", "not an absolute path"),
+])
+def test_parse_listing_a_name_it_cannot_find_or_a_line_it_cannot_read_is_refused(output: str, reason: str) -> None:
+    with pytest.raises(PermissionError, match=re.escape(reason)):
+        Loader.parse_listing("lib", LISTING + output)
+
+
+def test_listing_environment_is_only_the_startup_library_path_and_preload() -> None:
+    initial = environ_block("HOME=/root", "LD_LIBRARY_PATH=/opt/lib", "LD_AUDIT=/opt/audit.so", "PATH=/usr/bin", "LD_PRELOAD=/opt/pre.so")
+
+    assert Loader.listing_environment(initial) == {"LD_LIBRARY_PATH": "/opt/lib", "LD_PRELOAD": "/opt/pre.so"}
+    assert Loader.listing_environment(b"") == {}
+    assert Loader.listing_environment(None) == {}
+
+
+def untrusted_in_tmp(path: str) -> str:
+    if path.startswith("/tmp/"):
+        raise PermissionError(f"'{path}' is writable by others.")
+    return path
+
+
+def test_verify_listing_refuses_the_first_untrusted_path() -> None:
+    Loader.verify_listing("lib", ["/lib/libc.so.6", "/lib64/ld-linux-x86-64.so.2"], untrusted_in_tmp)
+
+    with pytest.raises(PermissionError) as error:
+        Loader.verify_listing("lib", ["/lib/libc.so.6", "/tmp/libtss2-esys.so.0", "/tmp/second.so"], untrusted_in_tmp)
+    assert "/tmp/libtss2-esys.so.0" in str(error.value)
+    assert "nothing was loaded" in str(error.value)
+    assert "/tmp/second.so" not in str(error.value)
+
+
+def verify_before_loading(interpreter: str | None, output: str = LISTING, initial: bytes | None = None,
+                          calls: list[tuple[str, str, Mapping[str, str]]] | None = None) -> None:
+    def list_dependencies(linker: str, library: str, environment: Mapping[str, str]) -> str:
+        if calls is not None:
+            calls.append((linker, library, environment))
+        return output
+
+    Loader.verify_before_loading(LIBRARY, initial, lambda path: interpreter, untrusted_in_tmp, list_dependencies)
+
+
+def test_verify_before_loading_asks_the_trusted_interpreter_with_the_startup_environment() -> None:
+    calls: list[tuple[str, str, Mapping[str, str]]] = []
+    verify_before_loading("/lib64/ld-linux-x86-64.so.2", initial=environ_block("LD_PRELOAD=/opt/pre.so", "HOME=/root"), calls=calls)
+
+    assert calls == [("/lib64/ld-linux-x86-64.so.2", LIBRARY, {"LD_PRELOAD": "/opt/pre.so"})]
+
+
+def test_verify_before_loading_refuses_a_statically_linked_process() -> None:
+    with pytest.raises(PermissionError, match="statically linked"):
+        verify_before_loading(None)
+
+
+def test_verify_before_loading_refuses_an_untrusted_interpreter_without_running_it() -> None:
+    calls: list[tuple[str, str, Mapping[str, str]]] = []
+    with pytest.raises(PermissionError, match=re.escape("dynamic linker '/tmp/ld.so' is not trusted")):
+        verify_before_loading("/tmp/ld.so", calls=calls)
+    assert calls == []
+
+
+def test_verify_before_loading_refuses_an_untrusted_dependency() -> None:
+    with pytest.raises(PermissionError, match="nothing was loaded"):
+        verify_before_loading("/lib64/ld-linux-x86-64.so.2", output=LISTING + "\tlibevil.so => /tmp/libevil.so (0x1000)\n")
+
+
+def test_verify_before_loading_refuses_an_unreadable_executable() -> None:
+    def unreadable(path: str) -> str | None:
+        raise OSError(errno.EACCES, "denied")
+
+    with pytest.raises(PermissionError, match="Could not read which dynamic linker") as error:
+        Loader.verify_before_loading(LIBRARY, None, unreadable, untrusted_in_tmp, lambda *_: "")
+    assert isinstance(error.value.__cause__, OSError)
+
+
 # --- On Linux: the real filesystem, dynamic linker and installed package --------------------------
 
 IS_LINUX = sys.platform.startswith("linux")
@@ -833,4 +983,88 @@ def test_the_installed_library_needs_tpm2_tss_and_libc() -> None:
 
     assert "libtss2-esys.so.0" in needed
     assert "libc.so.6" in needed
+
+
+# The real dynamic linker in list mode, against files every Linux system has.
+
+
+def trusted_file(path: str) -> str:
+    resolved = resolve(path)
+    assert resolved is not None
+    return resolved
+
+
+def this_processs_interpreter() -> str:
+    interpreter = ElfDependencies.read_interpreter(Loader.SELF_EXECUTABLE)
+    assert interpreter, f"PT_INTERP of {Loader.SELF_EXECUTABLE} = {interpreter!r}"
+    return interpreter
+
+
+def listing_for(target: str, environment: Mapping[str, str] | None = None) -> list[str]:
+    output = _linux.list_dependencies(this_processs_interpreter(), target, environment or {})
+    return Loader.parse_listing(target, output)
+
+
+def libc_in_listing() -> str:
+    libc = next((p for p in listing_for("/bin/sh") if os.path.basename(p).startswith("libc.so")), None)
+    if libc is None:
+        pytest.skip("no libc in /bin/sh's listing")
+    return libc
+
+
+@linux_only
+def test_this_processs_interpreter_is_trusted() -> None:
+    assert trusted_file(this_processs_interpreter()).startswith("/")
+
+
+@linux_only
+def test_the_listing_of_a_system_binary_names_libc_and_passes_the_path_checks() -> None:
+    paths = listing_for("/bin/sh")
+
+    assert any("libc.so" in os.path.basename(p) for p in paths), paths
+    Loader.verify_listing("/bin/sh", paths, trusted_file)
+
+
+@linux_only
+def test_a_dependency_found_in_a_writable_folder_is_refused_before_anything_loads() -> None:
+    # The real dynamic linker, told by LD_LIBRARY_PATH to look in a folder anyone can write, finds a
+    # copy of libc there; the check refuses it whoever owns it, since the folder is 0777.
+    libc = libc_in_listing()
+    with tempfile.TemporaryDirectory(prefix="hkdfguard-planted-") as folder:
+        os.chmod(folder, 0o777)
+        planted = os.path.join(folder, os.path.basename(libc))
+        with open(libc, "rb") as source, open(planted, "wb") as copy:
+            copy.write(source.read())
+        os.chmod(planted, 0o755)
+
+        paths = listing_for("/bin/sh", {"LD_LIBRARY_PATH": folder})
+        assert planted in paths, f"the linker did not pick up the planted copy: {paths}"
+        with pytest.raises(PermissionError) as error:
+            Loader.verify_listing("/bin/sh", paths, trusted_file)
+        assert planted in str(error.value)
+        assert "nothing was loaded" in str(error.value)
+
+
+@linux_only
+def test_the_listing_of_a_file_that_does_not_exist_fails() -> None:
+    with pytest.raises(PermissionError, match="could not say"):
+        _linux.list_dependencies(this_processs_interpreter(), "/nonexistent/libhkdfguard.so.1", {})
+
+
+@linux_only
+def test_the_listing_of_a_shared_library_names_the_dynamic_linker() -> None:
+    # libhkdfguard.so.1 is a shared object, not an executable; list mode works on those too.
+    libc = libc_in_listing()
+    paths = listing_for(libc)
+
+    assert any(os.path.basename(p).startswith("ld-linux") for p in paths), paths
+    Loader.verify_listing(libc, paths, trusted_file)
+
+
+@linux_only
+def test_this_process_passes_the_check_before_loading_for_its_own_libc() -> None:
+    # The whole pre-load check against the real process: PT_INTERP of /proc/self/exe, its trust,
+    # the list run under the startup environment, and every listed path's trust.
+    Loader.verify_before_loading(libc_in_listing(), _linux.read_initial_environment(), ElfDependencies.read_interpreter, trusted_file,
+                                 _linux.list_dependencies)
 

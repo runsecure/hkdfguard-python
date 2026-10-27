@@ -44,9 +44,12 @@ class WindowsNativeLibraryLoader:
        WinVerifyTrust validated it - ends at the pinned root :attr:`EXPECTED_ROOT_SHA256`.
     5. Its PE header marks it a DLL for this process's architecture, refusing the profile's other
        binaries (such as hkdfguard.exe) renamed into place.
+    6. Its version resource - also covered by that signature - is at least
+       :attr:`MINIMUM_LIBRARY_VERSION`, so an older genuine release can't be put back in its place.
 
-    The library's own dependencies are then resolved from System32 only. Any failed check raises
-    ``PermissionError``; there is no fallback and no override of the path.
+    The library's own dependencies are then resolved from System32 only. After loading, the module
+    Windows actually mapped must be the file that was verified (:meth:`verify_loaded_module`). Any
+    failed check raises ``PermissionError``; there is no fallback and no override of the path.
     """
 
     FILE_NAME: Final = "HkdfGuard.dll"
@@ -110,10 +113,60 @@ class WindowsNativeLibraryLoader:
         cls.verify_location(path)
         cls.verify_signature(path, expected_publisher)
         cls.verify_image_kind(path)
+        cls.verify_minimum_version(path, _win32.file_version(path))
         # A second, separate pass, now checking revocation (network allowed); only a definite revocation refuses.
         cls.verify_not_revoked(path, _win32.revocation_status(path))
         # Absolute path, so no probing for the library itself; its own imports come from System32 only.
-        return ctypes.CDLL(os.path.abspath(path), winmode=_win32.LOAD_LIBRARY_SEARCH_SYSTEM32)
+        absolute_path = os.path.abspath(path)
+        library = ctypes.CDLL(absolute_path, winmode=_win32.LOAD_LIBRARY_SEARCH_SYSTEM32)
+        try:
+            try:
+                loaded = _win32.module_file_name(library._handle)
+            except OSError as error:
+                raise PermissionError(f"Could not read which file Windows loaded for '{absolute_path}'; refusing to use it.") from error
+            cls.verify_loaded_module(absolute_path, loaded)
+        except BaseException:
+            _win32.free_library(library._handle)
+            raise
+        return library
+
+    MINIMUM_LIBRARY_VERSION: Final = (0, 9, 0)
+    """The oldest Windows native library release this package loads (major, minor, patch): the
+    first to carry a version resource. Raise it when a release fixes a security issue."""
+
+    @classmethod
+    def verify_minimum_version(cls, path: str, version: tuple[int, int, int] | None) -> None:
+        """Refuses a library whose file version - (major, minor, patch) from its signed version
+        resource, or ``None`` if it has none or it can't be read - is below
+        :attr:`MINIMUM_LIBRARY_VERSION`. The fourth (revision) field is not compared. Run after the
+        signature check, whose hash covers the resource.
+
+        :raises PermissionError: no version, or an older one
+        """
+        minimum = ".".join(map(str, cls.MINIMUM_LIBRARY_VERSION))
+        if version is None:
+            raise PermissionError(
+                f"'{path}' carries no readable version resource, so it predates {minimum}, the oldest HkdfGuard native library "
+                "this package accepts; install a current release.")
+        if version < cls.MINIMUM_LIBRARY_VERSION:
+            raise PermissionError(
+                f"'{path}' is HkdfGuard native library version {'.'.join(map(str, version))}, older than the minimum this package "
+                f"accepts ({minimum}); install a current release.")
+
+    @staticmethod
+    def verify_loaded_module(verified: str, loaded: str) -> None:
+        """Requires the file Windows mapped the loaded module from to be the verified path.
+        LoadLibraryExW returns an already-loaded module of the same name, and honours loader
+        redirection (.local, manifests), without mapping the path it was given; this is the Windows
+        counterpart of the dladdr check on Linux and macOS. The comparison is case-insensitive, as
+        NTFS names are, and ignores a ``\\\\?\\`` prefix.
+
+        :raises PermissionError: Windows loaded some other file
+        """
+        if _strip_long_path_prefix(loaded).casefold() != _strip_long_path_prefix(verified).casefold():
+            raise PermissionError(
+                f"'{verified}' passed verification, but Windows loaded '{loaded}' instead (a module of the same name was already "
+                "loaded, or the load was redirected); refusing to use it.")
 
     # --- Location -------------------------------------------------------------------------------
 
@@ -293,6 +346,12 @@ _SHORT_NAMES: Final = {
     "2.5.4.10": "O", "2.5.4.11": "OU", "2.5.4.12": "T", "2.5.4.42": "G", "2.5.4.43": "I", "2.5.4.17": "PostalCode",
     "1.2.840.113549.1.9.1": "E", "0.9.2342.19200300.100.1.25": "DC",
 }
+
+
+def _strip_long_path_prefix(path: str) -> str:
+    if path[:8].upper() == "\\\\?\\UNC\\":
+        return "\\\\" + path[8:]
+    return path.removeprefix("\\\\?\\")
 
 
 def windows_subject_name(name: x509.Name) -> str:

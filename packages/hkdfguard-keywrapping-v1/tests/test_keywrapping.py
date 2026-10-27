@@ -607,6 +607,73 @@ def test_a_file_that_is_not_a_pe_image_fails_closed(tmp_path: Path) -> None:
         WindowsNativeLibraryLoader.verify_image_kind(str(path))
 
 
+@pytest.mark.parametrize("version", [(0, 9, 0), (0, 9, 1), (0, 10, 0), (1, 0, 0)])
+def test_the_minimum_windows_library_version_or_later_passes(version: tuple[int, int, int]) -> None:
+    WindowsNativeLibraryLoader.verify_minimum_version("test", version)
+
+
+@pytest.mark.parametrize("version", [(0, 8, 9), (0, 8, 65535), (0, 0, 0)])
+def test_an_older_windows_library_version_is_refused(version: tuple[int, int, int]) -> None:
+    with pytest.raises(PermissionError, match="older than the minimum"):
+        WindowsNativeLibraryLoader.verify_minimum_version("test", version)
+
+
+def test_a_windows_library_with_no_version_resource_is_refused() -> None:
+    with pytest.raises(PermissionError, match="no readable version resource"):
+        WindowsNativeLibraryLoader.verify_minimum_version("test", None)
+
+
+@windows_only
+def test_a_file_with_no_version_resource_reads_as_none(tmp_path: Path) -> None:
+    from hkdfguard.keywrapping.v1._interop import _win32
+
+    plain = tmp_path / "plain.dll"
+    plain.write_bytes(b"MZ not really a PE image")
+    assert _win32.file_version(str(plain)) is None
+
+
+@installed_windows_library
+def test_the_installed_library_carries_a_version_of_at_least_the_minimum() -> None:
+    from hkdfguard.keywrapping.v1._interop import _win32
+
+    path = WindowsNativeLibraryLoader.installed_path()
+    version = _win32.file_version(path)
+    assert version is not None
+    WindowsNativeLibraryLoader.verify_minimum_version(path, version)
+
+
+VERIFIED_WINDOWS_PATH = "C:\\Program Files\\HkdfGuard\\v1\\HkdfGuard.dll"
+
+
+@pytest.mark.parametrize("loaded", [
+    VERIFIED_WINDOWS_PATH,
+    "c:\\program files\\hkdfguard\\v1\\hkdfguard.DLL",
+    "\\\\?\\C:\\Program Files\\HkdfGuard\\v1\\HkdfGuard.dll",
+])
+def test_the_verified_file_itself_passes_as_the_loaded_module_whatever_its_case_or_long_path_prefix(loaded: str) -> None:
+    WindowsNativeLibraryLoader.verify_loaded_module(VERIFIED_WINDOWS_PATH, loaded)
+
+
+@pytest.mark.parametrize("loaded", [
+    "C:\\Users\\someone\\AppData\\Local\\Temp\\HkdfGuard.dll",  # the same name, loaded earlier from elsewhere
+    "C:\\app\\app.exe.local\\HkdfGuard.dll",  # DLL redirection
+    "C:\\Program Files\\HkdfGuard\\v2\\HkdfGuard.dll",
+    "\\\\?\\UNC\\server\\share\\HkdfGuard.dll",
+])
+def test_a_module_mapped_from_any_other_file_is_refused(loaded: str) -> None:
+    with pytest.raises(PermissionError, match="Windows loaded") as error:
+        WindowsNativeLibraryLoader.verify_loaded_module(VERIFIED_WINDOWS_PATH, loaded)
+    assert VERIFIED_WINDOWS_PATH in str(error.value) and loaded in str(error.value)
+
+
+@installed_windows_library
+def test_the_installed_library_is_the_file_windows_mapped() -> None:
+    from hkdfguard.keywrapping.v1._interop import _win32
+
+    library = WindowsNativeLibraryLoader.load()
+    assert _win32.module_file_name(library._handle).casefold() == WindowsNativeLibraryLoader.installed_path().casefold()
+
+
 ARTIFACT_SIGNING_EKU = "1.3.6.1.4.1.311.97.1.0"
 GENUINE_EKUS = [ARTIFACT_SIGNING_EKU, WindowsNativeLibraryLoader.CODE_SIGNING_EKU, WindowsNativeLibraryLoader.EXPECTED_PROFILE_EKU]
 

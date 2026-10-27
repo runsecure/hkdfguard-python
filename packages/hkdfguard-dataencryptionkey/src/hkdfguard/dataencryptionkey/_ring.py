@@ -76,6 +76,13 @@ class DataEncryptionKey(abstractions.DataEncryptionKey):
         self.close()
 
 
+def _quietly(action: Callable[..., object], *args: object) -> None:
+    """Runs code the application supplies (its logger, its tracer) so that an exception from it can
+    never decide whether a key stays in use, or stop rotation."""
+    with contextlib.suppress(Exception):
+        action(*args)
+
+
 def _close_quietly(key: abstractions.DataEncryptionKey | None) -> None:
     close = getattr(key, "close", None)
     if callable(close):
@@ -248,8 +255,13 @@ class KeyRing(abstractions.KeyRing):
             next_tick = max(next_tick + interval, time.monotonic())
             try:
                 self._rotate_ephemeral_key(create_key, logger, self._stop.is_set)
-            except Exception:
-                return
+            except Exception as error:
+                if self._stop.is_set():
+                    return
+                # Only the application's tracer can get here (every other failure is handled inside
+                # the rotation). Keep rotating: a thread that ends here would leave the current key
+                # in use indefinitely with nothing to say so.
+                _quietly(HkdfGuardLog.ephemeral_key_rotation_failed, logger, self.current_version, error)
 
     def _rotate_ephemeral_key(self, create_key: Callable[[], abstractions.DataEncryptionKey], logger: logging.Logger | None,
                               stopping: Callable[[], bool]) -> bool:
@@ -265,25 +277,27 @@ class KeyRing(abstractions.KeyRing):
             current = self.current_version
             if current == KeyVersions.MAX_VALUE:
                 exhausted = RuntimeError(f"Version {current} is current, so there is no higher version to rotate to; the current key stays in use.")
-                span.record_exception(exhausted)
-                HkdfGuardLog.ephemeral_key_rotation_failed(logger, current, exhausted)
+                _quietly(span.record_exception, exhausted)
+                _quietly(HkdfGuardLog.ephemeral_key_rotation_failed, logger, current, exhausted)
                 return False
 
             key: abstractions.DataEncryptionKey | None = None
             try:
                 key = create_key()
                 self.add(current + 1, key)
-                self._ephemeral_versions.add(current + 1)
-                span.set_attribute(AttributeNames.KEY_VERSION, current + 1)
-                HkdfGuardLog.ephemeral_key_rotated(logger, current + 1)
             except Exception as error:
                 # Not added, so not owned by the ring: release its revealed key here.
                 _close_quietly(key)
                 if stopping():
                     raise
-                record_exception(span, error)
-                HkdfGuardLog.ephemeral_key_rotation_failed(logger, current, error)
+                _quietly(record_exception, span, error)
+                _quietly(HkdfGuardLog.ephemeral_key_rotation_failed, logger, current, error)
                 return False
+
+            # Added: the ring owns the key and it is current, so nothing from here on may close it.
+            self._ephemeral_versions.add(current + 1)
+            _quietly(span.set_attribute, AttributeNames.KEY_VERSION, current + 1)
+            _quietly(HkdfGuardLog.ephemeral_key_rotated, logger, current + 1)
 
         self._retire_superseded_ephemeral_keys(time.monotonic_ns(), logger, stopping)
         return True
@@ -315,10 +329,11 @@ class KeyRing(abstractions.KeyRing):
                 close = getattr(key, "close", None)
                 if callable(close):
                     close()
-                HkdfGuardLog.ephemeral_key_retired(logger, version)
             except Exception as error:
                 if not stopping():
-                    HkdfGuardLog.ephemeral_key_retirement_failed(logger, version, error)
+                    _quietly(HkdfGuardLog.ephemeral_key_retirement_failed, logger, version, error)
+            else:
+                _quietly(HkdfGuardLog.ephemeral_key_retired, logger, version)
 
     # --- Lifetime -------------------------------------------------------------------------------
 
