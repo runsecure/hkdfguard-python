@@ -497,7 +497,7 @@ wrapper = GoogleKmsKeyWrapper(client,
   other key is refused too.
 - **Key files are interchangeable between ports**, byte for byte: one made by the .NET
   `GoogleKmsKeyWrapper` or the Java `GoogleKmsKeyWrapperImpl` is read by this wrapper, and the other
-  way round, given the same key and context. A wrapped DEK is 113 bytes, inside
+  way round, given the same key and context. A wrapped DEK is about 113 bytes, inside
   `WrappedKeyLimits.MAX_BYTES`.
 - **Anyone allowed to encrypt can make a key file.** Symmetric encryption needs no secret beyond
   permission to use the key, so give the application decrypt only

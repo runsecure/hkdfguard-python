@@ -149,7 +149,7 @@ Path(r"C:\HkdfGuardKeys\myapp\v1.key").write_bytes(wrapped[:length])
 
 `generate_and_wrap` generates the DEK in the pipeline's process, since Cloud KMS has no "generate
 data key". To wrap the key of an `AesGcmPipelineDataProtector`, use `wrap` as in
-[Wrap keys with AWS KMS](use-aws-kms.md#6-create-a-key-file). A key file is 113 bytes.
+[Wrap keys with AWS KMS](use-aws-kms.md#6-create-a-key-file). A key file is about 113 bytes.
 
 Key files are read only from where no untrusted account could have written or replaced them,
 exactly as for AWS KMS: see [Where key files can live](use-aws-kms.md#where-key-files-can-live),
