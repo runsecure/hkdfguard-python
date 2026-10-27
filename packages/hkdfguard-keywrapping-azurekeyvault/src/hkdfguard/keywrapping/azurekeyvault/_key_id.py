@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 # wrapped DEK must be exactly 32 (see _envelope).
 _NAME: Final = re.compile(r"[0-9A-Za-z-]{1,127}")
 _VERSION: Final = re.compile(r"[0-9A-Za-z]{1,64}")
-# A DNS host name: Key Vault is never reached by an IP literal.
+# A host of letters, digits, dots and dashes: no user info or IPv6 literal.
 _HOST: Final = re.compile(r"[0-9A-Za-z](?:[0-9A-Za-z.-]*[0-9A-Za-z])?")
 # Printable ASCII, no space: urlsplit would otherwise quietly strip surrounding whitespace and drop
 # tabs and newlines, accepting what the other ports refuse.
