@@ -1,6 +1,6 @@
 name: Release
 
-# Publishes the seven hkdfguard-* distributions together.
+# Publishes the nine hkdfguard-* distributions together.
 #
 #   * Push a tag "vX.Y.Z" that is on main: tests, builds, checks, and creates a GitHub Release with
 #     the wheels and sdists attached, signed with Sigstore build provenance.
@@ -60,7 +60,7 @@ jobs:
       # After the upload, so no tool run here can change what is attested and released; a failure
       # still fails this job, and nothing downstream runs. twine is pinned by uv.lock (with hashes),
       # never resolved fresh from PyPI at release time.
-      - run: uv run --locked --only-group dist twine check --strict dist/*.whl dist/*.tar.gz
+      - run: uv run --locked --no-build --only-group dist twine check --strict dist/*.whl dist/*.tar.gz
 
   github-release:
     name: GitHub release with signed provenance

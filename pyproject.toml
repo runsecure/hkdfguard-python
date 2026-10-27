@@ -1,4 +1,4 @@
-# The workspace root: develops and tests the seven hkdfguard-* distributions in packages/ together.
+# The workspace root: develops and tests the nine hkdfguard-* distributions in packages/ together.
 # It is not itself a published package.
 [project]
 name = "hkdfguard-workspace"
@@ -9,6 +9,8 @@ dependencies = [
     "hkdfguard-abstractions",
     "hkdfguard-cryptoprovider-aesgcm256",
     "hkdfguard-keywrapping-v1",
+    "hkdfguard-securefile",
+    "hkdfguard-keywrapping-awskms",
     "hkdfguard-dataencryptionkey",
     "hkdfguard-cache",
     "hkdfguard-options",
@@ -36,6 +38,8 @@ hkdfguard-diagnostics = { workspace = true }
 hkdfguard-abstractions = { workspace = true }
 hkdfguard-cryptoprovider-aesgcm256 = { workspace = true }
 hkdfguard-keywrapping-v1 = { workspace = true }
+hkdfguard-securefile = { workspace = true }
+hkdfguard-keywrapping-awskms = { workspace = true }
 hkdfguard-dataencryptionkey = { workspace = true }
 hkdfguard-cache = { workspace = true }
 hkdfguard-options = { workspace = true }
@@ -71,6 +75,8 @@ mypy_path = [
     "packages/hkdfguard-abstractions/src",
     "packages/hkdfguard-cryptoprovider-aesgcm256/src",
     "packages/hkdfguard-keywrapping-v1/src",
+    "packages/hkdfguard-securefile/src",
+    "packages/hkdfguard-keywrapping-awskms/src",
     "packages/hkdfguard-dataencryptionkey/src",
     "packages/hkdfguard-cache/src",
     "packages/hkdfguard-options/src",
@@ -78,3 +84,10 @@ mypy_path = [
 ]
 namespace_packages = true
 explicit_package_bases = true
+
+# botocore ships no type information. hkdfguard-keywrapping-awskms types the KMS client with a small
+# Protocol of the three calls it makes (KmsClient) instead of depending on a stub package, so only
+# its two exception imports are untyped.
+[[tool.mypy.overrides]]
+module = ["botocore", "botocore.*"]
+ignore_missing_imports = true

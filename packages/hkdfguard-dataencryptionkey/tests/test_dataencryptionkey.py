@@ -30,7 +30,7 @@ from hkdfguard.abstractions import (
 )
 from hkdfguard.cryptoprovider.aesgcm256 import AesGcmCryptoProvider, AesGcmCryptoProviderFactory, AesGcmPipelineDataProtector
 from hkdfguard.dataencryptionkey import Base64ConversionUtility, DataEncryptionKey, DefaultFormatProvider, KeyRing, KeyRingBuilder
-from hkdfguard.diagnostics import AttributeNames, HkdfGuardLog, HkdfGuardTelemetry, SpanNames
+from hkdfguard.diagnostics import AttributeNames, HkdfGuardEventId, HkdfGuardLog, HkdfGuardTelemetry, SpanNames
 from hkdfguard_test_support import key_directory, native_test_service
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
@@ -588,7 +588,7 @@ def test_a_ring_with_an_ephemeral_key_rotates_and_old_values_still_decrypt() -> 
         written = int(protector.encrypt("now").split("::")[1].removeprefix("v"))
         assert before <= written <= ring.current_version
         assert reveal(protector, under_v1) == "written under v1"
-        assert any(r.levelno == logging.INFO for r in handler.with_event_id(HkdfGuardLog.EPHEMERAL_KEY_ROTATED))
+        assert any(r.levelno == logging.INFO for r in handler.with_event_id(HkdfGuardEventId.EPHEMERAL_KEY_ROTATED))
 
 
 def test_key_files_alone_or_rotation_off_never_rotate(tmp_path: Path) -> None:
@@ -641,7 +641,7 @@ def test_a_failed_rotation_keeps_the_current_key_and_logs_and_the_next_succeeds(
         factory.armed = True
         time.sleep(FAST.total_seconds() * 4)
 
-        (failure,) = handler.with_event_id(HkdfGuardLog.EPHEMERAL_KEY_ROTATION_FAILED)
+        (failure,) = handler.with_event_id(HkdfGuardEventId.EPHEMERAL_KEY_ROTATION_FAILED)
         assert failure.levelno == logging.ERROR and "version 1 stays current" in failure.getMessage()
         assert ring.current_version >= 2
 
@@ -694,7 +694,7 @@ def test_a_rotating_ring_retires_superseded_keys_once_their_retention_passes() -
         assert ring.find(1) is None
         with pytest.raises(KeyNotFoundError):
             protector.decrypt(under_v1, bytearray(64))
-        assert any("version 1 " in r.getMessage() for r in handler.with_event_id(HkdfGuardLog.EPHEMERAL_KEY_RETIRED))
+        assert any("version 1 " in r.getMessage() for r in handler.with_event_id(HkdfGuardEventId.EPHEMERAL_KEY_RETIRED))
         with pytest.raises(ObjectClosedError):
             factory.providers[0].encrypt(bytearray(b"\x01"), bytearray(64))
         current = ring.current_version
@@ -721,7 +721,7 @@ def test_retire_keeps_a_superseded_key_until_its_retention_has_passed() -> None:
 
         ring._retire_superseded_ephemeral_keys(time.monotonic_ns() + 61 * 60 * 10**9, logger, never_stopping)
         assert ring.find(1) is None and superseded.closed and ring.current_version == 2
-        (retired,) = handler.with_event_id(HkdfGuardLog.EPHEMERAL_KEY_RETIRED)
+        (retired,) = handler.with_event_id(HkdfGuardEventId.EPHEMERAL_KEY_RETIRED)
         assert "version 1 " in retired.getMessage()
 
 
@@ -756,7 +756,7 @@ def test_retire_removes_a_key_whose_close_fails_and_logs_it() -> None:
         ring._retire_superseded_ephemeral_keys(time.monotonic_ns() + 2 * 60 * 10**9, logger, never_stopping)
 
         assert ring.find(1) is None
-        (failure,) = handler.with_event_id(HkdfGuardLog.EPHEMERAL_KEY_RETIREMENT_FAILED)
+        (failure,) = handler.with_event_id(HkdfGuardEventId.EPHEMERAL_KEY_RETIREMENT_FAILED)
         assert failure.levelno == logging.ERROR
 
 
@@ -835,7 +835,7 @@ def test_rotation_thread_keeps_rotating_after_an_escaping_failure() -> None:
         thread.join(5)
 
     assert not thread.is_alive()
-    (failure, *_) = handler.with_event_id(HkdfGuardLog.EPHEMERAL_KEY_ROTATION_FAILED)
+    (failure, *_) = handler.with_event_id(HkdfGuardEventId.EPHEMERAL_KEY_ROTATION_FAILED)
     assert failure.exc_info is not None and "tracer failed" in str(failure.exc_info[1])
 
 

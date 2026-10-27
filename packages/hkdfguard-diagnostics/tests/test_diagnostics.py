@@ -9,6 +9,7 @@ from hkdfguard.diagnostics import (
     CacheMetrics,
     ComponentTelemetry,
     EventNames,
+    HkdfGuardEventId,
     HkdfGuardLog,
     HkdfGuardTelemetry,
     MetricNames,
@@ -178,6 +179,31 @@ def _single(handler: RecordingHandler) -> logging.LogRecord:
 
 def _event_id(record: logging.LogRecord) -> int:
     return int(getattr(record, HkdfGuardLog.EVENT_ID_KEY))
+
+
+def test_event_ids_match_every_port() -> None:
+    assert {member.name: member.value for member in HkdfGuardEventId} == {
+        "SENSITIVE_OPERATION_LOGGED": 1,
+        "OPERATION_FAILED": 2,
+        "KEY_REFRESH_FAILED": 3,
+        "KEY_ACCESS_SUSPENDED": 4,
+        "KEY_ACCESS_RESUMED": 5,
+        "EPHEMERAL_KEY_ROTATED": 6,
+        "EPHEMERAL_KEY_ROTATION_FAILED": 7,
+        "EPHEMERAL_KEY_RETIRED": 8,
+        "EPHEMERAL_KEY_RETIREMENT_FAILED": 9,
+        "ENCRYPTION_BUDGET_WARNING": 10,
+    }
+
+
+def test_a_record_carries_its_event_id_as_a_plain_int() -> None:
+    logger, handler = recording_logger()
+
+    HkdfGuardLog.key_access_resumed(logger, 3)
+
+    event_id = getattr(_single(handler), HkdfGuardLog.EVENT_ID_KEY)
+    assert type(event_id) is int
+    assert event_id == HkdfGuardEventId.KEY_ACCESS_RESUMED
 
 
 def test_sensitive_operation_logged_writes_a_debug_entry() -> None:

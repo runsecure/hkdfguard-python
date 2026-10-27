@@ -13,8 +13,10 @@ members = [
     "hkdfguard-cryptoprovider-aesgcm256",
     "hkdfguard-dataencryptionkey",
     "hkdfguard-diagnostics",
+    "hkdfguard-keywrapping-awskms",
     "hkdfguard-keywrapping-v1",
     "hkdfguard-options",
+    "hkdfguard-securefile",
     "hkdfguard-workspace",
 ]
 
@@ -80,6 +82,20 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/38/6b/3299182794d38815ae6e9c7ede9bb8f2e4aa93c3578bed201c1ea746643a/ast_serialize-0.12.1-cp39-abi3-win32.whl", hash = "sha256:119d1b0cadaba4a6e475f9bbe79eecc79351e373142eabe7c353f0250d70aebb", size = 1125618, upload-time = "2026-10-03T12:24:55.405Z" },
     { url = "https://files.pythonhosted.org/packages/86/14/5d4fb733c18a1d69e237c067b183842f3a7ea1c999a51ddc87093a281c88/ast_serialize-0.12.1-cp39-abi3-win_amd64.whl", hash = "sha256:3d6ed63d4fc1ec867b8cb522d58c36df0e8f05e487bea0ffd102043a37636d72", size = 1165798, upload-time = "2026-10-03T12:24:57.052Z" },
     { url = "https://files.pythonhosted.org/packages/f1/f4/b54123680025c0b7253117418f023d1b2487f1102552acbdd9d8ee96b622/ast_serialize-0.12.1-cp39-abi3-win_arm64.whl", hash = "sha256:610a41351de68199de9a1434499083b4256c0df7658ec1cfc0a0a7b20b08d317", size = 1136560, upload-time = "2026-10-03T12:24:58.689Z" },
+]
+
+[[package]]
+name = "botocore"
+version = "1.43.118"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "jmespath" },
+    { name = "python-dateutil" },
+    { name = "urllib3" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d4/b8/3e55154ddaf1a6d1d4ddda85c0e5983205a3b7657edacd8ebba8c6fd774c/botocore-1.43.118.tar.gz", hash = "sha256:7f3f9d88cc9e847587690f82a42e3c3c292c3026c92c1e60d68a9310018e003f", size = 16420126, upload-time = "2026-10-22T19:22:04.81Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9c/ce/61b39a8e7a69af5ea43c1c3e1b0065a4866b42ccddf107e16686a3143614/botocore-1.43.118-py3-none-any.whl", hash = "sha256:a45d7ae570674161e4a3542d8c68633bf7503f92d1de781ef7361b79488eda6f", size = 16122016, upload-time = "2026-10-22T19:22:00.414Z" },
 ]
 
 [[package]]
@@ -452,6 +468,23 @@ dependencies = [
 requires-dist = [{ name = "opentelemetry-api", specifier = ">=1.45" }]
 
 [[package]]
+name = "hkdfguard-keywrapping-awskms"
+version = "0.9.0"
+source = { editable = "packages/hkdfguard-keywrapping-awskms" }
+dependencies = [
+    { name = "botocore" },
+    { name = "hkdfguard-abstractions" },
+    { name = "hkdfguard-securefile" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "botocore", specifier = ">=1.40" },
+    { name = "hkdfguard-abstractions", editable = "packages/hkdfguard-abstractions" },
+    { name = "hkdfguard-securefile", editable = "packages/hkdfguard-securefile" },
+]
+
+[[package]]
 name = "hkdfguard-keywrapping-v1"
 version = "0.9.0"
 source = { editable = "packages/hkdfguard-keywrapping-v1" }
@@ -482,6 +515,17 @@ requires-dist = [
 ]
 
 [[package]]
+name = "hkdfguard-securefile"
+version = "0.9.0"
+source = { editable = "packages/hkdfguard-securefile" }
+dependencies = [
+    { name = "hkdfguard-abstractions" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "hkdfguard-abstractions", editable = "packages/hkdfguard-abstractions" }]
+
+[[package]]
 name = "hkdfguard-workspace"
 version = "0"
 source = { virtual = "." }
@@ -491,8 +535,10 @@ dependencies = [
     { name = "hkdfguard-cryptoprovider-aesgcm256" },
     { name = "hkdfguard-dataencryptionkey" },
     { name = "hkdfguard-diagnostics" },
+    { name = "hkdfguard-keywrapping-awskms" },
     { name = "hkdfguard-keywrapping-v1" },
     { name = "hkdfguard-options" },
+    { name = "hkdfguard-securefile" },
 ]
 
 [package.dev-dependencies]
@@ -513,8 +559,10 @@ requires-dist = [
     { name = "hkdfguard-cryptoprovider-aesgcm256", editable = "packages/hkdfguard-cryptoprovider-aesgcm256" },
     { name = "hkdfguard-dataencryptionkey", editable = "packages/hkdfguard-dataencryptionkey" },
     { name = "hkdfguard-diagnostics", editable = "packages/hkdfguard-diagnostics" },
+    { name = "hkdfguard-keywrapping-awskms", editable = "packages/hkdfguard-keywrapping-awskms" },
     { name = "hkdfguard-keywrapping-v1", editable = "packages/hkdfguard-keywrapping-v1" },
     { name = "hkdfguard-options", editable = "packages/hkdfguard-options" },
+    { name = "hkdfguard-securefile", editable = "packages/hkdfguard-securefile" },
 ]
 
 [package.metadata.requires-dev]
@@ -596,6 +644,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/7b/6f/357efd7602486741aa73ffc0617fb310a29b588ed0fd69c2399acbb85b0c/jeepney-0.9.0.tar.gz", hash = "sha256:cf0e9e845622b81e4a28df94c40345400256ec608d0e55bb8a3feaa9163f5732", size = 106758, upload-time = "2025-02-27T18:51:01.684Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b2/a3/e137168c9c44d18eff0376253da9f1e9234d0239e0ee230d2fee6cea8e55/jeepney-0.9.0-py3-none-any.whl", hash = "sha256:97e5714520c16fc0a45695e5365a2e11b81ea79bba796e26f9f1d178cb182683", size = 49010, upload-time = "2025-02-27T18:51:00.104Z" },
+]
+
+[[package]]
+name = "jmespath"
+version = "1.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/d3/59/322338183ecda247fb5d1763a6cbe46eff7222eaeebafd9fa65d4bf5cb11/jmespath-1.1.0.tar.gz", hash = "sha256:472c87d80f36026ae83c6ddd0f1d05d4e510134ed462851fd5f754c8c3cbb88d", size = 27377, upload-time = "2026-01-22T16:35:26.279Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/14/2f/967ba146e6d58cf6a652da73885f52fc68001525b4197effc174321d70b4/jmespath-1.1.0-py3-none-any.whl", hash = "sha256:a5663118de4908c91729bea0acadca56526eb2698e83de10cd116ae0f4e97c64", size = 20419, upload-time = "2026-01-22T16:35:24.919Z" },
 ]
 
 [[package]]
@@ -944,6 +1001,18 @@ wheels = [
 ]
 
 [[package]]
+name = "python-dateutil"
+version = "2.9.0.post0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "six" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/66/c0/0c8b6ad9f17a802ee498c46e004a0eb49bc148f2fd230864601a86dcf6db/python-dateutil-2.9.0.post0.tar.gz", hash = "sha256:37dd54208da7e1cd875388217d5e00ebd4179249f90fb72437e91a35459a0ad3", size = 342432, upload-time = "2024-03-01T18:36:20.211Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ec/57/56b9bcc3c9c6a792fcbaf139543cee77261f3651ca9da0c93f5c1221264b/python_dateutil-2.9.0.post0-py2.py3-none-any.whl", hash = "sha256:a8b2bc7bffae282281c8140a97d3aa9c14da0b136dfe83f850eea9a5f7470427", size = 229892, upload-time = "2024-03-01T18:36:18.57Z" },
+]
+
+[[package]]
 name = "pywin32-ctypes"
 version = "0.2.3"
 source = { registry = "https://pypi.org/simple" }
@@ -1051,6 +1120,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/1c/03/e834bcd866f2f8a49a85eaff47340affa3bfa391ee9912a952a1faa68c7b/secretstorage-3.5.0.tar.gz", hash = "sha256:f04b8e4689cbce351744d5537bf6b1329c6fc68f91fa666f60a380edddcd11be", size = 19884, upload-time = "2025-11-23T19:02:53.191Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b7/46/f5af3402b579fd5e11573ce652019a67074317e18c1935cc0b4ba9b35552/secretstorage-3.5.0-py3-none-any.whl", hash = "sha256:0ce65888c0725fcb2c5bc0fdb8e5438eece02c523557ea40ce0703c266248137", size = 15554, upload-time = "2025-11-23T19:02:51.545Z" },
+]
+
+[[package]]
+name = "six"
+version = "1.17.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/94/e7/b2c673351809dca68a0e064b6af791aa332cf192da575fd474ed7d6f16a2/six-1.17.0.tar.gz", hash = "sha256:ff70335d468e7eb6ec65b95b99d3a2836546063f63acc5171de367e834932a81", size = 34031, upload-time = "2024-12-04T17:35:28.174Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274", size = 11050, upload-time = "2024-12-04T17:35:26.475Z" },
 ]
 
 [[package]]
