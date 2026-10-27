@@ -149,6 +149,11 @@ activemq-data/
 # SageMath parsed files
 *.sage.py
 
+# Local settings for the integration tests that call cloud services: which
+# keys they use (see docs/how-to/run-azure-key-vault-integration-tests.md).
+# Kept on each developer's machine, like hkdfguard-dotnet's *.runsettings.
+*.test.properties
+
 # Environments
 .env
 .envrc
