@@ -8,7 +8,8 @@ event ids are identical.
 
 Requires **Python 3.12** or later. Cryptography is [`cryptography`](https://cryptography.io);
 telemetry is the OpenTelemetry API; logging is the standard `logging` module; native KMS calls, and
-the Windows key-file checks, use `ctypes`; AWS KMS calls go through `botocore`.
+the Windows key-file checks, use `ctypes`; AWS KMS calls go through `botocore`, and Azure Key Vault
+calls through `azure-keyvault-keys`.
 
 ## Packages
 
@@ -22,6 +23,7 @@ Each distribution installs one subpackage of the `hkdfguard` namespace package.
 | `hkdfguard-keywrapping-v1`            | `hkdfguard.keywrapping.v1`              | HkdfGuard.KeyWrapping.V1             | `NativeHkdfKeyWrapperV1` over the native KMS library |
 | `hkdfguard-securefile`                | `hkdfguard.securefile`                  | HkdfGuard.SecureFile                 | `TrustedKeyFile`, `KeyFileTrust`: the native library's key-file location and content checks, in Python |
 | `hkdfguard-keywrapping-awskms`        | `hkdfguard.keywrapping.awskms`          | HkdfGuard.KeyWrapping.AwsKms         | `AwsKmsKeyWrapper` over one symmetric AWS KMS key, through a botocore client |
+| `hkdfguard-keywrapping-azurekeyvault` | `hkdfguard.keywrapping.azurekeyvault`   | HkdfGuard.KeyWrapping.AzureKeyVault  | `AzureKeyVaultKeyWrapper` over an RSA wrapping key and an EC P-256 signing key in Azure Key Vault |
 | `hkdfguard-dataencryptionkey`         | `hkdfguard.dataencryptionkey`           | HkdfGuard.DataEncryptionKey          | `KeyRing`, `KeyRingBuilder`, `DataEncryptionKey`, `DefaultFormatProvider` |
 | `hkdfguard-cache`                     | `hkdfguard.cache`                       | HkdfGuard.Cache                      | `ProtectedCache`, `ProtectedCacheCollection` |
 | `hkdfguard-options`                   | `hkdfguard.options`                     | HkdfGuard.Options                    | `HkdfGuardOptions`, `KeyFileOptions`, `OptionsValidationError` |
@@ -159,7 +161,9 @@ silently fall back to a default.
   `cryptography`'s HMAC context. This library can't zero that context's copy of it either; whether
   it is wiped when the context is finalized and freed is up to `cryptography` and OpenSSL. Likewise
   `AwsKmsKeyWrapper`: botocore returns Decrypt's plaintext as an immutable `bytes`, which is copied
-  into the caller's buffer but can't be zeroed (see *Wrapping under AWS KMS instead*). Process
+  into the caller's buffer but can't be zeroed (see *Wrapping under AWS KMS instead*), and
+  `AzureKeyVaultKeyWrapper` hands the Azure SDK, and gets back from it, keys as immutable `bytes`
+  (see *Wrapping under Azure Key Vault instead*). Process
   hardening, which blocks core dumps and debugger attachment, is what keeps such copies out of
   reach.
 - **Logging:** a `None` logger means the package's own logger (e.g. `hkdfguard.cache`). The event id
@@ -277,7 +281,7 @@ turned off. `read_key_file` has no default implementation: a custom key wrapper 
 files itself, and must refuse a file another account could have written or replaced, since whoever
 can replace a key file chooses the key new data is encrypted under. A key wrapper with no native
 library to read through can use `TrustedKeyFile.read` from `hkdfguard-securefile`, which makes the
-same location and content checks in Python, as `AwsKmsKeyWrapper` does.
+same location and content checks in Python, as `AwsKmsKeyWrapper` and `AzureKeyVaultKeyWrapper` do.
 
 ### Process hardening
 
@@ -391,6 +395,73 @@ permissions for each role, credentials, and creating key files.
 [Run the AWS KMS integration tests](docs/how-to/run-aws-kms-integration-tests.md) sets up a key of
 your own for `test_awskms_integration.py`, which is otherwise reported as skipped.
 
+## Wrapping under Azure Key Vault instead
+
+`AzureKeyVaultKeyWrapper` (distribution `hkdfguard-keywrapping-azurekeyvault`) is a `KeyWrapper`
+over two Azure Key Vault keys: an RSA key (2048 or 3072 bits) that wraps each DEK with RSA-OAEP-256,
+and a separate EC P-256 key that signs each wrapped DEK with ES256. Use it in place of
+`NativeHkdfKeyWrapperV1` wherever a wrapper is taken:
+
+```python
+from azure.identity import DefaultAzureCredential
+from hkdfguard.keywrapping.azurekeyvault import AzureKeyVaultKeyWrapper
+
+wrapper = AzureKeyVaultKeyWrapper("https://myvault.vault.azure.net/keys/myapp-wrap",
+                                  "https://myvault.vault.azure.net/keys/myapp-sign",
+                                  DefaultAzureCredential(),            # a managed identity, deployed
+                                  "com.example.myapp")                 # the context
+```
+
+- **Why two keys.** RSA-OAEP wrapping needs only the public key, so on its own anyone could make a
+  wrapped DEK holding a key they chose. Signing needs the signing key's private half, which never
+  leaves Key Vault, and `unwrap` verifies the signature before it unwraps anything. Give `sign` to
+  the pipeline that creates key files, never to the application. The wrapper refuses the same key
+  for both jobs.
+- **Both keys are pinned.** A wrapped DEK records only the two key versions it was made with; the
+  vault and key names always come from the constructor. Rotating either key needs nothing here, as
+  long as the versions existing key files name stay enabled. Give identifiers without a version so
+  new key files use the current ones.
+- **The context** is bound into every signature and must be given again, exactly, to reveal a DEK;
+  `None` and `""` are the same. It isn't secret.
+- **Key files are interchangeable between ports**, byte for byte: one made by the .NET
+  `AzureKeyVaultKeyWrapper` or the Java `AzureKeyVaultKeyWrapperImpl` is read by this wrapper, and
+  the other way round, given the same keys and context. They aren't interchangeable with other kinds
+  of wrapper. An RSA-2048 key's wrapped DEK is 359 bytes and an RSA-3072 key's 487, inside
+  `WrappedKeyLimits.MAX_BYTES`; a 4096-bit key's wouldn't fit, and wrapping under one is refused.
+- **What is local.** The Azure SDK's `CryptographyClient` reads each key's public half once (the
+  identity needs `get` on both keys), then wraps and verifies in this process; signing and
+  unwrapping are always Key Vault calls. Without `get`, every operation is a call, and a key
+  identifier must then name its version: the SDK can't report which version it used otherwise, and
+  a wrapped DEK must record it.
+- `generate_and_wrap` generates the DEK in this process, since Key Vault has no "generate data key".
+- **Memory.** The caller's buffer is zeroed when an unwrap fails. The SDK wraps with
+  `cryptography`'s RSA, which takes only an immutable `bytes` (given a `bytearray`, the SDK sends the
+  key to Key Vault instead), so `wrap` copies the key into one `bytes`, which lives until collected;
+  `generate_and_wrap` hands over `os.urandom`'s. The revealed key comes back from the SDK as a
+  `bytes` too, copied into the caller's buffer but never zeroed. This is less than the .NET and Java
+  wrappers can zero; process hardening is what keeps these copies out of reach.
+- Calls block until Key Vault answers. Failures raise `CryptographicError` naming the operation,
+  the key, Key Vault's error code (for example `Forbidden` or `KeyNotFound`) and the HTTP status,
+  with the SDK's `HttpResponseError` as its `__cause__`; a client-side failure (a credential that
+  can't get a token, an unreachable vault) raises `CryptographicError` with its message. Argument
+  errors raise `ValueError` or `TypeError`.
+- **Clients.** The wrapper creates one `CryptographyClient` per key version it uses and keeps it, so
+  a key ring's refresh doesn't fetch the public keys again. `close()` closes them; the wrapper is a
+  context manager. The keyword-only `client_options` are passed to each client (`api_version`,
+  `transport`, retry and logging options).
+- Key files are read through `hkdfguard-securefile` by the same rules as `AwsKmsKeyWrapper`'s, with
+  a `KeyFileTrust` for the deployment's own account or group.
+
+**Dependencies.** The distribution depends on `azure-keyvault-keys` (with `azure-core`, `isodate`
+and `cryptography`). The credential is the application's: `azure-identity` provides
+`DefaultAzureCredential` and `ManagedIdentityCredential`, and is not a dependency, since any
+`TokenCredential` will do.
+
+[Wrap keys with Azure Key Vault](docs/how-to/use-azure-key-vault.md) walks through creating the two
+keys, the permissions for each identity, credentials, and creating key files.
+[Run the Azure Key Vault integration tests](docs/how-to/run-azure-key-vault-integration-tests.md)
+sets up a test vault for `test_azurekeyvault_integration.py`, which is otherwise reported as skipped.
+
 ## Building
 
 Uses a [uv](https://docs.astral.sh/uv/) workspace:
@@ -407,7 +478,7 @@ uv build --all-packages --build-constraints build-constraints.txt --require-hash
 
 `.github/workflows/ci.yml` tests every push and pull request on Linux, Windows and macOS with Python
 3.12 to 3.14, lints, and builds and checks the packages. `.github/workflows/release.yml` publishes all
-nine distributions together as a GitHub Release, with Sigstore-signed build provenance and no stored
+ten distributions together as a GitHub Release, with Sigstore-signed build provenance and no stored
 token. Nothing is published to PyPI yet.
 
 To release: set the same version in every `packages/*/pyproject.toml`, merge to `main`, then push a tag
@@ -528,3 +599,29 @@ uv run pytest packages/hkdfguard-keywrapping-awskms
 [Run the AWS KMS integration tests](docs/how-to/run-aws-kms-integration-tests.md) sets up a test
 key and a low-privilege IAM user for them. Every other AWS KMS test runs against an in-process fake
 KMS, or a real botocore client whose responses are stubbed, and sends nothing to AWS.
+
+## Azure Key Vault integration tests
+
+`test_azurekeyvault_integration.py` in `hkdfguard-keywrapping-azurekeyvault` makes real calls
+against an RSA wrapping key and an EC P-256 signing key. Its tests are reported as skipped, never
+passed, until both are named by `HKDFGUARD_TEST_AZURE_WRAP_KEY_ID` and
+`HKDFGUARD_TEST_AZURE_SIGN_KEY_ID` - the variables the .NET and Java integration tests read - in the
+environment or in `azure.test.properties` at the repository root, this repository's counterpart of
+hkdfguard-dotnet's `azure.runsettings`. The file names keys only, never a credential, and `.gitignore`
+excludes it:
+
+```properties
+HKDFGUARD_TEST_AZURE_WRAP_KEY_ID=https://<key vault name>.vault.azure.net/keys/hkdfguard-test-wrap
+HKDFGUARD_TEST_AZURE_SIGN_KEY_ID=https://<key vault name>.vault.azure.net/keys/hkdfguard-test-sign
+```
+
+`DefaultAzureCredential` signs in with your `az login`. The tests never create, change or delete a
+key:
+
+```bash
+uv run pytest packages/hkdfguard-keywrapping-azurekeyvault
+```
+
+[Run the Azure Key Vault integration tests](docs/how-to/run-azure-key-vault-integration-tests.md)
+sets up a test vault and both keys. Every other Azure Key Vault test runs against an in-process fake
+vault, or the Azure SDK's own client over a stubbed HTTP transport, and sends nothing to Azure.

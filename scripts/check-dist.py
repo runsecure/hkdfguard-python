@@ -3,7 +3,7 @@
     uv build --all-packages --out-dir dist
     python scripts/check-dist.py dist [--tag v1.0.0]
 
-Refuses to pass unless, for the nine hkdfguard-* distributions:
+Refuses to pass unless, for the ten hkdfguard-* distributions:
 
 * each has exactly one wheel and one sdist, and nothing else is in the directory;
 * every one has the same version, and with ``--tag`` that version is the tag without its ``v``;
@@ -33,6 +33,7 @@ EXPECTED = {
     "hkdfguard-dataencryptionkey",
     "hkdfguard-diagnostics",
     "hkdfguard-keywrapping-awskms",
+    "hkdfguard-keywrapping-azurekeyvault",
     "hkdfguard-keywrapping-v1",
     "hkdfguard-options",
     "hkdfguard-securefile",

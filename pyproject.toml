@@ -1,4 +1,4 @@
-# The workspace root: develops and tests the nine hkdfguard-* distributions in packages/ together.
+# The workspace root: develops and tests the ten hkdfguard-* distributions in packages/ together.
 # It is not itself a published package.
 [project]
 name = "hkdfguard-workspace"
@@ -11,6 +11,7 @@ dependencies = [
     "hkdfguard-keywrapping-v1",
     "hkdfguard-securefile",
     "hkdfguard-keywrapping-awskms",
+    "hkdfguard-keywrapping-azurekeyvault",
     "hkdfguard-dataencryptionkey",
     "hkdfguard-cache",
     "hkdfguard-options",
@@ -22,6 +23,8 @@ dev = [
     "opentelemetry-sdk>=1.45",
     "ruff>=0.17",
     "mypy>=2.4",
+    # DefaultAzureCredential, for hkdfguard-keywrapping-azurekeyvault's integration tests.
+    "azure-identity>=1.25",
 ]
 dist = [
     "twine>=7.0.0",
@@ -40,6 +43,7 @@ hkdfguard-cryptoprovider-aesgcm256 = { workspace = true }
 hkdfguard-keywrapping-v1 = { workspace = true }
 hkdfguard-securefile = { workspace = true }
 hkdfguard-keywrapping-awskms = { workspace = true }
+hkdfguard-keywrapping-azurekeyvault = { workspace = true }
 hkdfguard-dataencryptionkey = { workspace = true }
 hkdfguard-cache = { workspace = true }
 hkdfguard-options = { workspace = true }
@@ -77,6 +81,7 @@ mypy_path = [
     "packages/hkdfguard-keywrapping-v1/src",
     "packages/hkdfguard-securefile/src",
     "packages/hkdfguard-keywrapping-awskms/src",
+    "packages/hkdfguard-keywrapping-azurekeyvault/src",
     "packages/hkdfguard-dataencryptionkey/src",
     "packages/hkdfguard-cache/src",
     "packages/hkdfguard-options/src",
