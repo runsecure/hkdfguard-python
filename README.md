@@ -8,8 +8,8 @@ event ids are identical.
 
 Requires **Python 3.12** or later. Cryptography is [`cryptography`](https://cryptography.io);
 telemetry is the OpenTelemetry API; logging is the standard `logging` module; native KMS calls, and
-the Windows key-file checks, use `ctypes`; AWS KMS calls go through `botocore`, and Azure Key Vault
-calls through `azure-keyvault-keys`.
+the Windows key-file checks, use `ctypes`; AWS KMS calls go through `botocore`, Azure Key Vault calls
+through `azure-keyvault-keys`, and Google Cloud KMS calls through `google-cloud-kms`.
 
 ## Packages
 
@@ -24,6 +24,7 @@ Each distribution installs one subpackage of the `hkdfguard` namespace package.
 | `hkdfguard-securefile`                | `hkdfguard.securefile`                  | HkdfGuard.SecureFile                 | `TrustedKeyFile`, `KeyFileTrust`: the native library's key-file location and content checks, in Python |
 | `hkdfguard-keywrapping-awskms`        | `hkdfguard.keywrapping.awskms`          | HkdfGuard.KeyWrapping.AwsKms         | `AwsKmsKeyWrapper` over one symmetric AWS KMS key, through a botocore client |
 | `hkdfguard-keywrapping-azurekeyvault` | `hkdfguard.keywrapping.azurekeyvault`   | HkdfGuard.KeyWrapping.AzureKeyVault  | `AzureKeyVaultKeyWrapper` over an RSA wrapping key and an EC P-256 signing key in Azure Key Vault |
+| `hkdfguard-keywrapping-googlekms`     | `hkdfguard.keywrapping.googlekms`       | HkdfGuard.KeyWrapping.GoogleKms      | `GoogleKmsKeyWrapper` over one symmetric Google Cloud KMS key, through a Cloud KMS client |
 | `hkdfguard-dataencryptionkey`         | `hkdfguard.dataencryptionkey`           | HkdfGuard.DataEncryptionKey          | `KeyRing`, `KeyRingBuilder`, `DataEncryptionKey`, `DefaultFormatProvider` |
 | `hkdfguard-cache`                     | `hkdfguard.cache`                       | HkdfGuard.Cache                      | `ProtectedCache`, `ProtectedCacheCollection` |
 | `hkdfguard-options`                   | `hkdfguard.options`                     | HkdfGuard.Options                    | `HkdfGuardOptions`, `KeyFileOptions`, `OptionsValidationError` |
@@ -163,7 +164,8 @@ silently fall back to a default.
   `AwsKmsKeyWrapper`: botocore returns Decrypt's plaintext as an immutable `bytes`, which is copied
   into the caller's buffer but can't be zeroed (see *Wrapping under AWS KMS instead*), and
   `AzureKeyVaultKeyWrapper` hands the Azure SDK, and gets back from it, keys as immutable `bytes`
-  (see *Wrapping under Azure Key Vault instead*). Process
+  (see *Wrapping under Azure Key Vault instead*), as `GoogleKmsKeyWrapper` does with the Cloud KMS
+  client (see *Wrapping under Google Cloud KMS instead*). Process
   hardening, which blocks core dumps and debugger attachment, is what keeps such copies out of
   reach.
 - **Logging:** a `None` logger means the package's own logger (e.g. `hkdfguard.cache`). The event id
@@ -281,7 +283,8 @@ turned off. `read_key_file` has no default implementation: a custom key wrapper 
 files itself, and must refuse a file another account could have written or replaced, since whoever
 can replace a key file chooses the key new data is encrypted under. A key wrapper with no native
 library to read through can use `TrustedKeyFile.read` from `hkdfguard-securefile`, which makes the
-same location and content checks in Python, as `AwsKmsKeyWrapper` and `AzureKeyVaultKeyWrapper` do.
+same location and content checks in Python, as `AwsKmsKeyWrapper`, `AzureKeyVaultKeyWrapper` and
+`GoogleKmsKeyWrapper` do.
 
 ### Process hardening
 
@@ -462,6 +465,73 @@ keys, the permissions for each identity, credentials, and creating key files.
 [Run the Azure Key Vault integration tests](docs/how-to/run-azure-key-vault-integration-tests.md)
 sets up a test vault for `test_azurekeyvault_integration.py`, which is otherwise reported as skipped.
 
+## Wrapping under Google Cloud KMS instead
+
+`GoogleKmsKeyWrapper` (distribution `hkdfguard-keywrapping-googlekms`) is a `KeyWrapper` over one
+symmetric Google Cloud KMS key (purpose `ENCRYPT_DECRYPT`). Use it in place of
+`NativeHkdfKeyWrapperV1` wherever a wrapper is taken. Every call is a Cloud KMS request, authorized by
+the process's Google credential through IAM and recorded in Cloud Audit Logs:
+
+```python
+from google.cloud import kms
+from hkdfguard.keywrapping.googlekms import GoogleKmsKeyWrapper
+
+# The application creates the client, keeps it while anything uses the wrapper, and closes it.
+client = kms.KeyManagementServiceClient()                # Application Default Credentials
+wrapper = GoogleKmsKeyWrapper(client,
+                              "projects/my-project/locations/us-east1/keyRings/myapp/cryptoKeys/myapp-wrap",
+                              "com.example.myapp")       # the context
+```
+
+- `wrap` calls `Encrypt` and `unwrap` calls `Decrypt`. Cloud KMS has no "generate data key", so
+  `generate_and_wrap` generates the DEK in this process and wraps it.
+- **The key is pinned.** `Decrypt` is always called against the key given at construction, and Cloud
+  KMS refuses a ciphertext made under any other key. The key name must be a key's, not a key
+  version's. A ciphertext records the version that made it, so rotating the key needs nothing here,
+  as long as the versions existing key files were made with stay enabled.
+- **The context** is bound into every wrapped DEK as additional authenticated data, after a fixed
+  HkdfGuard label, and must be given again, exactly, to reveal it; `None` and `""` are the same. The
+  label stops a ciphertext the key made for another purpose being taken for a DEK. Neither is secret.
+- **Checksums.** Every request and response carries a CRC32C checksum, as Google recommends, so data
+  corrupted in transit is refused rather than stored or used. A response naming a version of any
+  other key is refused too.
+- **Key files are interchangeable between ports**, byte for byte: one made by the .NET
+  `GoogleKmsKeyWrapper` or the Java `GoogleKmsKeyWrapperImpl` is read by this wrapper, and the other
+  way round, given the same key and context. A wrapped DEK is about 113 bytes, inside
+  `WrappedKeyLimits.MAX_BYTES`.
+- **Anyone allowed to encrypt can make a key file.** Symmetric encryption needs no secret beyond
+  permission to use the key, so give the application decrypt only
+  (`roles/cloudkms.cryptoKeyDecrypter`) and the pipeline that creates key files encrypt only
+  (`roles/cloudkms.cryptoKeyEncrypter`). Key files are read through `hkdfguard-securefile` by the
+  same rules as `AwsKmsKeyWrapper`'s, with a `KeyFileTrust` for the deployment's own account or group.
+- **Memory.** The caller's buffer is zeroed when an unwrap fails. The client's request messages take
+  only an immutable `bytes`, so `wrap` copies the key into one `bytes`, which lives until collected;
+  `generate_and_wrap` hands over `os.urandom`'s. The revealed key comes back from the client as a
+  `bytes` too, copied into the caller's buffer but never zeroed. This is less than the .NET and Java
+  wrappers can zero; process hardening is what keeps these copies out of reach. The gRPC client
+  starts threads of its own, so on Windows use `REQUIRE_PROTECTED_SIGNATURE` (see *Process
+  hardening*).
+- Calls block until Cloud KMS answers, the client's own retries included (by default it retries
+  `UNAVAILABLE` and `DEADLINE_EXCEEDED` for up to 60 seconds; a retry resends the same bytes).
+  Failures raise `CryptographicError` naming the operation, the key and the gRPC status, for example
+  `INVALID_ARGUMENT: Decryption failed.` for a key file that was tampered with or made under another
+  key or context, with the client's `GoogleAPICallError` as its `__cause__`. Over the REST transport
+  the HTTP status is named instead. A client-side failure (no credentials, retries that ran out of
+  time) raises `CryptographicError` with its message. Argument errors raise `ValueError` or
+  `TypeError`.
+
+**Dependencies.** The distribution depends on `google-cloud-kms` (with `google-api-core`,
+`google-auth`, `grpcio`, `proto-plus` and `protobuf`). The client is typed with `CloudKmsClient`, a
+`Protocol` of the two calls the wrapper makes, which `KeyManagementServiceClient` satisfies over
+gRPC or REST (`KeyManagementServiceClient(transport="rest")`). CRC32C is computed in Python, so
+`google-crc32c` isn't needed. There is no configuration integration for it: create the wrapper and
+pass it to `KeyRingBuilder.with_key_wrapper`.
+
+[Wrap keys with Google Cloud KMS](docs/how-to/use-google-kms.md) walks through creating the key, the
+IAM roles for each principal, credentials, and creating key files.
+[Run the Google Cloud KMS integration tests](docs/how-to/run-google-kms-integration-tests.md) sets up
+a key of your own for `test_googlekms_integration.py`, which is otherwise reported as skipped.
+
 ## Building
 
 Uses a [uv](https://docs.astral.sh/uv/) workspace:
@@ -478,7 +548,7 @@ uv build --all-packages --build-constraints build-constraints.txt --require-hash
 
 `.github/workflows/ci.yml` tests every push and pull request on Linux, Windows and macOS with Python
 3.12 to 3.14, lints, and builds and checks the packages. `.github/workflows/release.yml` publishes all
-ten distributions together as a GitHub Release, with Sigstore-signed build provenance and no stored
+eleven distributions together as a GitHub Release, with Sigstore-signed build provenance and no stored
 token. Nothing is published to PyPI yet.
 
 To release: set the same version in every `packages/*/pyproject.toml`, merge to `main`, then push a tag
@@ -625,3 +695,27 @@ uv run pytest packages/hkdfguard-keywrapping-azurekeyvault
 [Run the Azure Key Vault integration tests](docs/how-to/run-azure-key-vault-integration-tests.md)
 sets up a test vault and both keys. Every other Azure Key Vault test runs against an in-process fake
 vault, or the Azure SDK's own client over a stubbed HTTP transport, and sends nothing to Azure.
+
+## Google Cloud KMS integration tests
+
+`test_googlekms_integration.py` in `hkdfguard-keywrapping-googlekms` makes real calls against a
+symmetric Cloud KMS key. Its tests are reported as skipped, never passed, until
+`HKDFGUARD_TEST_GOOGLE_KMS_KEY_NAME` - the variable the .NET and Java integration tests read - names
+it, in the environment or in `google.test.properties` at the repository root, this repository's
+counterpart of hkdfguard-dotnet's `google.runsettings`. The file names the key only, never a
+credential, and `.gitignore` excludes it:
+
+```properties
+HKDFGUARD_TEST_GOOGLE_KMS_KEY_NAME=projects/<project>/locations/<location>/keyRings/hkdfguard-test/cryptoKeys/hkdfguard-test-wrap
+```
+
+Application Default Credentials sign in with your `gcloud auth application-default login`. The
+tests never create, change or destroy a key:
+
+```bash
+uv run pytest packages/hkdfguard-keywrapping-googlekms
+```
+
+[Run the Google Cloud KMS integration tests](docs/how-to/run-google-kms-integration-tests.md) sets up
+a test key and its permissions. Every other Google Cloud KMS test runs against a fake Cloud KMS on
+the loopback address, reached through Google's own client, and sends nothing to Google.

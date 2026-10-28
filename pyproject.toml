@@ -1,4 +1,4 @@
-# The workspace root: develops and tests the ten hkdfguard-* distributions in packages/ together.
+# The workspace root: develops and tests the eleven hkdfguard-* distributions in packages/ together.
 # It is not itself a published package.
 [project]
 name = "hkdfguard-workspace"
@@ -12,6 +12,7 @@ dependencies = [
     "hkdfguard-securefile",
     "hkdfguard-keywrapping-awskms",
     "hkdfguard-keywrapping-azurekeyvault",
+    "hkdfguard-keywrapping-googlekms",
     "hkdfguard-dataencryptionkey",
     "hkdfguard-cache",
     "hkdfguard-options",
@@ -44,6 +45,7 @@ hkdfguard-keywrapping-v1 = { workspace = true }
 hkdfguard-securefile = { workspace = true }
 hkdfguard-keywrapping-awskms = { workspace = true }
 hkdfguard-keywrapping-azurekeyvault = { workspace = true }
+hkdfguard-keywrapping-googlekms = { workspace = true }
 hkdfguard-dataencryptionkey = { workspace = true }
 hkdfguard-cache = { workspace = true }
 hkdfguard-options = { workspace = true }
@@ -82,6 +84,7 @@ mypy_path = [
     "packages/hkdfguard-securefile/src",
     "packages/hkdfguard-keywrapping-awskms/src",
     "packages/hkdfguard-keywrapping-azurekeyvault/src",
+    "packages/hkdfguard-keywrapping-googlekms/src",
     "packages/hkdfguard-dataencryptionkey/src",
     "packages/hkdfguard-cache/src",
     "packages/hkdfguard-options/src",
@@ -95,4 +98,10 @@ explicit_package_bases = true
 # its two exception imports are untyped.
 [[tool.mypy.overrides]]
 module = ["botocore", "botocore.*"]
+ignore_missing_imports = true
+
+# grpcio ships no type information either. Only hkdfguard-keywrapping-googlekms's tests import it, to
+# serve a fake Cloud KMS; the wrapper itself uses google-cloud-kms's typed client.
+[[tool.mypy.overrides]]
+module = ["grpc", "grpc.*"]
 ignore_missing_imports = true
