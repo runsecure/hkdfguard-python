@@ -1,6 +1,6 @@
 name: Release
 
-# Publishes the fifteen hkdfguard-* distributions together.
+# Publishes the sixteen hkdfguard-* distributions together.
 #
 #   * Push a tag "vX.Y.Z" that is on main: tests, builds, checks, and creates a GitHub Release with
 #     the wheels and sdists attached, signed with Sigstore build provenance.
