@@ -13,6 +13,7 @@ from hkdfguard.diagnostics import (
     HkdfGuardLog,
     HkdfGuardTelemetry,
     MetricNames,
+    SpanNames,
     record_exception,
 )
 from opentelemetry.sdk.metrics import MeterProvider
@@ -194,6 +195,11 @@ def test_event_ids_match_every_port() -> None:
         "EPHEMERAL_KEY_RETIREMENT_FAILED": 9,
         "ENCRYPTION_BUDGET_WARNING": 10,
     }
+
+
+def test_cache_span_names_match_every_port() -> None:
+    assert (SpanNames.Cache.ADD, SpanNames.Cache.ADD_OR_UPDATE, SpanNames.Cache.DECRYPT, SpanNames.Cache.POPULATE) == (
+        "hkdfguard.cache.add", "hkdfguard.cache.add_or_update", "hkdfguard.cache.decrypt", "hkdfguard.cache.populate")
 
 
 def test_a_record_carries_its_event_id_as_a_plain_int() -> None:

@@ -11,6 +11,10 @@ resolution-markers = [
 members = [
     "hkdfguard-abstractions",
     "hkdfguard-cache",
+    "hkdfguard-cache-awssecretsmanager",
+    "hkdfguard-cache-azurekeyvault",
+    "hkdfguard-cache-googlesecretmanager",
+    "hkdfguard-cache-hashicorpvault",
     "hkdfguard-cryptoprovider-aesgcm256",
     "hkdfguard-dataencryptionkey",
     "hkdfguard-diagnostics",
@@ -129,6 +133,20 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/6e/d4/e0ba8e8d661fcb2f536e1ba572369053aa37e3bc5c0bdb9aaab6603248ab/azure_keyvault_keys-4.11.3.tar.gz", hash = "sha256:abe258a46937ab69b148d1832150192f6a300578451d69304a0c3be24b9881aa", size = 279998, upload-time = "2026-10-02T23:09:56.188Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c9/8c/068322e5b6803cf2babde45a9a20d61697bc584a52710ac1f75d1c350bcb/azure_keyvault_keys-4.11.3-py3-none-any.whl", hash = "sha256:c492fa29cc2f437d1ad2464e7ddf5f40196c8ec8e25fad94dae5d474e0432d0a", size = 202493, upload-time = "2026-10-02T23:09:58.018Z" },
+]
+
+[[package]]
+name = "azure-keyvault-secrets"
+version = "4.11.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "azure-core" },
+    { name = "isodate" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/57/a4/7b0e582c8b2c97e1ea91d67ef831fa0c5e566a0dda9f6aa45054be47720d/azure_keyvault_secrets-4.11.3.tar.gz", hash = "sha256:193ba3cf9912ae776fb1ba40d147aa3cbfcf5cda5e0e2e35ef8fbe4c78db1217", size = 132370, upload-time = "2026-10-02T21:35:42.783Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/dc/8e/726acb7b6cd8d28cafd06531d6daf7e390667ebbbc4ff39f7cfc5bd75652/azure_keyvault_secrets-4.11.3-py3-none-any.whl", hash = "sha256:c77cc80f33d07e1b8cbbda5e7b6b8a1da1471ca917796f9895603a0c2b5f9c2f", size = 105234, upload-time = "2026-10-02T21:35:44.243Z" },
 ]
 
 [[package]]
@@ -505,6 +523,23 @@ wheels = [
 ]
 
 [[package]]
+name = "google-cloud-secret-manager"
+version = "2.31.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "google-api-core", extra = ["grpc"] },
+    { name = "google-auth" },
+    { name = "grpc-google-iam-v1" },
+    { name = "grpcio" },
+    { name = "proto-plus" },
+    { name = "protobuf" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/99/c5/5f1d1940af5e3b3bcf719ade1d7be688ea8718d52fc6d44c2bb67006198f/google_cloud_secret_manager-2.31.0.tar.gz", hash = "sha256:29bb33b48c3b974495a4d015e06b06b126e23232bccd223d678da1e1a861b6e6", size = 286168, upload-time = "2026-10-01T18:18:01.402Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/db/c6/87d54065389947192be692ce37d65cf899a4540eab44eda5936cb3093cca/google_cloud_secret_manager-2.31.0-py3-none-any.whl", hash = "sha256:945ef53be34b09f94b86eeabca910e19460fb54680cf5e0a792a77d62355e88e", size = 229970, upload-time = "2026-10-01T18:12:09.248Z" },
+]
+
+[[package]]
 name = "googleapis-common-protos"
 version = "1.75.5"
 source = { registry = "https://pypi.org/simple" }
@@ -623,6 +658,80 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "hkdfguard-abstractions", editable = "packages/hkdfguard-abstractions" },
+    { name = "hkdfguard-diagnostics", editable = "packages/hkdfguard-diagnostics" },
+]
+
+[[package]]
+name = "hkdfguard-cache-awssecretsmanager"
+version = "0.9.0"
+source = { editable = "packages/hkdfguard-cache-awssecretsmanager" }
+dependencies = [
+    { name = "botocore" },
+    { name = "hkdfguard-abstractions" },
+    { name = "hkdfguard-cache" },
+    { name = "hkdfguard-diagnostics" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "botocore", specifier = ">=1.40" },
+    { name = "hkdfguard-abstractions", editable = "packages/hkdfguard-abstractions" },
+    { name = "hkdfguard-cache", editable = "packages/hkdfguard-cache" },
+    { name = "hkdfguard-diagnostics", editable = "packages/hkdfguard-diagnostics" },
+]
+
+[[package]]
+name = "hkdfguard-cache-azurekeyvault"
+version = "0.9.0"
+source = { editable = "packages/hkdfguard-cache-azurekeyvault" }
+dependencies = [
+    { name = "azure-keyvault-secrets" },
+    { name = "hkdfguard-abstractions" },
+    { name = "hkdfguard-cache" },
+    { name = "hkdfguard-diagnostics" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "azure-keyvault-secrets", specifier = ">=4.11" },
+    { name = "hkdfguard-abstractions", editable = "packages/hkdfguard-abstractions" },
+    { name = "hkdfguard-cache", editable = "packages/hkdfguard-cache" },
+    { name = "hkdfguard-diagnostics", editable = "packages/hkdfguard-diagnostics" },
+]
+
+[[package]]
+name = "hkdfguard-cache-googlesecretmanager"
+version = "0.9.0"
+source = { editable = "packages/hkdfguard-cache-googlesecretmanager" }
+dependencies = [
+    { name = "google-cloud-secret-manager" },
+    { name = "hkdfguard-abstractions" },
+    { name = "hkdfguard-cache" },
+    { name = "hkdfguard-diagnostics" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "google-cloud-secret-manager", specifier = ">=2.31" },
+    { name = "hkdfguard-abstractions", editable = "packages/hkdfguard-abstractions" },
+    { name = "hkdfguard-cache", editable = "packages/hkdfguard-cache" },
+    { name = "hkdfguard-diagnostics", editable = "packages/hkdfguard-diagnostics" },
+]
+
+[[package]]
+name = "hkdfguard-cache-hashicorpvault"
+version = "0.9.0"
+source = { editable = "packages/hkdfguard-cache-hashicorpvault" }
+dependencies = [
+    { name = "hkdfguard-abstractions" },
+    { name = "hkdfguard-cache" },
+    { name = "hkdfguard-diagnostics" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "hkdfguard-abstractions", editable = "packages/hkdfguard-abstractions" },
+    { name = "hkdfguard-cache", editable = "packages/hkdfguard-cache" },
     { name = "hkdfguard-diagnostics", editable = "packages/hkdfguard-diagnostics" },
 ]
 
@@ -762,6 +871,10 @@ source = { virtual = "." }
 dependencies = [
     { name = "hkdfguard-abstractions" },
     { name = "hkdfguard-cache" },
+    { name = "hkdfguard-cache-awssecretsmanager" },
+    { name = "hkdfguard-cache-azurekeyvault" },
+    { name = "hkdfguard-cache-googlesecretmanager" },
+    { name = "hkdfguard-cache-hashicorpvault" },
     { name = "hkdfguard-cryptoprovider-aesgcm256" },
     { name = "hkdfguard-dataencryptionkey" },
     { name = "hkdfguard-diagnostics" },
@@ -789,6 +902,10 @@ dist = [
 requires-dist = [
     { name = "hkdfguard-abstractions", editable = "packages/hkdfguard-abstractions" },
     { name = "hkdfguard-cache", editable = "packages/hkdfguard-cache" },
+    { name = "hkdfguard-cache-awssecretsmanager", editable = "packages/hkdfguard-cache-awssecretsmanager" },
+    { name = "hkdfguard-cache-azurekeyvault", editable = "packages/hkdfguard-cache-azurekeyvault" },
+    { name = "hkdfguard-cache-googlesecretmanager", editable = "packages/hkdfguard-cache-googlesecretmanager" },
+    { name = "hkdfguard-cache-hashicorpvault", editable = "packages/hkdfguard-cache-hashicorpvault" },
     { name = "hkdfguard-cryptoprovider-aesgcm256", editable = "packages/hkdfguard-cryptoprovider-aesgcm256" },
     { name = "hkdfguard-dataencryptionkey", editable = "packages/hkdfguard-dataencryptionkey" },
     { name = "hkdfguard-diagnostics", editable = "packages/hkdfguard-diagnostics" },

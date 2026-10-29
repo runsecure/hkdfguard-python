@@ -3,7 +3,7 @@
     uv build --all-packages --out-dir dist
     python scripts/check-dist.py dist [--tag v1.0.0]
 
-Refuses to pass unless, for the eleven hkdfguard-* distributions:
+Refuses to pass unless, for the fifteen hkdfguard-* distributions:
 
 * each has exactly one wheel and one sdist, and nothing else is in the directory;
 * every one has the same version, and with ``--tag`` that version is the tag without its ``v``;
@@ -29,6 +29,10 @@ from pathlib import Path
 EXPECTED = {
     "hkdfguard-abstractions",
     "hkdfguard-cache",
+    "hkdfguard-cache-awssecretsmanager",
+    "hkdfguard-cache-azurekeyvault",
+    "hkdfguard-cache-googlesecretmanager",
+    "hkdfguard-cache-hashicorpvault",
     "hkdfguard-cryptoprovider-aesgcm256",
     "hkdfguard-dataencryptionkey",
     "hkdfguard-diagnostics",

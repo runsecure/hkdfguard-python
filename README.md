@@ -26,7 +26,11 @@ Each distribution installs one subpackage of the `hkdfguard` namespace package.
 | `hkdfguard-keywrapping-azurekeyvault` | `hkdfguard.keywrapping.azurekeyvault`   | HkdfGuard.KeyWrapping.AzureKeyVault  | `AzureKeyVaultKeyWrapper` over an RSA wrapping key and an EC P-256 signing key in Azure Key Vault |
 | `hkdfguard-keywrapping-googlekms`     | `hkdfguard.keywrapping.googlekms`       | HkdfGuard.KeyWrapping.GoogleKms      | `GoogleKmsKeyWrapper` over one symmetric Google Cloud KMS key, through a Cloud KMS client |
 | `hkdfguard-dataencryptionkey`         | `hkdfguard.dataencryptionkey`           | HkdfGuard.DataEncryptionKey          | `KeyRing`, `KeyRingBuilder`, `DataEncryptionKey`, `DefaultFormatProvider` |
-| `hkdfguard-cache`                     | `hkdfguard.cache`                       | HkdfGuard.Cache                      | `ProtectedCache`, `ProtectedCacheCollection` |
+| `hkdfguard-cache`                     | `hkdfguard.cache`                       | HkdfGuard.Cache                      | `ProtectedCache`, `ProtectedCacheCollection`; `RemoteSecretCache`, `SecretValueSink`, `SecretJsonBody` for caches over a secret store |
+| `hkdfguard-cache-awssecretsmanager`   | `hkdfguard.cache.awssecretsmanager`     | HkdfGuard.Cache.AwsSecretsManager    | `AwsSecretsManagerSecretCache` over AWS Secrets Manager, through a botocore client |
+| `hkdfguard-cache-azurekeyvault`       | `hkdfguard.cache.azurekeyvault`         | HkdfGuard.Cache.AzureKeyVault        | `AzureKeyVaultSecretCache` over Azure Key Vault secrets |
+| `hkdfguard-cache-googlesecretmanager` | `hkdfguard.cache.googlesecretmanager`   | HkdfGuard.Cache.GoogleSecretManager  | `GoogleSecretManagerSecretCache` over Google Cloud Secret Manager, through a gRPC Secret Manager client |
+| `hkdfguard-cache-hashicorpvault`      | `hkdfguard.cache.hashicorpvault`        | HkdfGuard.Cache.HashiCorpVault       | `HashiCorpVaultSecretCache` over HashiCorp Vault's KV secrets engine, through the standard library's HTTP client |
 | `hkdfguard-options`                   | `hkdfguard.options`                     | HkdfGuard.Options                    | `HkdfGuardOptions`, `KeyFileOptions`, `OptionsValidationError` |
 
 Naming: abstract base classes drop the .NET `I` prefix (`ICryptoProvider` -> `CryptoProvider`), and
@@ -112,9 +116,12 @@ silently fall back to a default.
 
 ## Differences from .NET, by design
 
-- **Synchronous API.** Every .NET `...Async` method is a blocking call (`build()`, `create(...)`,
-  `wrap(...)`); there is no `CancellationToken`. Background key refresh and ephemeral key rotation
-  run on daemon threads.
+- **Synchronous API, except cache reads.** Every .NET `...Async` method is a blocking call
+  (`build()`, `create(...)`, `wrap(...)`); there is no `CancellationToken`. Background key refresh
+  and ephemeral key rotation run on daemon threads. The one exception is the read surface of a
+  cache: `ProtectedReadOnlyCache` has `decrypt_async` and `find_max_decrypted_length_async`
+  coroutines (asyncio), which a cache over a secret store uses so a miss doesn't block the event
+  loop. Cancelling the awaiting task takes the place of the `CancellationToken`.
 - **Disposal** is `close()`, and every disposable type is a context manager. `KeyRing.close()`
   never waits for a rotation blocked in the KMS: a key that rotation creates after the ring closed
   is closed instead of added.
@@ -532,6 +539,43 @@ IAM roles for each principal, credentials, and creating key files.
 [Run the Google Cloud KMS integration tests](docs/how-to/run-google-kms-integration-tests.md) sets up
 a key of your own for `test_googlekms_integration.py`, which is otherwise reported as skipped.
 
+## Caching secrets from a secret store
+
+The four `hkdfguard-cache-*` distributions are `ProtectedReadOnlyCache`s over a secret store. Each
+one fetches a secret the first time it is looked up, encrypts it under the key ring's current key,
+bound to its name, and from then on holds only the ciphertext. Nothing is listed or fetched up front.
+A name is a secret's name, optionally followed by `#` and a key: `app-config#api-key` is the
+`api-key` member of the JSON object the secret `app-config` holds, and `app-config` is the whole
+value. One fetch caches the whole value and every key, and concurrent lookups of one secret, from
+threads or event loops, share that fetch. A missing secret reads as 0 bytes and isn't remembered.
+
+The response body is taken out of the SDK's response before the SDK parses it, so the secret never
+becomes a `str`; the SDK parses a copy with the value blanked out. What Python can't zero (the
+immutable `bytes` the HTTP or gRPC stack read the body into) is described in each package's
+README.
+
+```python
+import boto3
+from hkdfguard.cache import ProtectedCacheCollection
+from hkdfguard.cache.awssecretsmanager import AwsSecretsManagerSecretCache
+
+client = boto3.client("secretsmanager")  # the application creates, configures and owns the client
+secrets = AwsSecretsManagerSecretCache(client, key_ring)
+caches = ProtectedCacheCollection().add(local_cache).add(secrets)
+
+result = bytearray(caches.find_max_decrypted_length("prod/app-config#api-key") or 0)
+written = caches.decrypt("prod/app-config#api-key", result)  # or: await caches.decrypt_async(...)
+```
+
+| Store | Distribution | How the body is captured |
+|---|---|---|
+| AWS Secrets Manager | `hkdfguard-cache-awssecretsmanager` | a botocore `before-parse` handler, active only for the cache's own calls |
+| Azure Key Vault | `hkdfguard-cache-azurekeyvault` | a per-retry azure-core pipeline policy reading the body as a stream |
+| Google Cloud Secret Manager | `hkdfguard-cache-googlesecretmanager` | the gRPC call made with the cache's own response deserializer, so no protobuf message holds the payload |
+| HashiCorp Vault | `hkdfguard-cache-hashicorpvault` | the HTTP response streamed straight into the parser |
+
+Each package's README covers its names, options and errors.
+
 ## Building
 
 Uses a [uv](https://docs.astral.sh/uv/) workspace:
@@ -548,7 +592,7 @@ uv build --all-packages --build-constraints build-constraints.txt --require-hash
 
 `.github/workflows/ci.yml` tests every push and pull request on Linux, Windows and macOS with Python
 3.12 to 3.14, lints, and builds and checks the packages. `.github/workflows/release.yml` publishes all
-eleven distributions together as a GitHub Release, with Sigstore-signed build provenance and no stored
+fifteen distributions together as a GitHub Release, with Sigstore-signed build provenance and no stored
 token. Nothing is published to PyPI yet.
 
 To release: set the same version in every `packages/*/pyproject.toml`, merge to `main`, then push a tag
@@ -719,3 +763,34 @@ uv run pytest packages/hkdfguard-keywrapping-googlekms
 [Run the Google Cloud KMS integration tests](docs/how-to/run-google-kms-integration-tests.md) sets up
 a test key and its permissions. Every other Google Cloud KMS test runs against a fake Cloud KMS on
 the loopback address, reached through Google's own client, and sends nothing to Google.
+
+## Secret cache integration tests
+
+Each `hkdfguard-cache-*` distribution has an integration test that reads a real secret. It is
+reported as skipped, never passed, until the secret is named. Set the matching `..._SECRET_JSON`
+variable to the JSON object the secret holds, and the tests also compare the whole value and every
+key with it. The variables are the ones the .NET and Java tests read, from the environment or the
+settings file. A settings file names secrets and test values only, never a credential, and
+`.gitignore` excludes it.
+
+| Store | Variables | Settings file | Signs in with |
+|---|---|---|---|
+| AWS Secrets Manager | `HKDFGUARD_TEST_AWS_SECRET_NAME`, `HKDFGUARD_TEST_AWS_SECRET_JSON` | `aws.test.properties` | the access keys in the environment, else `~/.aws/credentials` only |
+| Azure Key Vault | `HKDFGUARD_TEST_AZURE_SECRET_ID`, `HKDFGUARD_TEST_AZURE_SECRET_JSON`, `HKDFGUARD_TEST_AZURE_SEPARATE_SECRETS` | `azure.test.properties` | `DefaultAzureCredential` |
+| Google Cloud Secret Manager | `HKDFGUARD_TEST_GOOGLE_SECRET_NAME`, `HKDFGUARD_TEST_GOOGLE_SECRET_JSON` | `google.test.properties` | Application Default Credentials |
+| HashiCorp Vault | `HKDFGUARD_TEST_VAULT_ADDR`, `HKDFGUARD_TEST_VAULT_TOKEN` (environment only), `HKDFGUARD_TEST_VAULT_SECRET_NAME`, `HKDFGUARD_TEST_VAULT_SECRET_JSON` (environment only), `HKDFGUARD_TEST_VAULT_CACERT` | `vault.test.properties` | the token |
+
+```bash
+uv run pytest packages/hkdfguard-cache-awssecretsmanager packages/hkdfguard-cache-azurekeyvault \
+              packages/hkdfguard-cache-googlesecretmanager packages/hkdfguard-cache-hashicorpvault
+```
+
+The how-to guides set up each store:
+
+- [AWS Secrets Manager](docs/how-to/run-aws-secrets-manager-cache-integration-tests.md)
+- [Azure Key Vault](docs/how-to/run-azure-key-vault-secret-cache-integration-tests.md)
+- [Google Cloud Secret Manager](docs/how-to/run-google-secret-manager-cache-integration-tests.md)
+- [HashiCorp Vault](docs/how-to/run-hashicorp-vault-cache-integration-tests.md)
+
+Every other secret cache test runs against a fake store, reached through the store's own client
+where it has one, and sends nothing over the network.

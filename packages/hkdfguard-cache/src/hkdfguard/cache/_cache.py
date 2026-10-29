@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import logging
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from typing import Final, Self
 
 from hkdfguard import abstractions
@@ -92,6 +93,10 @@ class ProtectedCacheCollection(ProtectedReadOnlyCache):
     source in the order it was added, returning the first match. This never owns or writes encrypted
     values of its own - storing values stays the concern of whichever sources support it (e.g. a
     writable :class:`ProtectedCache` among them). Safe to read while sources are being added.
+
+    decrypt_async and find_max_decrypted_length_async ask each source with its own asynchronous
+    member, one after another, so a source that fetches over the network (a
+    :class:`RemoteSecretCache`) doesn't block the event loop.
     """
 
     def __init__(self) -> None:
@@ -124,14 +129,41 @@ class ProtectedCacheCollection(ProtectedReadOnlyCache):
                 return max_length
         return None
 
-    def _first_match[T](self, name: str, decrypt: Callable[[ProtectedReadOnlyCache], T | None]) -> T | None:
-        telemetry = HkdfGuardTelemetry.CACHE
-        with telemetry.start_span(SpanNames.Cache.DECRYPT) as span:
-            if telemetry.sensitive_logging_enabled:
-                telemetry.log_sensitive_operation(span, SpanNames.Cache.DECRYPT, {AttributeNames.NAME: str(name)})
+    async def decrypt_async(self, name: str, result: WritableBuffer) -> int:
+        """Asks each source in turn with its own decrypt_async, so a source that fetches over the
+        network (a RemoteSecretCache) doesn't block the event loop; cancelling the lookup cancels the
+        source being asked, and no later one is asked.
 
+        :returns: the bytes the first source holding ``name`` wrote, or 0 if none does
+        """
+        with self._decrypt_span(name):
+            for source in self._sources:
+                written = await source.decrypt_async(name, result)
+                if written:
+                    return written
+            return 0
+
+    async def find_max_decrypted_length_async(self, name: str) -> int | None:
+        """Asks each source in turn with its own find_max_decrypted_length_async."""
+        for source in self._sources:
+            max_length = await source.find_max_decrypted_length_async(name)
+            if max_length is not None:
+                return max_length
+        return None
+
+    def _first_match[T](self, name: str, decrypt: Callable[[ProtectedReadOnlyCache], T | None]) -> T | None:
+        with self._decrypt_span(name):
             for source in self._sources:
                 value = decrypt(source)
                 if value is not None:
                     return value
             return None
+
+    @contextmanager
+    def _decrypt_span(self, name: str) -> Iterator[None]:
+        # Current across an await too: OpenTelemetry's context lives in contextvars, which follow the task.
+        telemetry = HkdfGuardTelemetry.CACHE
+        with telemetry.start_span(SpanNames.Cache.DECRYPT) as span:
+            if telemetry.sensitive_logging_enabled:
+                telemetry.log_sensitive_operation(span, SpanNames.Cache.DECRYPT, {AttributeNames.NAME: str(name)})
+            yield

@@ -12,6 +12,8 @@ class SpanNames:
         ADD: Final = "hkdfguard.cache.add"
         ADD_OR_UPDATE: Final = "hkdfguard.cache.add_or_update"
         DECRYPT: Final = "hkdfguard.cache.decrypt"
+        POPULATE: Final = "hkdfguard.cache.populate"
+        """A cache over a remote secret store fetching one secret on a miss."""
 
     class DataProtection:
         PROTECTOR_ENCRYPT: Final = "hkdfguard.data_protection.protector.encrypt"

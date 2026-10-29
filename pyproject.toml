@@ -1,4 +1,4 @@
-# The workspace root: develops and tests the eleven hkdfguard-* distributions in packages/ together.
+# The workspace root: develops and tests the fifteen hkdfguard-* distributions in packages/ together.
 # It is not itself a published package.
 [project]
 name = "hkdfguard-workspace"
@@ -16,6 +16,10 @@ dependencies = [
     "hkdfguard-dataencryptionkey",
     "hkdfguard-cache",
     "hkdfguard-options",
+    "hkdfguard-cache-awssecretsmanager",
+    "hkdfguard-cache-azurekeyvault",
+    "hkdfguard-cache-googlesecretmanager",
+    "hkdfguard-cache-hashicorpvault",
 ]
 
 [dependency-groups]
@@ -49,6 +53,10 @@ hkdfguard-keywrapping-googlekms = { workspace = true }
 hkdfguard-dataencryptionkey = { workspace = true }
 hkdfguard-cache = { workspace = true }
 hkdfguard-options = { workspace = true }
+hkdfguard-cache-awssecretsmanager = { workspace = true }
+hkdfguard-cache-azurekeyvault = { workspace = true }
+hkdfguard-cache-googlesecretmanager = { workspace = true }
+hkdfguard-cache-hashicorpvault = { workspace = true }
 
 [tool.pytest.ini_options]
 testpaths = ["packages"]
@@ -88,6 +96,11 @@ mypy_path = [
     "packages/hkdfguard-dataencryptionkey/src",
     "packages/hkdfguard-cache/src",
     "packages/hkdfguard-options/src",
+    # After hkdfguard-cache/src: hkdfguard.cache is a regular package that extends its path to these.
+    "packages/hkdfguard-cache-awssecretsmanager/src",
+    "packages/hkdfguard-cache-azurekeyvault/src",
+    "packages/hkdfguard-cache-googlesecretmanager/src",
+    "packages/hkdfguard-cache-hashicorpvault/src",
     "packages/hkdfguard-keywrapping-v1/tests",  # hkdfguard_test_support.py
 ]
 namespace_packages = true

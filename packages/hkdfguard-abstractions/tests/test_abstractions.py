@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Buffer, Callable
+import asyncio
+from collections.abc import Awaitable, Buffer, Callable, Coroutine
+from typing import Any
 
 import pytest
 from hkdfguard.abstractions import (
@@ -13,6 +15,7 @@ from hkdfguard.abstractions import (
     KeyWrapper,
     ProtectedCacheBase,
     ProtectedConfigurationPurpose,
+    ProtectedReadOnlyCache,
     RefreshFailurePolicy,
     ServiceNames,
     Utf8,
@@ -242,6 +245,7 @@ class TestCache(ProtectedCacheBase):
     def __init__(self, ring: KeyRing | None = None, key: DataEncryptionKey | None = None) -> None:
         super().__init__(ring or FakeKeyRing(key or MaskingKey()))
         self.on_try_populate: Callable[[str], bool] | None = None
+        self.on_try_populate_async: Callable[[str], Awaitable[bool]] | None = None
         self.populate_requests: list[str] = []
 
     def store(self, name: str, plaintext: bytearray | str) -> None:
@@ -264,6 +268,11 @@ class TestCache(ProtectedCacheBase):
     def _try_populate(self, name: str) -> bool:
         self.populate_requests.append(name)
         return self.on_try_populate(name) if self.on_try_populate else super()._try_populate(name)
+
+    async def _try_populate_async(self, name: str) -> bool:
+        if self.on_try_populate_async is not None:
+            return await self.on_try_populate_async(name)
+        return await super()._try_populate_async(name)
 
 
 def decrypt_bytes(cache: ProtectedCacheBase, name: str) -> bytes:
@@ -438,6 +447,165 @@ def test_put_if_absent_stores_only_the_first_and_remove_drops_it() -> None:
 
     assert cache.remove("Item")
     assert cache.decrypt("item", bytearray(16)) == 0
+
+
+# --- Asynchronous lookups ---------------------------------------------------------------------
+
+
+def run[T](coroutine: Coroutine[Any, Any, T]) -> T:
+    """Runs a test's coroutine, with a timeout so a hang fails instead of stalling the run."""
+
+    async def bounded() -> T:
+        return await asyncio.wait_for(coroutine, 10)
+
+    return asyncio.run(bounded())
+
+
+async def decrypt_bytes_async(cache: ProtectedReadOnlyCache, name: str) -> bytes:
+    result = bytearray(64)
+    return bytes(result[: await cache.decrypt_async(name, result)])
+
+
+def test_decrypt_async_for_a_stored_name_reveals_the_value() -> None:
+    cache = TestCache()
+    cache.store("item", "héllo")
+
+    assert run(decrypt_bytes_async(cache, "ITEM")) == "héllo".encode()
+    assert run(cache.find_max_decrypted_length_async("item")) == 6
+    assert cache.populate_requests == []
+
+
+def test_decrypt_async_for_a_missing_name_returns_zero_after_asking_try_populate_by_default() -> None:
+    cache = TestCache()
+
+    assert run(cache.decrypt_async("missing", bytearray(16))) == 0
+    assert run(cache.find_max_decrypted_length_async("missing")) is None
+    assert cache.populate_requests == ["missing", "missing"]
+
+
+def test_decrypt_async_on_a_miss_populates_through_try_populate_async_when_overridden() -> None:
+    cache = TestCache()
+
+    async def populate(name: str) -> bool:
+        await asyncio.sleep(0)
+        cache.store(name, bytearray(b"fetched"))
+        return True
+
+    cache.on_try_populate_async = populate
+    assert run(decrypt_bytes_async(cache, "remote")) == b"fetched"
+    assert cache.populate_requests == []
+
+
+def test_decrypt_async_when_try_populate_claims_success_but_stores_nothing_returns_zero() -> None:
+    cache = TestCache()
+    cache.on_try_populate = lambda name: True
+
+    assert run(cache.decrypt_async("remote", bytearray(16))) == 0
+    assert run(cache.find_max_decrypted_length_async("remote")) is None
+
+
+def test_decrypt_async_when_try_populate_fails_fails_for_every_member() -> None:
+    cache = TestCache()
+
+    def fail(name: str) -> bool:
+        raise RuntimeError("unreachable")
+
+    cache.on_try_populate = fail
+    with pytest.raises(RuntimeError, match="unreachable"):
+        run(cache.decrypt_async("remote", bytearray(16)))
+    with pytest.raises(RuntimeError, match="unreachable"):
+        run(cache.find_max_decrypted_length_async("remote"))
+
+
+def test_decrypt_async_with_a_none_name_is_refused() -> None:
+    cache = TestCache()
+
+    with pytest.raises(TypeError):
+        run(cache.decrypt_async(None, bytearray(16)))  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        run(cache.find_max_decrypted_length_async(None))  # type: ignore[arg-type]
+
+
+def test_cancelling_a_lookup_cancels_its_population() -> None:
+    cache = TestCache()
+    cancelled: list[str] = []
+
+    async def populate(name: str) -> bool:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.append(name)
+            raise
+        return False
+
+    cache.on_try_populate_async = populate
+
+    async def scenario() -> None:
+        lookups = [asyncio.create_task(cache.decrypt_async("remote", bytearray(16))), asyncio.create_task(cache.find_max_decrypted_length_async("other"))]
+        await asyncio.sleep(0)
+        for lookup in lookups:
+            lookup.cancel()
+        results = await asyncio.gather(*lookups, return_exceptions=True)
+        assert all(isinstance(result, asyncio.CancelledError) for result in results)
+
+    run(scenario())
+    assert cancelled == ["remote", "other"]
+
+
+def test_decrypt_async_when_the_key_fails_propagates() -> None:
+    key = MaskingKey()
+    cache = TestCache(key=key)
+    cache.store("item", bytearray(b"value"))
+    key.throw_on_decrypt = True
+
+    with pytest.raises(RuntimeError, match="decrypt failed"):
+        run(cache.decrypt_async("item", bytearray(16)))
+
+
+def test_decrypt_async_with_sensitive_logging_enabled_still_works() -> None:
+    original = HkdfGuardTelemetry.ROOT.sensitive_logging_enabled
+    HkdfGuardTelemetry.ROOT.sensitive_logging_enabled = True
+    try:
+        cache = TestCache()
+        cache.store("item", bytearray(b"value"))
+        assert run(cache.decrypt_async("item", bytearray(16))) == 5
+    finally:
+        HkdfGuardTelemetry.ROOT.sensitive_logging_enabled = original
+
+
+class SyncOnlyCache(ProtectedReadOnlyCache):
+    """A ProtectedReadOnlyCache with only the synchronous members, as one written before the
+    asynchronous ones existed. Each raises TypeError for a None name."""
+
+    def decrypt(self, name: str, result: WritableBuffer) -> int:
+        if name is None:
+            raise TypeError("name must not be None.")
+        memoryview(result)[:5] = b"bytes"
+        return 5
+
+    def find_max_decrypted_length(self, name: str) -> int | None:
+        if name is None:
+            raise TypeError("name must not be None.")
+        return 42 if name == "item" else None
+
+
+def test_the_interfaces_default_async_members_call_the_synchronous_ones() -> None:
+    cache = SyncOnlyCache()
+
+    assert run(decrypt_bytes_async(cache, "item")) == b"bytes"
+    assert run(cache.find_max_decrypted_length_async("item")) == 42
+    assert run(cache.find_max_decrypted_length_async("missing")) is None
+
+
+def test_the_interfaces_default_async_members_raise_a_failure_from_the_await() -> None:
+    cache = SyncOnlyCache()
+    lookup = cache.decrypt_async(None, bytearray(16))  # type: ignore[arg-type]
+
+    # Nothing runs until awaited.
+    with pytest.raises(TypeError):
+        run(lookup)
+    with pytest.raises(TypeError):
+        run(cache.find_max_decrypted_length_async(None))  # type: ignore[arg-type]
 
 
 def test_overlaps_detects_shared_memory_between_buffers_and_views() -> None:

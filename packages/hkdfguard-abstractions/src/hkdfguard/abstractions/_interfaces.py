@@ -288,7 +288,15 @@ class ProtectedReadOnlyCache(ABC):
     """Read surface of a concurrent name -> encrypted-value cache. Names match ignoring ASCII case
     only ("Item" and "ITEM" are one name; "café" and "CAFÉ" are two), and each value is bound to its
     name, so it can only be revealed under the name it was stored for. A missing name reads as 0
-    bytes rather than raising."""
+    bytes rather than raising.
+
+    A cache that may have to fetch a value over the network on a miss (a remote secret store) does
+    that I/O without blocking the event loop in :meth:`decrypt_async` and
+    :meth:`find_max_decrypted_length_async`, where the synchronous members block the calling thread
+    until it completes. Their default implementations call the synchronous members, which is all an
+    in-memory cache needs. Failures raise from the ``await``; cancelling the awaiting task stops it
+    waiting for a fetch. Zero ``result`` once the value is used, as with any buffer holding plaintext.
+    """
 
     @abstractmethod
     def decrypt(self, name: str, result: WritableBuffer) -> int:
@@ -301,6 +309,23 @@ class ProtectedReadOnlyCache(ABC):
     def find_max_decrypted_length(self, name: str) -> int | None:
         """An upper bound on the bytes :meth:`decrypt` will write for ``name``; ``None`` if nothing
         is stored under it."""
+
+    async def decrypt_async(self, name: str, result: WritableBuffer) -> int:
+        """Decrypts the value stored under ``name`` into ``result``, as :meth:`decrypt` does,
+        fetching it without blocking the event loop first if the cache must. The default calls
+        :meth:`decrypt`.
+
+        :returns: the number of bytes written, or 0 if nothing is stored under ``name``
+        """
+        return self.decrypt(name, result)
+
+    async def find_max_decrypted_length_async(self, name: str) -> int | None:
+        """:meth:`find_max_decrypted_length`, fetching the value without blocking the event loop
+        first if the cache must. The default calls :meth:`find_max_decrypted_length`.
+
+        :returns: the upper bound, or ``None`` if nothing is stored under ``name``
+        """
+        return self.find_max_decrypted_length(name)
 
 
 class ProtectedCache(ProtectedReadOnlyCache):
