@@ -7,6 +7,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "hkdfguard-abstractions",
+    "hkdfguard-hashicorpvault-common",
     "hkdfguard-securefile",
 ]
 classifiers = [

@@ -11,6 +11,7 @@ from types import TracebackType
 from typing import Final, Self
 
 from hkdfguard.abstractions import ArrayUtility
+from hkdfguard.hashicorpvault.common import is_valid_token
 
 MAX_TOKEN_LENGTH: Final = 2048
 """The longest token a :class:`VaultTokenSource` may supply, in bytes."""
@@ -97,12 +98,6 @@ class StaticVaultTokenSource(VaultTokenSource):
 
     def __exit__(self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: TracebackType | None) -> None:
         self.close()
-
-
-def is_valid_token(token: Buffer) -> bool:
-    """Whether ``token`` can go in a header: non-empty printable ASCII, with no spaces."""
-    view = memoryview(token).cast("B")
-    return len(view) > 0 and all(0x21 <= b <= 0x7E for b in view)
 
 
 def copy_token_within(source: VaultTokenSource, destination: bytearray, timeout: timedelta) -> int:

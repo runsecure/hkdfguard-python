@@ -1,4 +1,4 @@
-# The workspace root: develops and tests the sixteen hkdfguard-* distributions in packages/ together.
+# The workspace root: develops and tests the seventeen hkdfguard-* distributions in packages/ together.
 # It is not itself a published package.
 [project]
 name = "hkdfguard-workspace"
@@ -13,6 +13,7 @@ dependencies = [
     "hkdfguard-keywrapping-awskms",
     "hkdfguard-keywrapping-azurekeyvault",
     "hkdfguard-keywrapping-googlekms",
+    "hkdfguard-hashicorpvault-common",
     "hkdfguard-keywrapping-hashicorpvault",
     "hkdfguard-dataencryptionkey",
     "hkdfguard-cache",
@@ -51,6 +52,7 @@ hkdfguard-securefile = { workspace = true }
 hkdfguard-keywrapping-awskms = { workspace = true }
 hkdfguard-keywrapping-azurekeyvault = { workspace = true }
 hkdfguard-keywrapping-googlekms = { workspace = true }
+hkdfguard-hashicorpvault-common = { workspace = true }
 hkdfguard-keywrapping-hashicorpvault = { workspace = true }
 hkdfguard-dataencryptionkey = { workspace = true }
 hkdfguard-cache = { workspace = true }
@@ -95,6 +97,7 @@ mypy_path = [
     "packages/hkdfguard-keywrapping-awskms/src",
     "packages/hkdfguard-keywrapping-azurekeyvault/src",
     "packages/hkdfguard-keywrapping-googlekms/src",
+    "packages/hkdfguard-hashicorpvault-common/src",
     "packages/hkdfguard-keywrapping-hashicorpvault/src",
     "packages/hkdfguard-dataencryptionkey/src",
     "packages/hkdfguard-cache/src",

@@ -5,7 +5,6 @@ from __future__ import annotations
 import base64
 import http
 import http.client
-import ipaddress
 import itertools
 import os
 import re
@@ -17,18 +16,23 @@ from collections.abc import Buffer
 from datetime import timedelta
 from types import TracebackType
 from typing import ClassVar, Final, Self
-from urllib.parse import urlsplit
 
-from hkdfguard.abstractions import ArrayUtility, CryptographicError, KeyWrapper, ObjectClosedError, WrappedKeyLimits, WritableBuffer
-from hkdfguard.keywrapping.hashicorpvault._errors import VaultRequestError
-from hkdfguard.keywrapping.hashicorpvault._json_reader import JsonReader, JsonToken, MalformedJsonError
+from hkdfguard.abstractions import (
+    ArrayUtility,
+    CryptographicError,
+    JsonReader,
+    JsonToken,
+    KeyWrapper,
+    MalformedJsonError,
+    ObjectClosedError,
+    WrappedKeyLimits,
+    WritableBuffer,
+)
+from hkdfguard.hashicorpvault.common import TOKEN_HEADER, VaultRequestError, api_base, check_connection_options, is_valid_segment, is_valid_token, retry_delay
 from hkdfguard.keywrapping.hashicorpvault._options import HashiCorpVaultTransitKeyWrapperOptions
-from hkdfguard.keywrapping.hashicorpvault._token import MAX_TOKEN_LENGTH, VaultTokenSource, copy_token_within, is_valid_token
+from hkdfguard.keywrapping.hashicorpvault._token import MAX_TOKEN_LENGTH, VaultTokenSource, copy_token_within
 from hkdfguard.securefile import KeyFileTrust, TrustedKeyFile
 
-_TOKEN_HEADER: Final = "X-Vault-Token"  # noqa: S105 - a header name
-_IPV4_LITERAL: Final = re.compile(r"\d{1,3}(\.\d{1,3}){3}")
-_PATH_SEGMENT: Final = re.compile(r"[A-Za-z0-9._-]+")
 _CIPHERTEXT: Final = re.compile(rb"vault:v[0-9]{1,10}:[A-Za-z0-9+/=]+")
 
 _BASE64_ALPHABET: Final = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
@@ -160,10 +164,10 @@ class HashiCorpVaultTransitKeyWrapper(KeyWrapper):
             raise TypeError("key_file_trust must be a KeyFileTrust.")
         if options is None:
             options = HashiCorpVaultTransitKeyWrapperOptions()
-        self._https, self._host, self._port, api_base = _api_base(address)
+        self._https, self._host, self._port, v1_path = api_base(address)
         if not isinstance(key_name, str):
             raise TypeError("key_name must be a str.")
-        if len(key_name) > self.MAX_KEY_NAME_LENGTH or not _is_valid_segment(key_name):
+        if len(key_name) > self.MAX_KEY_NAME_LENGTH or not is_valid_segment(key_name):
             raise ValueError(f"The key name '{key_name}' isn't one: 1-{self.MAX_KEY_NAME_LENGTH} ASCII letters, digits, '-', '_' and '.', "
                              'and not "." or "..".')
         _check(options)
@@ -171,9 +175,9 @@ class HashiCorpVaultTransitKeyWrapper(KeyWrapper):
 
         self._token_source = token_source
         self._key_name = key_name
-        self._encrypt_path = f"{api_base}{options.mount_path}/encrypt/{key_name}"
-        self._decrypt_path = f"{api_base}{options.mount_path}/decrypt/{key_name}"
-        self._data_key_path = f"{api_base}{options.mount_path}/datakey/wrapped/{key_name}"
+        self._encrypt_path = f"{v1_path}{options.mount_path}/encrypt/{key_name}"
+        self._decrypt_path = f"{v1_path}{options.mount_path}/decrypt/{key_name}"
+        self._data_key_path = f"{v1_path}{options.mount_path}/datakey/wrapped/{key_name}"
         # Vault treats an empty associated_data as none, so an empty context is none too.
         self._has_context = len(context_bytes) > 0
         # Closes every encrypt and decrypt body: the closing quote of its value, the context if any,
@@ -360,7 +364,7 @@ class HashiCorpVaultTransitKeyWrapper(KeyWrapper):
 
                 if retry >= self._retry_count or self._closed:
                     break
-                time.sleep(_retry_delay(self._retry_delay, retry, secrets.randbelow(101)).total_seconds())
+                time.sleep(retry_delay(self._retry_delay, retry, secrets.randbelow(101)).total_seconds())
 
             reason = f"no answer within {self._timeout}" if isinstance(failure, TimeoutError) else str(failure) or type(failure).__name__
             raise CryptographicError(f"Vault transit {operation} failed for key '{self._key_name}': {reason}") from failure
@@ -383,7 +387,7 @@ class HashiCorpVaultTransitKeyWrapper(KeyWrapper):
             connection.putheader("Content-Length", str(len(body)))
             # Checked by _post - printable ASCII, nothing to escape - so handed over as it is. http.client
             # copies it into the header line (see the class comment); the bytearray is zeroed by _post.
-            connection.putheader(_TOKEN_HEADER, token)
+            connection.putheader(TOKEN_HEADER, token)
             # Sent from body itself, not a copy: http.client hands a buffer straight to the socket.
             connection.endheaders(body)
             sock = connection.sock
@@ -657,76 +661,7 @@ def _timed_out(timeout: timedelta) -> TimeoutError:
     return TimeoutError(f"Vault's response took longer than {timeout}.")
 
 
-def _retry_delay(base_delay: timedelta, retry: int, jitter_millis: int) -> timedelta:
-    """The wait before retry number ``retry`` (0 for the first): ``base_delay``, doubled for each
-    retry before it, at most :attr:`HashiCorpVaultTransitKeyWrapperOptions.MAX_RETRY_DELAY` - plus
-    ``jitter_millis``."""
-    maximum = HashiCorpVaultTransitKeyWrapperOptions.MAX_RETRY_DELAY
-    backoff = maximum if retry >= 30 else base_delay * (1 << retry)
-    return min(backoff, maximum) + timedelta(milliseconds=jitter_millis)
-
-
 def _check(options: HashiCorpVaultTransitKeyWrapperOptions) -> None:
-    limits = HashiCorpVaultTransitKeyWrapperOptions
     if not isinstance(options, HashiCorpVaultTransitKeyWrapperOptions):
         raise TypeError("options must be HashiCorpVaultTransitKeyWrapperOptions.")
-    if not isinstance(options.timeout, timedelta) or not isinstance(options.retry_delay, timedelta):
-        raise TypeError("timeout and retry_delay must be timedeltas.")
-    if not isinstance(options.retry_count, int) or isinstance(options.retry_count, bool):
-        raise TypeError("retry_count must be an int.")
-    if options.ssl_context is not None and not isinstance(options.ssl_context, ssl.SSLContext):
-        raise TypeError("ssl_context must be an ssl.SSLContext.")
-    if not _is_valid_path(options.mount_path):
-        raise ValueError(f"The mount path '{options.mount_path}' isn't a Vault path.")
-    if options.namespace is not None and not _is_valid_path(options.namespace):
-        raise ValueError(f"The namespace '{options.namespace}' isn't a Vault path.")
-    if options.timeout <= timedelta(0):
-        raise ValueError(f"The timeout must be positive; it is {options.timeout}.")
-    if not limits.MIN_RETRY_COUNT <= options.retry_count <= limits.MAX_RETRY_COUNT:
-        raise ValueError(f"The retry count must be {limits.MIN_RETRY_COUNT}-{limits.MAX_RETRY_COUNT}; it is {options.retry_count}.")
-    if not timedelta(0) <= options.retry_delay <= limits.MAX_RETRY_DELAY:
-        raise ValueError(f"The retry delay must be zero to {limits.MAX_RETRY_DELAY}; it is {options.retry_delay}.")
-
-
-def _api_base(address: str) -> tuple[bool, str, int | None, str]:
-    # Whether Vault's address is https, its host and port, and the path of /v1/ under it - refusing an
-    # address that would send tokens and DEKs in the clear (http anywhere but loopback) or that
-    # carries credentials, a query or a fragment.
-    if not isinstance(address, str):
-        raise TypeError("address must be a str.")
-    parts = urlsplit(address)
-    host = parts.hostname
-    if not parts.scheme or not parts.netloc or not host:
-        raise ValueError(f"Vault's address '{address}' isn't absolute, e.g. https://vault.example.com:8200.")
-
-    scheme = parts.scheme.lower()
-    if scheme != "https" and not (scheme == "http" and _is_loopback(host, parts.netloc)):
-        raise ValueError(f"Vault's address '{address}' must be https; http is allowed only on a loopback address (a local Vault Agent or "
-                         "dev server), since every request carries a token and DEKs.")
-    if "@" in parts.netloc or "?" in address or "#" in address:
-        raise ValueError(f"Vault's address '{address}' must not hold credentials, a query or a fragment.")
-
-    return scheme == "https", host, parts.port, parts.path.rstrip("/") + "/v1/"
-
-
-def _is_loopback(host: str, netloc: str) -> bool:
-    # localhost, or an IP literal on the loopback network. Only literals are parsed, so no name is
-    # ever resolved.
-    if host.lower() == "localhost":
-        return True
-    if not netloc.rsplit("@", maxsplit=1)[-1].startswith("[") and not _IPV4_LITERAL.fullmatch(host):
-        return False
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
-
-
-def _is_valid_path(path: object) -> bool:
-    # '/'-separated segments, none empty, "." or "..": a path that stays where it's put.
-    return isinstance(path, str) and all(_is_valid_segment(segment) for segment in path.split("/"))
-
-
-def _is_valid_segment(segment: str) -> bool:
-    return _PATH_SEGMENT.fullmatch(segment) is not None and segment not in {".", ".."}
-
+    check_connection_options(options)

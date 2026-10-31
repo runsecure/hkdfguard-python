@@ -6,9 +6,8 @@ import os
 from collections.abc import Buffer, Callable, Iterator
 
 import pytest
-from hkdfguard.abstractions import KeyRing, KeyWrapper, WritableBuffer
+from hkdfguard.abstractions import JsonReader, JsonToken, KeyRing, KeyWrapper, MalformedJsonError, WritableBuffer
 from hkdfguard.cache import ErrorResponseBody, InvalidSecretDataError, RemoteSecretCache, SecretJsonBody, SecretNameMatching, SecretValueSink
-from hkdfguard.cache._json_reader import JsonReader, JsonToken, MalformedJsonError
 from hkdfguard.cryptoprovider.aesgcm256 import AesGcmCryptoProvider
 from hkdfguard.dataencryptionkey import DataEncryptionKey, DefaultFormatProvider
 from hkdfguard.dataencryptionkey import KeyRing as DefaultKeyRing

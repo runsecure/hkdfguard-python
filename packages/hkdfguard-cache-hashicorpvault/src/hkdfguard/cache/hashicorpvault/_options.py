@@ -8,6 +8,8 @@ from datetime import timedelta
 from enum import Enum
 from typing import ClassVar
 
+from hkdfguard.hashicorpvault.common import MAX_RETRY_COUNT, MAX_RETRY_DELAY, MIN_RETRY_COUNT
+
 
 class VaultKvVersion(Enum):
     """The version of a KV secrets engine, which decides its read path and response shape."""
@@ -25,13 +27,13 @@ class HashiCorpVaultSecretCacheOptions:
     Immutable; change some values with :func:`dataclasses.replace`. The values are checked by the
     cache's constructor, not here."""
 
-    MIN_RETRY_COUNT: ClassVar[int] = 3
+    MIN_RETRY_COUNT: ClassVar[int] = MIN_RETRY_COUNT
     """The fewest retries :attr:`retry_count` allows."""
 
-    MAX_RETRY_COUNT: ClassVar[int] = 10
+    MAX_RETRY_COUNT: ClassVar[int] = MAX_RETRY_COUNT
     """The most retries :attr:`retry_count` allows."""
 
-    MAX_RETRY_DELAY: ClassVar[timedelta] = timedelta(seconds=10)
+    MAX_RETRY_DELAY: ClassVar[timedelta] = MAX_RETRY_DELAY
     """The longest wait between retries, before the random 0-100 ms each adds."""
 
     mount_path: str = "secret"

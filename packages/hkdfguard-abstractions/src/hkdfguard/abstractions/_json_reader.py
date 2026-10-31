@@ -1,5 +1,5 @@
-"""A strict, forward-only JSON reader over bytes, for taking secrets out of JSON without ever making
-one a ``str``."""
+"""A strict, forward-only JSON reader over bytes, for taking secrets and DEKs out of JSON without ever
+making one a ``str``."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from collections.abc import Buffer
 from enum import Enum, auto
 from typing import Final
 
-from hkdfguard.abstractions import ArrayUtility, WritableBuffer
+from hkdfguard.abstractions._buffers import ArrayUtility, WritableBuffer
 
 _QUOTE: Final = 0x22
 _BACKSLASH: Final = 0x5C

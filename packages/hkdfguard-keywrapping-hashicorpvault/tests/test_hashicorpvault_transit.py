@@ -38,7 +38,7 @@ from hkdfguard.keywrapping.hashicorpvault import (
     VaultRequestError,
     VaultTokenSource,
 )
-from hkdfguard.keywrapping.hashicorpvault._wrapper import _decode_base64, _encode_base64, _retry_delay, is_vault_ciphertext
+from hkdfguard.keywrapping.hashicorpvault._wrapper import _decode_base64, _encode_base64, is_vault_ciphertext
 from hkdfguard_test_support import long_path
 
 Wrapper = HashiCorpVaultTransitKeyWrapper
@@ -987,14 +987,6 @@ def test_a_redirect_is_not_followed(vault: FakeTransit, create: Create) -> None:
 
     assert isinstance(raised.value.__cause__, VaultRequestError) and raised.value.__cause__.status_code == 307
     assert [r.key for r in vault.requests] == [KEY_NAME]
-
-
-@pytest.mark.parametrize(("base", "retry", "jitter", "expected"), [
-    (200, 0, 0, 200), (200, 1, 0, 400), (200, 2, 50, 850), (200, 5, 0, 6400), (200, 6, 0, 10000), (200, 20, 0, 10000), (200, 20, 100, 10100),
-    (0, 3, 37, 37), (10000, 0, 0, 10000), (10000, 40, 0, 10000),
-])
-def test_retry_delay_doubles_up_to_the_maximum_plus_the_jitter(base: int, retry: int, jitter: int, expected: int) -> None:
-    assert _retry_delay(timedelta(milliseconds=base), retry, jitter) == timedelta(milliseconds=expected)
 
 
 def test_an_ssl_context_given_is_the_one_every_https_request_uses(vault: FakeTransit, create: Create) -> None:

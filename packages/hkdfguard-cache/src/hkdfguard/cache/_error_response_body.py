@@ -5,8 +5,8 @@ from __future__ import annotations
 from collections.abc import Buffer
 from typing import Final
 
+from hkdfguard.abstractions import JsonReader, JsonToken, MalformedJsonError
 from hkdfguard.cache._body import ResponseBody
-from hkdfguard.cache._json_reader import JsonReader, JsonToken, MalformedJsonError
 
 
 class ErrorResponseBody:
