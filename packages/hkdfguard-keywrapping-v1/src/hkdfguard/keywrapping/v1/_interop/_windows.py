@@ -380,9 +380,16 @@ class WindowsHkdfGuardKmsLibrary(NativeKmsLibrary):
     ``hkdfguard provision`` must create it first. A service name is 1-128 ASCII letters, digits or '.'."""
 
     _PLATFORM_DESCRIPTIONS: Final[dict[int, str]] = {
+        NativeKmsLibrary.ERR_PROVIDER_UNAVAILABLE:
+            "payload version 2 is unavailable on this host: the TPM can't be used for it and KeyStoragePolicy, or an existing TPM KEK, "
+            r"rules out the software key store (event 2008 names the reason); set HKLM\Software\Policies\HkdfGuard\ClassicalMode to 1 "
+            "to keep using version 1",
         NativeKmsLibrary.ERR_PROVIDER_ERROR:
             "the KEK's key storage provider (Platform Crypto Provider or Software KSP) could not open or create the key",
         NativeKmsLibrary.ERR_POLICY_INVALID: r"a machine policy value under HKLM\Software\Policies\HkdfGuard is invalid",
+        NativeKmsLibrary.ERR_PAYLOAD_VERSION_REFUSED:
+            r"the wrapped payload is the other payload version from the one HKLM\Software\Policies\HkdfGuard\ClassicalMode selects "
+            "(absent or 0: version 2; 1: version 1); a host unwraps only its own version",
         NativeKmsLibrary.ERR_KEK_NOT_FOUND: "no KEK is provisioned for this service; run hkdfguard provision from an elevated prompt",
         NativeKmsLibrary.ERR_KEK_ACCESS_DENIED:
             "the KEK exists, but this account is not authorized to use it (or, for a new KEK, the process is not elevated); "
