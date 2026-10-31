@@ -9,6 +9,7 @@ dependencies = [
     "hkdfguard-abstractions",
     "hkdfguard-cache",
     "hkdfguard-diagnostics",
+    "hkdfguard-hashicorpvault-common",
 ]
 classifiers = [
     "Programming Language :: Python :: 3",

@@ -29,7 +29,6 @@ from hkdfguard.cache.hashicorpvault import (
     VaultRequestError,
     VaultTokenProvider,
 )
-from hkdfguard.cache.hashicorpvault._cache import _retry_delay
 from hkdfguard.cryptoprovider.aesgcm256 import AesGcmCryptoProvider
 from hkdfguard.dataencryptionkey import DataEncryptionKey, DefaultFormatProvider
 from hkdfguard.dataencryptionkey import KeyRing as DefaultKeyRing
@@ -852,14 +851,6 @@ def test_an_unreachable_vault_is_retried_then_raises_the_os_error(create: Create
 
     with pytest.raises(OSError):
         cache.decrypt("item", bytearray(16))
-
-
-@pytest.mark.parametrize(("base", "retry", "jitter", "expected"), [
-    (200, 0, 0, 200), (200, 1, 0, 400), (200, 2, 0, 800), (200, 5, 0, 6400), (200, 6, 0, 10000), (200, 9, 0, 10000),
-    (200, 0, 100, 300), (200, 9, 100, 10100), (0, 3, 37, 37), (10000, 0, 0, 10000), (10000, 40, 0, 10000),
-])
-def test_retry_delay_doubles_up_to_the_maximum_plus_the_jitter(base: int, retry: int, jitter: int, expected: int) -> None:
-    assert _retry_delay(timedelta(milliseconds=base), retry, jitter) == timedelta(milliseconds=expected)
 
 
 def test_the_retry_options_are_checked(make_ring: Callable[..., DefaultKeyRing]) -> None:

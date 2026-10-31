@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from abc import ABC, abstractmethod
-from collections.abc import Buffer
 
 from hkdfguard.abstractions import DataProtector
 
@@ -75,9 +74,3 @@ class StaticVaultToken(VaultTokenProvider):
 
     async def get_token_async(self) -> str:
         return self._protected_token
-
-
-def is_valid_token(token: Buffer) -> bool:
-    """Whether ``token`` can go in a header: non-empty printable ASCII, with no spaces."""
-    view = memoryview(token).cast("B")
-    return len(view) > 0 and all(0x21 <= b <= 0x7E for b in view)

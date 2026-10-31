@@ -11,25 +11,28 @@ normally keeps it from seeing), its zeroing on failure, and the deployment path 
 Ported from hkdfguard-dotnet's LinuxNativeIntegrationTests and hkdfguard-go's TestLinuxNative_*.
 
 Every test is skipped - never passed - off Linux, without the libhkdfguard1 package, or without
-HKDFGUARD_TEST_SERVICE; a few need more (a second service, the policy's pinned-names allowlist, or the
-hkdfguard command-line tool) and say so when they skip."""
+HKDFGUARD_TEST_SERVICE; a few need more (a second service, the policy's pinned-names allowlist, a private
+directory for key files, or the hkdfguard command-line tool) and say so when they skip."""
 
 from __future__ import annotations
 
 import base64
 import os
+import shutil
+import stat
 import subprocess
 import sys
-from collections.abc import Iterator
+import tempfile
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
-from hkdfguard.abstractions import ServiceNames, WrappedKeyLimits
+from hkdfguard.abstractions import CryptographicError, InvalidKeyFileError, ServiceNames, WrappedKeyLimits
 from hkdfguard.keywrapping.v1 import NativeHkdfKeyWrapperV1
 from hkdfguard.keywrapping.v1._interop._kms import DEK_LENGTH, OK, AbstractHkdfGuardKmsLibrary, CpuArchitecture
 from hkdfguard.keywrapping.v1._interop._linux import LinuxHkdfGuardKmsLibrary, LinuxNativeLibraryLoader
-from hkdfguard_test_support import DEFAULT_TEST_SERVICE, OTHER_SERVICE_VARIABLE, SERVICE_VARIABLE, key_directory
+from hkdfguard_test_support import DEFAULT_TEST_SERVICE, OTHER_SERVICE_VARIABLE, SERVICE_VARIABLE, key_directory, write_key_file
 
 IS_LINUX = sys.platform.startswith("linux")
 
@@ -302,12 +305,11 @@ def test_concurrent_callers_each_get_their_own_dek_back() -> None:
     assert results == [(OK, True)] * 8
 
 
-# --- The deployment path through hkdfguard ---------------------------------------------------------
-
-
-def run_cli(*arguments: str) -> tuple[int, str]:
-    completed = subprocess.run([CLI, *arguments], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60, check=False)
-    return completed.returncode, completed.stdout + completed.stderr
+# --- Key files, read through hkdfguard_open_file ------------------------------------------------------
+#
+# Each test gets a fresh private key directory and, where it needs one, one real wrapped payload. Every
+# key file is written 0600 whatever the umask (hkdfguard_test_support.write_key_file), as hkdfguard wrap
+# writes it. Without a private directory these tests skip, saying why - never pass.
 
 
 @pytest.fixture
@@ -316,6 +318,139 @@ def key_dir(tmp_path: Path) -> Iterator[Path]:
     the library refuses a key file under any group- or world-writable directory, sticky or not."""
     with key_directory(tmp_path) as directory:
         yield directory
+
+
+def reader() -> NativeHkdfKeyWrapperV1:
+    # Any valid name: reading a file never touches a KEK.
+    return NativeHkdfKeyWrapperV1("hkdfguard.keyfile.reader")
+
+
+def refused(path: Path, error: type[OSError], status: int) -> OSError:
+    """That reading ``path`` raises exactly ``error``, naming ``status`` and its meaning."""
+    with pytest.raises(error) as raised:
+        reader().read_key_file(path)
+    assert type(raised.value) is error, f"{type(raised.value).__name__}: {raised.value}"
+    assert f"status {status} (" in str(raised.value), str(raised.value)
+    return raised.value
+
+
+@linux_native_integration()
+def test_a_key_file_reads_back_exactly_as_written(key_dir: Path) -> None:
+    wrapped = wrap(os.urandom(DEK_LENGTH))
+
+    assert reader().read_key_file(write_key_file(key_dir / "key.bin", wrapped)) == wrapped
+
+
+@linux_native_integration()
+def test_a_key_file_of_the_wrong_size_is_refused_as_too_short_or_too_long(key_dir: Path) -> None:
+    wrapped = wrap(os.urandom(DEK_LENGTH))
+    too_short, too_long = AbstractHkdfGuardKmsLibrary.ERR_FILE_TOO_SHORT, AbstractHkdfGuardKmsLibrary.ERR_FILE_TOO_LONG
+
+    for size, status in ((0, too_short), (100, too_short), (len(wrapped) - 1, too_short), (len(wrapped) + 1, too_long), (4096, too_long)):
+        contents = wrapped[:size].ljust(size, b"\x00")
+        refused(write_key_file(key_dir / f"size-{size}.bin", contents), InvalidKeyFileError, status)
+
+
+PLAINTEXT_FORMS: dict[str, Callable[[bytes], bytes]] = {
+    "raw": lambda dek: dek,
+    "hex": lambda dek: dek.hex().upper().encode("ascii"),
+    "lower-hex": lambda dek: dek.hex().encode("ascii"),
+    "base64": base64.b64encode,
+    "base64-with-newline": lambda dek: base64.b64encode(dek) + b"\n",
+}
+
+
+@linux_native_integration()
+@pytest.mark.parametrize("form", PLAINTEXT_FORMS)
+def test_a_file_holding_what_looks_like_an_unwrapped_dek_is_refused_as_a_key_exposure(key_dir: Path, form: str) -> None:
+    path = write_key_file(key_dir / f"plaintext-{form}.bin", PLAINTEXT_FORMS[form](os.urandom(DEK_LENGTH)))
+
+    refused(path, InvalidKeyFileError, AbstractHkdfGuardKmsLibrary.ERR_FILE_PLAINTEXT_KEY)
+
+
+@linux_native_integration()
+def test_a_change_to_the_payloads_structure_is_refused_when_read_but_a_changed_tag_only_at_unwrap(key_dir: Path) -> None:
+    # The version byte and a byte mid-payload are checked when the file is read; the AEAD tag can only
+    # be checked with the KEK, so a changed tag reads fine and fails unwrap.
+    wrapped = wrap(os.urandom(DEK_LENGTH))
+    for position in (0, len(wrapped) // 2):
+        tampered = bytearray(wrapped)
+        tampered[position] ^= 0x01
+        refused(write_key_file(key_dir / f"structure-{position}.bin", bytes(tampered)), InvalidKeyFileError, AbstractHkdfGuardKmsLibrary.ERR_FILE_MALFORMED)
+
+    tag = bytearray(wrapped)
+    tag[-1] ^= 0x01
+    read = reader().read_key_file(write_key_file(key_dir / "tag.bin", bytes(tag)))
+    destination = bytearray(DEK_LENGTH)
+
+    with pytest.raises(CryptographicError):
+        NativeHkdfKeyWrapperV1(service()).unwrap(read, destination)
+    assert zeroed(destination)
+
+
+@linux_native_integration()
+def test_a_missing_file_or_folder_is_not_found_and_a_folder_is_not_a_key_file(key_dir: Path) -> None:
+    refused(key_dir / "missing.bin", FileNotFoundError, AbstractHkdfGuardKmsLibrary.ERR_FILE_NOT_FOUND)
+    refused(key_dir / "missing" / "key.bin", FileNotFoundError, AbstractHkdfGuardKmsLibrary.ERR_FILE_NOT_FOUND)
+    refused(key_dir, OSError, AbstractHkdfGuardKmsLibrary.ERR_FILE_IO)
+
+
+@linux_native_integration()
+def test_a_link_is_followed_only_where_it_leads_is_trusted_too(key_dir: Path) -> None:
+    # The library judges where a link leads, not the link: within private folders it is followed; into
+    # /tmp (sticky, world-writable) it is refused, as is /tmp itself.
+    wrapped = wrap(os.urandom(DEK_LENGTH))
+    key = write_key_file(key_dir / "key.bin", wrapped)
+    file_link = key_dir / "file-link.bin"
+    file_link.symlink_to(key)
+    folder_link = key_dir / "folder-link"
+    folder_link.symlink_to(key_dir, target_is_directory=True)
+
+    assert reader().read_key_file(file_link) == wrapped
+    assert reader().read_key_file(folder_link / "key.bin") == wrapped
+
+    shared = Path(tempfile.mkdtemp(prefix="hkdfguard-shared-", dir="/tmp"))
+    try:
+        exposed = write_key_file(shared / "key.bin", wrapped)
+        into_shared = key_dir / "into-tmp.bin"
+        into_shared.symlink_to(exposed)
+        shared_folder_link = key_dir / "tmp-folder"
+        shared_folder_link.symlink_to(shared, target_is_directory=True)
+
+        untrusted = AbstractHkdfGuardKmsLibrary.ERR_FILE_UNTRUSTED
+        refused(exposed, PermissionError, untrusted)
+        refused(into_shared, PermissionError, untrusted)
+        refused(shared_folder_link / "key.bin", PermissionError, untrusted)
+    finally:
+        shutil.rmtree(shared, ignore_errors=True)
+
+
+@linux_native_integration()
+def test_a_key_file_another_account_could_rewrite_is_refused_while_owner_only_and_group_read_are_not(key_dir: Path) -> None:
+    # A group- or other-writable key file could be replaced by another account, so the library refuses
+    # it (-39) whatever the folders above it. Group read is fine: hkdfguard wrap --group hands a key
+    # file to a service's group as 0640. This is also why key files are written 0600 explicitly: an
+    # Ubuntu desktop session's umask of 002 makes Python write 0664.
+    path = write_key_file(key_dir / "key.bin", wrap(os.urandom(DEK_LENGTH)))
+    wrapper = NativeHkdfKeyWrapperV1(service())
+
+    for writable in (stat.S_IWGRP, stat.S_IWOTH):
+        os.chmod(path, 0o644 | writable)
+        with pytest.raises(PermissionError) as error:
+            wrapper.read_key_file(path)
+        assert f"status {AbstractHkdfGuardKmsLibrary.ERR_FILE_UNTRUSTED}" in str(error.value), f"mode {0o644 | writable:04o}: {error.value}"
+
+    for mode in (0o600, 0o640, 0o644):
+        os.chmod(path, mode)
+        assert wrapper.read_key_file(path), f"mode {mode:04o}"
+
+
+# --- The deployment path through hkdfguard ---------------------------------------------------------
+
+
+def run_cli(*arguments: str) -> tuple[int, str]:
+    completed = subprocess.run([CLI, *arguments], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60, check=False)
+    return completed.returncode, completed.stdout + completed.stderr
 
 
 @linux_native_integration(needs_cli=True)

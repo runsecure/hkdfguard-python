@@ -3,9 +3,9 @@ first lookup, taken out of the response before it can become a str, encrypted un
 current key and cached only as ciphertext."""
 
 from hkdfguard.cache.hashicorpvault._cache import HashiCorpVaultSecretCache
-from hkdfguard.cache.hashicorpvault._errors import VaultRequestError
 from hkdfguard.cache.hashicorpvault._options import HashiCorpVaultSecretCacheOptions, VaultKvVersion
 from hkdfguard.cache.hashicorpvault._token import StaticVaultToken, VaultTokenProvider
+from hkdfguard.hashicorpvault.common import VaultRequestError
 
 __all__ = [
     "HashiCorpVaultSecretCache",

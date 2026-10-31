@@ -5,10 +5,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import http.client
-import ipaddress
 import itertools
 import logging
-import re
 import secrets
 import socket
 import ssl
@@ -16,18 +14,13 @@ import threading
 import time
 from datetime import timedelta
 from types import TracebackType
-from typing import ClassVar, Final, Self
-from urllib.parse import urlsplit
+from typing import ClassVar, Self
 
 from hkdfguard.abstractions import ArrayUtility, CryptographicError, DataProtector, KeyRing, ObjectClosedError
 from hkdfguard.cache import ErrorResponseBody, RemoteSecretCache, SecretJsonBody, SecretNameMatching, SecretValueSink
-from hkdfguard.cache.hashicorpvault._errors import VaultRequestError
 from hkdfguard.cache.hashicorpvault._options import HashiCorpVaultSecretCacheOptions, VaultKvVersion
-from hkdfguard.cache.hashicorpvault._token import VaultTokenProvider, is_valid_token
-
-_TOKEN_HEADER: Final = "X-Vault-Token"  # noqa: S105 - a header name
-_IPV4_LITERAL: Final = re.compile(r"\d{1,3}(\.\d{1,3}){3}")
-_PATH_SEGMENT: Final = re.compile(r"[A-Za-z0-9._-]+")
+from hkdfguard.cache.hashicorpvault._token import VaultTokenProvider
+from hkdfguard.hashicorpvault.common import TOKEN_HEADER, VaultRequestError, api_base, check_connection_options, is_valid_path, is_valid_token, retry_delay
 
 
 class HashiCorpVaultSecretCache(RemoteSecretCache):
@@ -127,7 +120,7 @@ class HashiCorpVaultSecretCache(RemoteSecretCache):
         super().__init__(key_ring, SecretNameMatching.EXACT, logger)
         if options is None:
             options = HashiCorpVaultSecretCacheOptions()
-        self._https, self._host, self._port, api_base = _api_base(address)
+        self._https, self._host, self._port, v1_path = api_base(address)
         _check(options)
 
         self._token_provider = token_provider
@@ -139,10 +132,10 @@ class HashiCorpVaultSecretCache(RemoteSecretCache):
         self._namespace = options.namespace
         self._key = options.default_key
         if options.kv_version is VaultKvVersion.V2:
-            self._read_base = f"{api_base}{options.mount_path}/data/"
+            self._read_base = f"{v1_path}{options.mount_path}/data/"
             self._data_path: tuple[str, ...] = ("data", "data")
         else:
-            self._read_base = f"{api_base}{options.mount_path}/"
+            self._read_base = f"{v1_path}{options.mount_path}/"
             self._data_path = ("data",)
         self._ssl_context = (options.ssl_context or ssl.create_default_context()) if self._https else None
         self._closed = False
@@ -153,7 +146,7 @@ class HashiCorpVaultSecretCache(RemoteSecretCache):
         ``-``, ``_`` and ``.``, no segment ``.`` or ``..``, at most :attr:`MAX_SECRET_NAME_LENGTH`
         characters. A key to read follows it in a lookup, after ``#`` (see
         :meth:`RemoteSecretCache.is_valid_key`)."""
-        return name is not None and 0 < len(name) <= HashiCorpVaultSecretCache.MAX_SECRET_NAME_LENGTH and _is_valid_path(name)
+        return name is not None and 0 < len(name) <= HashiCorpVaultSecretCache.MAX_SECRET_NAME_LENGTH and is_valid_path(name)
 
     def close(self) -> None:
         """Stops the cache reading Vault. Cached secrets can still be read afterwards, but a lookup
@@ -248,7 +241,7 @@ class HashiCorpVaultSecretCache(RemoteSecretCache):
 
             # A failed attempt has handed nothing to value: the body is read whole before anything is
             # parsed out of it, and a parse failure isn't transient.
-            if abandon.wait(_retry_delay(self._retry_delay, retry, secrets.randbelow(101)).total_seconds()):
+            if abandon.wait(retry_delay(self._retry_delay, retry, secrets.randbelow(101)).total_seconds()):
                 raise failure
 
     def _read(self, path: str, protected_token: str, value: SecretValueSink, abandon: _Abandon) -> None:
@@ -283,7 +276,7 @@ class HashiCorpVaultSecretCache(RemoteSecretCache):
             if self._namespace is not None:
                 connection.putheader("X-Vault-Namespace", self._namespace)
             with memoryview(token) as view, view[:length] as header:
-                connection.putheader(_TOKEN_HEADER, header)
+                connection.putheader(TOKEN_HEADER, header)
             connection.endheaders()
         finally:
             ArrayUtility.zero_memory(token)
@@ -428,76 +421,12 @@ def _not_protected() -> RuntimeError:
                         "hand over token_protector.encrypt(token), never the token itself.")
 
 
-def _retry_delay(base_delay: timedelta, retry: int, jitter_millis: int) -> timedelta:
-    """The wait before retry number ``retry`` (0 for the first): ``base_delay``, doubled for each
-    retry before it, at most :attr:`HashiCorpVaultSecretCacheOptions.MAX_RETRY_DELAY` - plus
-    ``jitter_millis``."""
-    maximum = HashiCorpVaultSecretCacheOptions.MAX_RETRY_DELAY
-    backoff = maximum if retry >= 30 else base_delay * (1 << retry)
-    return min(backoff, maximum) + timedelta(milliseconds=jitter_millis)
-
-
 def _check(options: HashiCorpVaultSecretCacheOptions) -> None:
-    limits = HashiCorpVaultSecretCacheOptions
     if not isinstance(options, HashiCorpVaultSecretCacheOptions):
         raise TypeError("options must be HashiCorpVaultSecretCacheOptions.")
     if not isinstance(options.kv_version, VaultKvVersion):
         raise TypeError("kv_version must be a VaultKvVersion.")
-    if not isinstance(options.timeout, timedelta) or not isinstance(options.retry_delay, timedelta):
-        raise TypeError("timeout and retry_delay must be timedeltas.")
-    if not isinstance(options.retry_count, int) or isinstance(options.retry_count, bool):
-        raise TypeError("retry_count must be an int.")
-    if options.ssl_context is not None and not isinstance(options.ssl_context, ssl.SSLContext):
-        raise TypeError("ssl_context must be an ssl.SSLContext.")
-    if not _is_valid_path(options.mount_path):
-        raise ValueError(f"The mount path '{options.mount_path}' isn't a Vault path.")
+    check_connection_options(options)
     if not RemoteSecretCache.is_valid_key(options.default_key):
         raise ValueError(f"The default key '{options.default_key}' isn't a key: 1-{RemoteSecretCache.MAX_KEY_LENGTH} printable ASCII "
                          "characters other than space, '!' and '#'.")
-    if options.namespace is not None and not _is_valid_path(options.namespace):
-        raise ValueError(f"The namespace '{options.namespace}' isn't a Vault path.")
-    if options.timeout <= timedelta(0):
-        raise ValueError(f"The timeout must be positive; it is {options.timeout}.")
-    if not limits.MIN_RETRY_COUNT <= options.retry_count <= limits.MAX_RETRY_COUNT:
-        raise ValueError(f"The retry count must be {limits.MIN_RETRY_COUNT}-{limits.MAX_RETRY_COUNT}; it is {options.retry_count}.")
-    if not timedelta(0) <= options.retry_delay <= limits.MAX_RETRY_DELAY:
-        raise ValueError(f"The retry delay must be zero to {limits.MAX_RETRY_DELAY}; it is {options.retry_delay}.")
-
-
-def _api_base(address: str) -> tuple[bool, str, int | None, str]:
-    # Whether Vault's address is https, its host and port, and the path of /v1/ under it - refusing an
-    # address that would send tokens in the clear (http anywhere but loopback) or that carries
-    # credentials, a query or a fragment.
-    if not isinstance(address, str):
-        raise TypeError("address must be a str.")
-    parts = urlsplit(address)
-    host = parts.hostname
-    if not parts.scheme or not parts.netloc or not host:
-        raise ValueError(f"Vault's address '{address}' isn't absolute, e.g. https://vault.example.com:8200.")
-
-    scheme = parts.scheme.lower()
-    if scheme != "https" and not (scheme == "http" and _is_loopback(host, parts.netloc)):
-        raise ValueError(f"Vault's address '{address}' must be https; http is allowed only on a loopback address (a local Vault Agent or "
-                         "dev server), since every request carries a token.")
-    if "@" in parts.netloc or "?" in address or "#" in address:
-        raise ValueError(f"Vault's address '{address}' must not hold credentials, a query or a fragment.")
-
-    return scheme == "https", host, parts.port, parts.path.rstrip("/") + "/v1/"
-
-
-def _is_loopback(host: str, netloc: str) -> bool:
-    # localhost, or an IP literal on the loopback network. Only literals are parsed, so no name is
-    # ever resolved.
-    if host.lower() == "localhost":
-        return True
-    if not netloc.rsplit("@", maxsplit=1)[-1].startswith("[") and not _IPV4_LITERAL.fullmatch(host):
-        return False
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
-
-
-def _is_valid_path(path: object) -> bool:
-    # '/'-separated segments, none empty, "." or "..": a path that stays where it's put.
-    return isinstance(path, str) and all(_PATH_SEGMENT.fullmatch(segment) and segment not in {".", ".."} for segment in path.split("/"))

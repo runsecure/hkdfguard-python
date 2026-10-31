@@ -951,11 +951,13 @@ def test_a_key_file_for_another_service_or_tampered_refuses_to_build(native_serv
     with pytest.raises(CryptographicError):
         native_builder(other).with_key_file(3, key_file).build()
 
+    # The last byte is part of the AEAD tag, which no platform's library can check without the KEK,
+    # so the file reads back fine and the build fails at unwrap. (A change to the payload's
+    # structure is refused earlier, when the file is read, as an InvalidKeyFileError.)
     data = bytearray(key_file.read_bytes())
-    data[len(data) // 2] ^= 0x01
+    data[-1] ^= 0x01
     key_file.write_bytes(data)
-    # Refused when the key file is read (a structural byte) or when it is unwrapped (anything else).
-    with pytest.raises((CryptographicError, InvalidKeyFileError)):
+    with pytest.raises(CryptographicError):
         native_builder(native_service).with_key_file(3, key_file).build()
 
 

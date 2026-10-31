@@ -29,7 +29,7 @@ jobs:
       # --no-build installs third-party packages from wheels only, so no dependency's setup script
       # runs here (this workspace's own packages are still built, from this checkout).
       - run: uv sync --locked --no-build
-      # The native KMS tests skip themselves on a runner with no provisioned KEK, and the AWS KMS, Azure Key Vault and Google Cloud KMS
+      # The native KMS tests skip themselves on a runner with no provisioned KEK, and the AWS KMS, Azure Key Vault, Google Cloud KMS and HashiCorp Vault transit
       # integration tests on one with no keys named; they are never reported as passed.
       - run: uv run --locked --no-build pytest
 

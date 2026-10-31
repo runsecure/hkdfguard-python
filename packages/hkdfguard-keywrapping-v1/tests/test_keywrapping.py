@@ -40,6 +40,7 @@ from hkdfguard_test_support import (
     private_key_directory_root,
     provisioned_service,
     untrusted_directory,
+    write_key_file,
 )
 
 IS_WINDOWS = sys.platform == "win32"
@@ -1180,9 +1181,8 @@ def reader() -> NativeHkdfKeyWrapperV1:
 
 
 def write(directory: Path, name: str, contents: bytes) -> Path:
-    path = directory / name
-    path.write_bytes(contents)
-    return path
+    # 0600 whatever the umask: the Linux library refuses a key file another account could rewrite.
+    return write_key_file(directory / name, contents)
 
 
 def wrap_to_file(service: str, directory: Path) -> tuple[Path, bytes, bytes]:
@@ -1458,7 +1458,7 @@ def test_native_a_key_file_of_the_right_size_with_an_unknown_version_is_malforme
     tampered = bytearray(wrapped)
     # The version byte: first on Linux and Windows; on macOS, the suite id after the 32-byte KEK fingerprint.
     tampered[32 if sys.platform == "darwin" else 0] ^= 0xFF
-    path.write_bytes(tampered)
+    write_key_file(path, bytes(tampered))
 
     with pytest.raises(InvalidKeyFileError, match="status -38"):
         reader().read_key_file(path)

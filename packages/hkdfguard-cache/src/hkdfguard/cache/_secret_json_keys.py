@@ -7,9 +7,8 @@ from __future__ import annotations
 from collections.abc import Buffer
 from typing import TYPE_CHECKING
 
-from hkdfguard.abstractions import ArrayUtility
+from hkdfguard.abstractions import ArrayUtility, JsonReader, JsonToken, MalformedJsonError
 from hkdfguard.cache._errors import InvalidSecretDataError
-from hkdfguard.cache._json_reader import JsonReader, JsonToken, MalformedJsonError
 from hkdfguard.cache._secret_names import is_valid_key
 
 if TYPE_CHECKING:

@@ -6,10 +6,9 @@ from collections.abc import Buffer, Sequence
 from dataclasses import dataclass, field
 from typing import Final
 
-from hkdfguard.abstractions import ArrayUtility
+from hkdfguard.abstractions import ArrayUtility, JsonReader, JsonToken, MalformedJsonError
 from hkdfguard.cache._body import ResponseBody
 from hkdfguard.cache._errors import InvalidSecretDataError
-from hkdfguard.cache._json_reader import JsonReader, JsonToken, MalformedJsonError
 from hkdfguard.cache._remote_secret_cache import SecretValueSink
 from hkdfguard.cache._secret_json_keys import set_keys
 
