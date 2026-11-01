@@ -353,6 +353,8 @@ def test_a_key_file_of_the_wrong_size_is_refused_as_too_short_or_too_long(key_di
 
 PLAINTEXT_FORMS: dict[str, Callable[[bytes], bytes]] = {
     "raw": lambda dek: dek,
+    "raw-with-lf": lambda dek: dek + b"\n",
+    "raw-with-crlf": lambda dek: dek + b"\r\n",
     "hex": lambda dek: dek.hex().upper().encode("ascii"),
     "lower-hex": lambda dek: dek.hex().encode("ascii"),
     "base64": base64.b64encode,

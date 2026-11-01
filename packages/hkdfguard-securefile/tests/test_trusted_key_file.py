@@ -129,6 +129,44 @@ def test_looks_like_plaintext_key_a_raw_key_is_detected() -> None:
     assert TrustedKeyFile.looks_like_plaintext_key(bytearray(32))
 
 
+@pytest.mark.parametrize("contents", [
+    os.urandom(32) + b"\n",
+    os.urandom(32) + b"\r\n",
+    os.urandom(31) + b"\n" + b"\n",      # the key's own last byte is LF: decided by length, not trimming
+    os.urandom(31) + b" " + b"\n",       # the key's own last byte is a space
+    os.urandom(31) + b"\r" + b"\r\n",    # the key's own last byte is CR, then CRLF
+    bytes(32) + b"\r\n",
+])
+def test_looks_like_plaintext_key_a_raw_key_followed_by_a_line_ending_is_detected(contents: bytes) -> None:
+    assert TrustedKeyFile.looks_like_plaintext_key(contents)
+    assert TrustedKeyFile.looks_like_plaintext_key(bytearray(contents))
+
+
+@pytest.mark.parametrize("contents", [
+    b"\x01" * 32 + b"\r",        # 33 bytes, CR alone is not a line ending here
+    b"\x01" * 32 + b"\n\n",      # 34 bytes, two LFs
+    b"\x01" * 32 + b"\n\r",      # 34 bytes, LF CR
+    b"\x01" * 30 + b"\n",        # 31 bytes (31 + LF is 32 bytes in all: the raw rule, whatever the bytes)
+    b"\x01" * 29 + b"\r\n",      # 31 bytes
+    b"\x01" * 33 + b"\n",        # 34 bytes, last byte LF but not CRLF
+    b"\x01" * 33 + b"\r\n",      # 35 bytes
+])
+def test_looks_like_plaintext_key_other_line_endings_or_lengths_are_not_detected(contents: bytes) -> None:
+    assert not TrustedKeyFile.looks_like_plaintext_key(contents)
+
+
+@pytest.mark.parametrize("ending", [b"\n", b"\r\n"])
+def test_read_contents_a_raw_key_followed_by_a_line_ending_is_refused_as_exposed(ending: bytes) -> None:
+    with pytest.raises(InvalidKeyFileError, match="exposed"):
+        read_contents(os.urandom(32) + ending)
+
+
+def test_read_contents_a_raw_key_followed_by_a_lone_cr_is_not_refused_as_exposed() -> None:
+    contents = b"\x01" * 32 + b"\r"
+
+    assert read_contents(contents) == contents
+
+
 @pytest.mark.parametrize("text", [
     "a" * 63,                    # one hex digit short
     "a" * 62 + "zz",             # not hex

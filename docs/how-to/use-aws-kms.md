@@ -235,8 +235,8 @@ library's rules, through `TrustedKeyFile` in `hkdfguard-securefile`:
   writable by neither their group nor others. A symbolic link is followed only if root owns it. So
   nothing under `/tmp`, `/var/tmp` or a home directory is trusted. macOS is supported on Apple
   silicon only.
-- **Everywhere:** a file that is empty, over 512 bytes, exactly 32 bytes, or a 32-byte key written
-  as hex or base64 is refused. Those last ones are probably a plaintext key: treat it as exposed.
+- **Everywhere:** a file that is empty, over 512 bytes, 32 raw bytes (optionally followed by one line
+  ending, LF or CRLF), or a 32-byte key written as hex or base64 is refused. Those last ones are probably a plaintext key: treat it as exposed.
 
 Prepare the folder once, as an administrator. On Windows, give it its own permissions, with
 inheritance removed:

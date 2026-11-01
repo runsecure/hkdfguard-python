@@ -1358,6 +1358,8 @@ def test_native_a_key_file_in_a_missing_folder_is_not_found(key_dir: Path) -> No
 
 PLAINTEXT_FORMS: dict[str, Callable[[bytes], bytes]] = {
     "raw": lambda dek: dek,
+    "raw-with-lf": lambda dek: dek + b"\n",
+    "raw-with-crlf": lambda dek: dek + b"\r\n",
     "hex": lambda dek: dek.hex().upper().encode("ascii"),
     "lower-hex": lambda dek: dek.hex().encode("ascii"),
     "base64": base64.b64encode,

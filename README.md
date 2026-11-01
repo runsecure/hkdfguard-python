@@ -299,9 +299,9 @@ Every other code (-7, -13 .. -15, -21 .. -31, -40 .. -63, ...) is reserved.
 `hkdfguard_open_file`, which returns the file's bytes still wrapped - it never unwraps or touches a
 KEK - after checks only the platform can make. It refuses a missing (-32) or unreadable (-33) file,
 anything but a regular file (-34), a file of the wrong size (-35, -36), one holding what looks like
-an unwrapped DEK - 32 raw bytes, or 64 hex digits or base64, with optional whitespace (-37, treat it
-as a key exposure) - a right-size file that isn't a valid wrapped payload (-38), and an untrusted
-path (-39): a symbolic link, junction or other reparse point, an 8.3 short name, a UNC, mapped or
+an unwrapped DEK - 32 raw bytes, optionally followed by one line ending (LF or CRLF), or 64 hex
+digits or base64, with optional whitespace (-37, treat it as a key exposure) - a right-size file
+that isn't a valid wrapped payload (-38), and an untrusted path (-39): a symbolic link, junction or other reparse point, an 8.3 short name, a UNC, mapped or
 SUBST path, or a file or folder another account could write or replace. These checks can't be
 turned off. `read_key_file` has no default implementation: a custom key wrapper must read key
 files itself, and must refuse a file another account could have written or replaced, since whoever
