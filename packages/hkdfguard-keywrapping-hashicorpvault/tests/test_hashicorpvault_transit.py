@@ -1009,6 +1009,23 @@ def test_an_ssl_context_given_is_the_one_every_https_request_uses(vault: FakeTra
     assert wrapped == ["127.0.0.1"] * (1 + Options.MIN_RETRY_COUNT)
 
 
+def test_a_refused_vault_certificate_is_not_retried(vault: FakeTransit, create: Create) -> None:
+    attempts: list[str | None] = []
+
+    class Refusing(ssl.SSLContext):
+        def wrap_socket(self, *args: Any, **kwargs: Any) -> ssl.SSLSocket:
+            attempts.append(kwargs.get("server_hostname"))
+            raise ssl.SSLCertVerificationError(1, "certificate verify failed: unable to get local issuer certificate")
+
+    wrapper = create(address=f"https://127.0.0.1:{vault.port}/", ssl_context=Refusing(ssl.PROTOCOL_TLS_CLIENT))
+
+    with pytest.raises(CryptographicError, match="certificate verify failed") as raised:
+        generate(wrapper)
+
+    assert isinstance(raised.value.__cause__, ssl.SSLCertVerificationError)
+    assert attempts == ["127.0.0.1"]
+
+
 def test_the_namespace_mount_and_path_prefix_are_used(transits: Callable[..., FakeTransit], create: Create) -> None:
     prefixed = transits("transit/team-a", "/vault")
 

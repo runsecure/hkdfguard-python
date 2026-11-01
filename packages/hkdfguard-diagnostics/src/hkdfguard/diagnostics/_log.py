@@ -25,6 +25,7 @@ class HkdfGuardEventId(IntEnum):
     ENCRYPTION_BUDGET_WARNING = 10
     KEY_FILE_AGE_WARNING = 11
     KEY_FILE_EXPIRED = 12
+    BACKGROUND_TASK_TERMINATED = 13
 
 
 class HkdfGuardLog:
@@ -128,6 +129,14 @@ class HkdfGuardLog:
         HkdfGuardLog._log(logger, logging.CRITICAL, HkdfGuardEventId.KEY_FILE_EXPIRED,
                           "Key file '%s' (version %d) has passed its maximum age and no longer encrypts; values under it still decrypt. "
                           "Deploy a new key file at a higher version.", path, key_version)
+
+    @staticmethod
+    def background_task_terminated(logger: logging.Logger | None, task_name: str, consequence: str, exception: BaseException) -> None:
+        """Critical: a background task (such as the key refresh) stopped unexpectedly and won't run again
+        until the process restarts; ``consequence`` says what that means for key access."""
+        HkdfGuardLog._log(logger, logging.CRITICAL, HkdfGuardEventId.BACKGROUND_TASK_TERMINATED,
+                          "The %s stopped unexpectedly and will not run again until the process restarts. %s", task_name, consequence,
+                          exception=exception)
 
 
 def _iso_utc(moment: datetime) -> str:

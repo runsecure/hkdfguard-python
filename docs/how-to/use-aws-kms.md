@@ -278,8 +278,10 @@ wrapper = AwsKmsKeyWrapper(kms, key_arn, encryption_context, KeyFileTrust(
 
 > **Security:** never trust the account the application itself runs as, except on a developer
 > machine. An application that can rewrite its own key files can be made to switch to an older,
-> still-valid one. Everyone, Authenticated Users, Users, Interactive and Anonymous are refused if
-> listed.
+> still-valid one. Broad groups are refused if listed: Everyone, Authenticated Users, Users,
+> Interactive, Anonymous, Guests, Remote Desktop Users, Network, Service, All Application Packages,
+> Creator Owner, Owner Rights and others like them, and a domain's Domain Users, Domain Guests and
+> Domain Computers.
 
 ## 7. Use the key file
 

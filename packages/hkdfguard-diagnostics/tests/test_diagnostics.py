@@ -197,7 +197,22 @@ def test_event_ids_match_every_port() -> None:
         "ENCRYPTION_BUDGET_WARNING": 10,
         "KEY_FILE_AGE_WARNING": 11,
         "KEY_FILE_EXPIRED": 12,
+        "BACKGROUND_TASK_TERMINATED": 13,
     }
+
+
+def test_background_task_terminated_writes_a_critical_entry_carrying_the_exception() -> None:
+    logger, handler = recording_logger()
+    failure = SystemExit(3)
+
+    HkdfGuardLog.background_task_terminated(logger, "background key refresh", "Key access has been suspended.", failure)
+
+    record = _single(handler)
+    assert record.levelno == logging.CRITICAL
+    assert _event_id(record) == 13
+    assert record.getMessage() == ("The background key refresh stopped unexpectedly and will not run again until the process restarts. "
+                                   "Key access has been suspended.")
+    assert record.exc_info is not None and record.exc_info[1] is failure
 
 
 def test_cache_span_names_match_every_port() -> None:

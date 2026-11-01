@@ -141,9 +141,15 @@ class DataEncryptionKey(abstractions.DataEncryptionKey):
 
 def _quietly(action: Callable[..., object], *args: object) -> None:
     """Runs code the application supplies (its logger, its tracer) so that an exception from it can
-    never decide whether a key stays in use, or stop rotation."""
-    with contextlib.suppress(Exception):
+    never decide whether a key stays in use, or stop rotation. That includes ``SystemExit``, which a
+    handler may raise and which would otherwise end the rotation thread without a word; only
+    ``KeyboardInterrupt`` passes."""
+    try:
         action(*args)
+    except KeyboardInterrupt:
+        raise
+    except BaseException:  # noqa: S110 - see the docstring
+        pass
 
 
 def _close_quietly(key: abstractions.DataEncryptionKey | None) -> None:
@@ -314,17 +320,25 @@ class KeyRing(abstractions.KeyRing):
 
     def _run_rotation(self, interval: float, create_key: Callable[[], abstractions.DataEncryptionKey], logger: logging.Logger) -> None:
         next_tick = time.monotonic() + interval
-        while not self._stop.wait(max(0.0, next_tick - time.monotonic())):
-            next_tick = max(next_tick + interval, time.monotonic())
-            try:
-                self._rotate_ephemeral_key(create_key, logger, self._stop.is_set)
-            except Exception as error:
-                if self._stop.is_set():
-                    return
-                # Only the application's tracer can get here (every other failure is handled inside
-                # the rotation). Keep rotating: a thread that ends here would leave the current key
-                # in use indefinitely with nothing to say so.
-                _quietly(HkdfGuardLog.ephemeral_key_rotation_failed, logger, self.current_version, error)
+        try:
+            while not self._stop.wait(max(0.0, next_tick - time.monotonic())):
+                next_tick = max(next_tick + interval, time.monotonic())
+                try:
+                    self._rotate_ephemeral_key(create_key, logger, self._stop.is_set)
+                except Exception as error:
+                    if self._stop.is_set():
+                        return
+                    # Only the application's tracer can get here (every other failure is handled inside
+                    # the rotation). Keep rotating: a thread that ends here would leave the current key
+                    # in use indefinitely with nothing to say so.
+                    _quietly(HkdfGuardLog.ephemeral_key_rotation_failed, logger, self.current_version, error)
+        except BaseException as error:
+            # Something the per-rotation guard can't hold (SystemExit, MemoryError) ended the loop:
+            # say so, since nothing else will.
+            if not self._stop.is_set():
+                _quietly(HkdfGuardLog.background_task_terminated, logger, "ephemeral key rotation",
+                         "The current ephemeral key stays in use and superseded keys are no longer retired.", error)
+            raise
 
     def _rotate_ephemeral_key(self, create_key: Callable[[], abstractions.DataEncryptionKey], logger: logging.Logger | None,
                               stopping: Callable[[], bool]) -> bool:

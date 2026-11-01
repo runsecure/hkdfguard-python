@@ -974,6 +974,70 @@ def test_fail_closed_still_suspends_at_the_limit_when_the_logger_raises() -> Non
         assert not provider.key_access_suspended
 
 
+class ExitingLogger(logging.Logger):
+    """A logger whose every record raises SystemExit - a handler that calls sys.exit()."""
+
+    def handle(self, record: logging.LogRecord) -> None:
+        raise SystemExit(3)
+
+
+def test_fail_closed_still_suspends_and_keeps_refreshing_when_the_logger_raises_system_exit() -> None:
+    wrapper = FakeKeyWrapper(os.urandom(32))
+    with create(wrapper, 1, 2, ExitingLogger("exiting")) as provider:
+        wrapper.throw_on_unwrap = CryptographicError("KEK revoked")  # ticks ~1 s and ~2 s fail
+        time.sleep(2.6)
+        assert provider.key_access_suspended
+
+        # The refresh thread survived the SystemExit from the "failed" and "suspended" logs.
+        wrapper.throw_on_unwrap = None  # tick ~3 s succeeds
+        time.sleep(1.0)
+        assert not provider.key_access_suspended
+
+
+def _end_the_refresh_loop(provider: AesGcmCryptoProvider) -> None:
+    def fatal() -> None:
+        raise SystemExit(4)
+
+    provider._refresh_once = fatal  # type: ignore[method-assign]
+
+
+def test_a_refresh_loop_that_ends_unexpectedly_fails_closed_and_says_so() -> None:
+    logger, handler = recording_logger()
+    with create(FakeKeyWrapper(os.urandom(32)), 1, 3, logger) as provider:
+        _end_the_refresh_loop(provider)
+        time.sleep(1.3)
+
+        assert provider.key_access_suspended
+        plaintext = bytearray(b"refused")
+        with pytest.raises(CryptographicError, match="background key refresh stopped unexpectedly"):
+            provider.encrypt(plaintext, bytearray(64))
+        assert plaintext == bytearray(len(plaintext))
+        [record] = handler.with_event_id(HkdfGuardEventId.BACKGROUND_TASK_TERMINATED)
+        assert record.levelno == logging.CRITICAL
+        assert "background key refresh stopped unexpectedly" in record.getMessage()
+        assert "Key access has been suspended" in record.getMessage()
+        assert record.exc_info and isinstance(record.exc_info[1], SystemExit)
+
+
+def test_a_refresh_loop_that_ends_unexpectedly_under_fail_open_keeps_the_key_and_says_so() -> None:
+    logger, handler = recording_logger()
+    with create(FakeKeyWrapper(os.urandom(32)), 1, None, logger) as provider:
+        _end_the_refresh_loop(provider)
+        time.sleep(1.3)
+
+        assert not provider.key_access_suspended
+        assert provider.encrypt(bytearray(b"still open"), bytearray(64)) == 38
+        [record] = handler.with_event_id(HkdfGuardEventId.BACKGROUND_TASK_TERMINATED)
+        assert "fails open" in record.getMessage()
+
+
+def test_closing_ends_the_refresh_loop_without_reporting_it_terminated() -> None:
+    logger, handler = recording_logger()
+    with create(FakeKeyWrapper(), 1, 3, logger):
+        pass
+    assert not handler.with_event_id(HkdfGuardEventId.BACKGROUND_TASK_TERMINATED)
+
+
 def test_fail_closed_counts_each_timed_out_refresh_while_the_key_wrapper_hangs_without_piling_up_calls() -> None:
     logger, handler = recording_logger()
     wrapper = FakeKeyWrapper(os.urandom(32))
