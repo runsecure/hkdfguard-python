@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterator
+from datetime import UTC, datetime
 
 import pytest
 from hkdfguard.diagnostics import (
@@ -194,6 +195,8 @@ def test_event_ids_match_every_port() -> None:
         "EPHEMERAL_KEY_RETIRED": 8,
         "EPHEMERAL_KEY_RETIREMENT_FAILED": 9,
         "ENCRYPTION_BUDGET_WARNING": 10,
+        "KEY_FILE_AGE_WARNING": 11,
+        "KEY_FILE_EXPIRED": 12,
     }
 
 
@@ -272,6 +275,12 @@ def test_key_access_suspended_writes_a_critical_entry() -> None:
      "Ephemeral key version 3 was removed from the ring, but disposing it failed."),
     (lambda lg: HkdfGuardLog.encryption_budget_warning(lg, 2, 10), 10, logging.WARNING,
      "This key has performed 2 encryptions of its 10 AES-GCM limit; rotate it before the limit, when it stops encrypting."),
+    (lambda lg: HkdfGuardLog.key_file_age_warning(lg, 3, "/etc/app/key.v3", datetime(2027, 1, 2, tzinfo=UTC)), 11, logging.WARNING,
+     "Key file '/etc/app/key.v3' (version 3) stops encrypting at 2027-01-02T00:00:00.000Z, when it reaches its maximum age; "
+     "deploy a new key file at a higher version before then."),
+    (lambda lg: HkdfGuardLog.key_file_expired(lg, 3, "/etc/app/key.v3"), 12, logging.CRITICAL,
+     "Key file '/etc/app/key.v3' (version 3) has passed its maximum age and no longer encrypts; values under it still decrypt. "
+     "Deploy a new key file at a higher version."),
 ])
 def test_every_entry_carries_its_event_id_level_and_message(log, event_id: int, level: int, message: str) -> None:  # type: ignore[no-untyped-def]
     logger, handler = recording_logger()

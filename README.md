@@ -83,7 +83,18 @@ exits, which suits caches and other in-process data; never persist it.
 
 If an application does encrypt values that must outlive the process under a key file, its
 encryptions under that file are not counted together across instances and restarts. Bound them by
-deploying a new key file at a higher version regularly.
+deploying a new key file at a higher version regularly. `key_file_max_age_days` (365 days by default) enforces this: a
+current key file stops encrypting at that age, and decryption under it never stops.
+
+Rotate key files at least yearly. A key file stops encrypting 365 days after it was last written
+(`KeyRingBuilder.with_key_file_max_age_days`, or `key_file_max_age_days` / `KeyFileMaxAgeDays` in
+configuration, sets anywhere from 1 to 3650). A warning is logged at 90% of that age
+(`HkdfGuardEventId.KEY_FILE_AGE_WARNING`, event 11), and a critical entry once it is past
+(`KEY_FILE_EXPIRED`, event 12); only the current version ever encrypts, so only it is reported,
+already at build. After it, encrypting raises `EncryptionLimitReachedError` (a `CryptographicError`;
+the AES-GCM budget's limit raises it too), and values under that key file still decrypt: wrap a new
+key file and register it at a higher version. The age is the file's modification time, so copy key
+files with their timestamps kept (`cp -p`, `rsync -t`). A plain copy resets the clock.
 
 ## Configuration
 
@@ -112,6 +123,7 @@ service_name = "com.example.orders"
 key_refresh_interval = 60
 key_files = [{ version = 3, path = "/etc/myapp/wrapped-dek-v3.bin" }]
 ephemeral_keys = [100]
+key_file_max_age_days = 365   # optional, 1-3650: see Encryption budget
 ```
 
 Unlike .NET's binder, an unknown key is an error rather than ignored, so a misspelt setting can't

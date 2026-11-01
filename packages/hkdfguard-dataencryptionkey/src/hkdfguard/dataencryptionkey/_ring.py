@@ -7,15 +7,17 @@ import logging
 import threading
 import time
 from collections.abc import Buffer, Callable, Collection
+from dataclasses import dataclass
 from datetime import timedelta
 from types import TracebackType
-from typing import Self
+from typing import Final, Self
 
 from hkdfguard import abstractions
 from hkdfguard.abstractions import (
     ArrayUtility,
     CryptoProvider,
     EncryptedFormatProvider,
+    EncryptionLimitReachedError,
     KeyNotFoundError,
     KeyTrackingValue,
     KeyVersions,
@@ -28,31 +30,92 @@ from hkdfguard.abstractions import (
 from hkdfguard.diagnostics import AttributeNames, HkdfGuardLog, HkdfGuardTelemetry, SpanNames, record_exception
 
 
+@dataclass(frozen=True)
+class EncryptionDeadline:
+    """A wall-clock point after which a key stops encrypting, and an earlier one from which that is
+    announced. Decryption is never limited. :meth:`KeyRingBuilder.build` gives every key-file key one,
+    from the file's age, so a key file that is never rotated stops encrypting rather than encrypting
+    without bound: the per-process encryption budget can't see earlier runs of the process."""
+
+    warn_at: float
+    """Seconds since the epoch (as :func:`time.time`) from which :attr:`on_warning` is called, once."""
+    refuse_at: float
+    """Seconds since the epoch from which encrypt raises :class:`EncryptionLimitReachedError`."""
+    reason: str
+    """The :class:`EncryptionLimitReachedError` message."""
+    on_warning: Callable[[], object] | None = None
+    """Called once, the first time the deadline is checked at or after :attr:`warn_at` but before :attr:`refuse_at`."""
+    on_expired: Callable[[], object] | None = None
+    """Called once, the first time the deadline is checked at or after :attr:`refuse_at`."""
+
+
 class DataEncryptionKey(abstractions.DataEncryptionKey):
     """A :class:`~hkdfguard.abstractions.DataEncryptionKey` backed by a :class:`CryptoProvider`, which
     owns the key material - how it is revealed and refreshed - and performs the AEAD. This sizes the
     output via the provider and records telemetry. Owns its provider: close closes it."""
 
-    def __init__(self, provider: CryptoProvider) -> None:
+    def __init__(self, provider: CryptoProvider, deadline: EncryptionDeadline | None = None) -> None:
+        """:param deadline: when this key stops encrypting; it encrypts without a time limit when ``None``"""
         if provider is None:
             raise TypeError("provider must not be None.")
         self._provider = provider
+        self.deadline: Final = deadline
+        """When this key stops encrypting; ``None`` for no time limit."""
         self._closed = False
+        self._warned = False
+        self._expired = False
         self._lock = threading.Lock()
 
     def encrypt(self, plaintext: WritableBuffer, *, aad: Buffer = b"") -> bytes:
+        """Encrypts ``plaintext`` (zeroed before this returns or raises), bound to ``aad``.
+
+        :raises EncryptionLimitReachedError: the key has passed its deadline; it must be rotated, and decryption still works
+        """
         telemetry = HkdfGuardTelemetry.DATA_PROTECTION
         with telemetry.start_span(SpanNames.DataProtection.KEY_WRAPPED_KEY_ENCRYPT) as span:
             length = len(memoryview(plaintext))
             if telemetry.sensitive_logging_enabled:
                 telemetry.log_sensitive_operation(span, SpanNames.DataProtection.KEY_WRAPPED_KEY_ENCRYPT,
                                                   {AttributeNames.PLAINTEXT_LENGTH: length, AttributeNames.AAD_LENGTH: len(memoryview(aad))})
+            deadline = self.deadline
+            if deadline is not None and self.check_deadline():
+                ArrayUtility.zero_memory(plaintext)  # the provider never sees it, so honor the contract here
+                raise EncryptionLimitReachedError(deadline.reason)
 
             buffer = bytearray(self._provider.get_encrypted_allocation_length(length))
             written = self._provider.encrypt(plaintext, buffer, aad=aad)
             return bytes(memoryview(buffer)[:written])
 
+    def check_deadline(self, now: float | None = None) -> bool:
+        """Checks the deadline against the clock (``now``, seconds since the epoch; :func:`time.time`
+        when ``None``), announcing a warning or expiry the first time each is reached; returns whether
+        this key has stopped encrypting. Each callback is called at most once, even under concurrent
+        encrypts, and one that raises is ignored, so a faulty logger never decides whether a value is
+        encrypted. Also called by :meth:`KeyRingBuilder.build`, so a current key file nearing or past
+        its age is reported at startup."""
+        deadline = self.deadline
+        if deadline is None:
+            return False
+        if now is None:
+            now = time.time()
+        if now >= deadline.refuse_at:
+            with self._lock:
+                announce = not self._expired
+                # Marking it warned too means a warning skipped over is never announced later.
+                self._expired = self._warned = True
+            if announce and deadline.on_expired is not None:
+                _quietly(deadline.on_expired)
+            return True
+        if now >= deadline.warn_at:
+            with self._lock:
+                announce = not self._warned
+                self._warned = True
+            if announce and deadline.on_warning is not None:
+                _quietly(deadline.on_warning)
+        return False
+
     def decrypt(self, ciphertext: Buffer, result: WritableBuffer, *, aad: Buffer = b"") -> int:
+        """Decrypts ``ciphertext`` encrypted with the same ``aad`` into ``result``. Never limited by the deadline."""
         telemetry = HkdfGuardTelemetry.DATA_PROTECTION
         with telemetry.start_span(SpanNames.DataProtection.KEY_WRAPPED_KEY_DECRYPT) as span:
             if telemetry.sensitive_logging_enabled:

@@ -16,6 +16,7 @@ from hkdfguard.abstractions import (
     CryptographicError,
     EncryptedFormatError,
     EncryptedFormatProvider,
+    EncryptionLimitReachedError,
     KeyNotFoundError,
     KeyTrackingValue,
     KeyWrapper,
@@ -190,7 +191,7 @@ def test_budget_warns_exactly_once_at_the_threshold_and_stops_at_the_limit() -> 
     budget = EncryptionBudget(warning_threshold=3, limit=4)
 
     assert [budget.consume() for _ in range(4)] == [False, False, True, False]
-    with pytest.raises(CryptographicError, match="limit of 4"):
+    with pytest.raises(EncryptionLimitReachedError, match="limit of 4"):
         budget.consume()
     assert budget.count == 4
 

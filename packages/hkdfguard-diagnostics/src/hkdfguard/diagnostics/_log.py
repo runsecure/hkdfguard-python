@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from enum import IntEnum
 from typing import Final
 
@@ -22,6 +23,8 @@ class HkdfGuardEventId(IntEnum):
     EPHEMERAL_KEY_RETIRED = 8
     EPHEMERAL_KEY_RETIREMENT_FAILED = 9
     ENCRYPTION_BUDGET_WARNING = 10
+    KEY_FILE_AGE_WARNING = 11
+    KEY_FILE_EXPIRED = 12
 
 
 class HkdfGuardLog:
@@ -109,3 +112,25 @@ class HkdfGuardLog:
         HkdfGuardLog._log(logger, logging.WARNING, HkdfGuardEventId.ENCRYPTION_BUDGET_WARNING,
                           "This key has performed %d encryptions of its %d AES-GCM limit; rotate it before the limit, when it stops encrypting.",
                           encryption_count, encryption_limit)
+
+    @staticmethod
+    def key_file_age_warning(logger: logging.Logger | None, key_version: int, path: str, refuse_at: datetime) -> None:
+        """Warning: the current key file is nearing its maximum age, after which it stops encrypting.
+        Logged once per key."""
+        HkdfGuardLog._log(logger, logging.WARNING, HkdfGuardEventId.KEY_FILE_AGE_WARNING,
+                          "Key file '%s' (version %d) stops encrypting at %s, when it reaches its maximum age; deploy a new key file at a "
+                          "higher version before then.", path, key_version, _iso_utc(refuse_at))
+
+    @staticmethod
+    def key_file_expired(logger: logging.Logger | None, key_version: int, path: str) -> None:
+        """Critical: the current key file has passed its maximum age and no longer encrypts; decryption
+        still works. Logged once per key."""
+        HkdfGuardLog._log(logger, logging.CRITICAL, HkdfGuardEventId.KEY_FILE_EXPIRED,
+                          "Key file '%s' (version %d) has passed its maximum age and no longer encrypts; values under it still decrypt. "
+                          "Deploy a new key file at a higher version.", path, key_version)
+
+
+def _iso_utc(moment: datetime) -> str:
+    """``moment`` as ISO 8601 UTC with milliseconds - ``2027-01-02T00:00:00.000Z`` - exactly as
+    JavaScript's ``Date.toISOString`` writes it, so every port's messages match."""
+    return moment.astimezone(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")

@@ -12,7 +12,13 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.hmac import HMAC
-from hkdfguard.abstractions import ArrayUtility, AuthenticationTagMismatchError, CryptographicError, ObjectClosedError, WritableBuffer
+from hkdfguard.abstractions import (
+    ArrayUtility,
+    AuthenticationTagMismatchError,
+    EncryptionLimitReachedError,
+    ObjectClosedError,
+    WritableBuffer,
+)
 from hkdfguard.diagnostics import AttributeNames, EventNames, HkdfGuardLog, HkdfGuardTelemetry, SpanNames
 
 TAG_SIZE: Final = 16
@@ -68,11 +74,11 @@ class EncryptionBudget:
     def consume(self) -> bool:
         """Reserves one encryption. ``True`` exactly once, for the reservation that reaches the warning threshold.
 
-        :raises CryptographicError: the limit has been reached; the key must be rotated
+        :raises EncryptionLimitReachedError: the limit has been reached; the key must be rotated
         """
         with self._lock:
             if self._count >= self.limit:
-                raise CryptographicError(
+                raise EncryptionLimitReachedError(
                     f"This key has reached its AES-GCM encryption limit of {self.limit} and must be rotated; decryption still works.")
             self._count += 1
             return self._count == self.warning_threshold

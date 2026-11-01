@@ -453,3 +453,26 @@ def test_a_version_outside_the_signed_32_bit_range_is_reported() -> None:
     assert any("Version 2147483648 is outside the signed 32-bit range" in f for f in failures)
     assert any("Version -2147483649 is outside the signed 32-bit range" in f for f in failures)
     assert not any("Version 1 " in f for f in failures)
+
+
+@pytest.mark.parametrize("days", [0, -1, HkdfGuardOptions.MAX_KEY_FILE_MAX_AGE_DAYS + 1])
+def test_key_file_max_age_days_out_of_range_fail(days: int) -> None:
+    options = valid_options()
+    options.key_file_max_age_days = days
+    assert options.validate() == ["key_file_max_age_days must be between 1 and 3650."]
+
+
+@pytest.mark.parametrize("days", [1, 365, HkdfGuardOptions.MAX_KEY_FILE_MAX_AGE_DAYS])
+def test_key_file_max_age_days_in_range_succeed_and_apply_to_the_builder(days: int) -> None:
+    options = valid_options()
+    options.key_file_max_age_days = days
+
+    assert options.validate() == []
+    assert options.apply_to(KeyRingBuilder()).key_file_max_age_days == days
+
+
+def test_key_file_max_age_days_unset_keeps_the_builders_default_and_reads_from_appsettings() -> None:
+    assert HkdfGuardOptions().apply_to(KeyRingBuilder()).key_file_max_age_days == KeyRingBuilder.DEFAULT_KEY_FILE_MAX_AGE_DAYS == 365
+    assert HkdfGuardOptions.MAX_KEY_FILE_MAX_AGE_DAYS == KeyRingBuilder.MAX_KEY_FILE_MAX_AGE_DAYS == 3650
+    assert HkdfGuardOptions.from_mapping(json.loads('{"HkdfGuard": {"KeyFileMaxAgeDays": "180"}}')["HkdfGuard"]).key_file_max_age_days == 180
+    assert HkdfGuardOptions.from_mapping({"key_file_max_age_days": 90}).key_file_max_age_days == 90
