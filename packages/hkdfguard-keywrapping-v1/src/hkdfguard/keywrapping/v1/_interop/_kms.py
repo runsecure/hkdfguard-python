@@ -81,6 +81,7 @@ class AbstractHkdfGuardKmsLibrary(ABC):
     ERR_PAYLOAD_MALFORMED: Final = -10
     ERR_PAYLOAD_AUTH_FAILED: Final = -11
     ERR_PAYLOAD_UNSUPPORTED: Final = -12
+    ERR_PAYLOAD_VERSION_REFUSED: Final = -13
 
     # KEK and process (-16..-31)
     ERR_KEK_FINGERPRINT_MISMATCH: Final = -16
@@ -122,9 +123,10 @@ class AbstractHkdfGuardKmsLibrary(ABC):
         ERR_INTERNAL_ERROR: "an unexpected internal failure in the native library",
         ERR_INVALID_SERVICE_NAME: "the service name is null, empty, too long, or has a character other than an ASCII letter, digit or '.'",
         ERR_POLICY_INVALID: "the machine's HkdfGuard policy is invalid",
-        ERR_PAYLOAD_MALFORMED: "the wrapped payload is not a valid WrappedDekV1",
+        ERR_PAYLOAD_MALFORMED: "the wrapped payload is not a valid wrapped DEK",
         ERR_PAYLOAD_AUTH_FAILED: "AES-GCM authentication failed: the wrapped payload was altered",
         ERR_PAYLOAD_UNSUPPORTED: "the wrapped payload's version or suite is not one this native library understands",
+        ERR_PAYLOAD_VERSION_REFUSED: "the wrapped payload's version is one this native library understands, but this host's policy does not use",
         ERR_KEK_FINGERPRINT_MISMATCH: "the payload was wrapped under a different KEK than this service's current one",
         ERR_KEK_NOT_FOUND: "no KEK is provisioned for this service; run hkdfguard provision",
         ERR_KEK_ACCESS_DENIED: "the KEK exists, but this account is not authorized to use it",

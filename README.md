@@ -275,12 +275,13 @@ hkdfguard provision)`.
 | -1 .. -6   | invalid argument, buffer too small, provider unavailable, provider error, crypto error, internal error |
 | -8, -9     | invalid service name, invalid machine policy                                                  |
 | -10 .. -12 | wrapped payload malformed, failed authentication, unsupported version                         |
+| -13        | wrapped payload version this host's policy doesn't use (Windows: `ClassicalMode`)            |
 | -16 .. -20 | KEK fingerprint mismatch, KEK not found, KEK access denied, KEK invalid, process hardening failed |
 | -32 .. -39 | key file not found, access denied, I/O, too short, too long, plaintext key, malformed, untrusted |
 | -64        | Windows: an invalid `KeyUseGroups` policy entry                                               |
 | -96 .. -100 | macOS: access control creation, key generation, keychain write, KEK verification, keychain read failed |
 
-Every other code (-7, -13 .. -15, -21 .. -31, -40 .. -63, ...) is reserved.
+Every other code (-7, -14 .. -15, -21 .. -31, -40 .. -63, ...) is reserved.
 
 **Key files are read through the key wrapper.** `KeyRingBuilder.build` reads every key file with
 `KeyWrapper.read_key_file`. `NativeHkdfKeyWrapperV1` reads it through the native library's

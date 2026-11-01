@@ -146,7 +146,7 @@ def test_wrap_delegates_to_the_library() -> None:
     assert result[:4] == bytes([10, 20, 30, 40])
 
 
-@pytest.mark.parametrize("status", [-7, -13, -40])  # reserved codes: no platform returns them, so there is no meaning to add
+@pytest.mark.parametrize("status", [-7, -14, -40])  # reserved codes: no platform returns them, so there is no meaning to add
 def test_a_failing_wrap_raises_naming_the_status(status: int) -> None:
     library = FakeKmsLibrary()
     library.wrap_status = status
@@ -263,7 +263,8 @@ def test_the_default_binding_is_this_platforms_and_is_resolved_once() -> None:
 SHARED_STATUS_CODES = {
     "ERR_INVALID_ARGUMENT": -1, "ERR_BUFFER_TOO_SMALL": -2, "ERR_PROVIDER_UNAVAILABLE": -3, "ERR_PROVIDER_ERROR": -4, "ERR_CRYPTO_ERROR": -5,
     "ERR_INTERNAL_ERROR": -6, "ERR_INVALID_SERVICE_NAME": -8, "ERR_POLICY_INVALID": -9, "ERR_PAYLOAD_MALFORMED": -10,
-    "ERR_PAYLOAD_AUTH_FAILED": -11, "ERR_PAYLOAD_UNSUPPORTED": -12, "ERR_KEK_FINGERPRINT_MISMATCH": -16, "ERR_KEK_NOT_FOUND": -17,
+    "ERR_PAYLOAD_AUTH_FAILED": -11, "ERR_PAYLOAD_UNSUPPORTED": -12, "ERR_PAYLOAD_VERSION_REFUSED": -13, "ERR_KEK_FINGERPRINT_MISMATCH": -16,
+    "ERR_KEK_NOT_FOUND": -17,
     "ERR_KEK_ACCESS_DENIED": -18, "ERR_KEK_INVALID": -19, "ERR_PROCESS_HARDENING_FAILED": -20, "ERR_FILE_NOT_FOUND": -32,
     "ERR_FILE_ACCESS_DENIED": -33, "ERR_FILE_IO": -34, "ERR_FILE_TOO_SHORT": -35, "ERR_FILE_TOO_LONG": -36, "ERR_FILE_PLAINTEXT_KEY": -37,
     "ERR_FILE_MALFORMED": -38, "ERR_FILE_UNTRUSTED": -39, "ERR_WIN_GROUP_INVALID": -64, "ERR_MAC_ACCESS_CONTROL_CREATION_FAILED": -96,
@@ -272,7 +273,7 @@ SHARED_STATUS_CODES = {
 }
 """Every status code, exactly as every platform's hkdfguard.h defines it."""
 
-RESERVED_STATUS_CODES = [-7, -13, -14, -15, -21, -31, -40, -63, -65, -79, -80, -95, -101, -111, 1]
+RESERVED_STATUS_CODES = [-7, -14, -15, -21, -31, -40, -63, -65, -79, -80, -95, -101, -111, 1]
 
 PLATFORM_LIBRARIES: list[Callable[[], AbstractHkdfGuardKmsLibrary]] = [WindowsHkdfGuardKmsLibrary, LinuxHkdfGuardKmsLibrary, MacOsHkdfGuardKmsLibrary]
 
@@ -318,6 +319,8 @@ def test_windows_adds_its_own_hints_and_names_the_current_command_line_tool() ->
     not_found = library.describe_status(AbstractHkdfGuardKmsLibrary.ERR_KEK_NOT_FOUND) or ""
     assert "hkdfguard provision" in not_found and "v1-initialize" not in not_found
     assert "HKLM\\Software\\Policies\\HkdfGuard" in (library.describe_status(AbstractHkdfGuardKmsLibrary.ERR_POLICY_INVALID) or "")
+    assert "ClassicalMode" in (library.describe_status(AbstractHkdfGuardKmsLibrary.ERR_PAYLOAD_VERSION_REFUSED) or "")
+    assert "ClassicalMode" in (library.describe_status(AbstractHkdfGuardKmsLibrary.ERR_PROVIDER_UNAVAILABLE) or "")
     # Codes Windows has nothing to add to fall back to the shared meaning.
     assert library.describe_status(-37) == FakeKmsLibrary().describe_status(-37)
 
