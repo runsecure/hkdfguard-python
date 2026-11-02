@@ -36,7 +36,8 @@ class TrustedKeyFile:
     """
 
     PLAINTEXT_KEY_LENGTH: Final = 32
-    """The length of an unwrapped DEK; a file this size is probably a plaintext key."""
+    """The length of an unwrapped DEK; a file this size, or this size plus one line ending (LF or CRLF),
+    is probably a plaintext key."""
 
     PLAINTEXT_TEXT_SCAN_LIMIT: Final = 96
     """A 32-byte key as text is at most 64 hex digits; this allows surrounding whitespace."""
@@ -180,11 +181,18 @@ class TrustedKeyFile:
 
     @staticmethod
     def looks_like_plaintext_key(contents: Buffer) -> bool:
-        """The native library's test for a plaintext key written to disk: exactly 32 bytes, or a 32-byte
-        key as 64 hex digits or as base64 (standard or URL-safe, padded or not), with any surrounding
-        whitespace. Reads ``contents`` in place, making no copy of it."""
+        """The native library's test for a plaintext key written to disk: 32 raw bytes, optionally
+        followed by one line ending (LF or CRLF), or a 32-byte key as 64 hex digits or as base64 (standard
+        or URL-safe, padded or not), with any surrounding whitespace. The raw form is decided by length
+        and the trailing line-ending bytes alone - never by trimming, since a raw key's own last bytes may
+        be whitespace values. Reads ``contents`` in place, making no copy of it."""
         with memoryview(contents) as raw, raw.cast("B") as data:
-            if len(data) == TrustedKeyFile.PLAINTEXT_KEY_LENGTH:
+            length = len(data)
+            if length == TrustedKeyFile.PLAINTEXT_KEY_LENGTH:
+                return True
+            if length == TrustedKeyFile.PLAINTEXT_KEY_LENGTH + 1 and data[length - 1] == 0x0A:
+                return True
+            if length == TrustedKeyFile.PLAINTEXT_KEY_LENGTH + 2 and data[length - 2] == 0x0D and data[length - 1] == 0x0A:
                 return True
             if len(data) > TrustedKeyFile.PLAINTEXT_TEXT_SCAN_LIMIT:
                 return False

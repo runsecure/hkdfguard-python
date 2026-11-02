@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from collections.abc import Buffer, Iterator
@@ -739,6 +740,115 @@ def test_close_closes_every_client_and_later_calls_are_refused(vault: FakeKeyVau
     assert ArrayUtility.is_null_or_empty(result)
     wrapper.close()
     assert len(vault.closed) == 4
+
+
+def with_signing_version(wrapped: bytes, version: str) -> bytes:
+    """``wrapped`` recording another signing key version - as a forged wrapped DEK would."""
+    parts = _envelope.parse(wrapped)
+    result = bytearray(WrappedKeyLimits.MAX_BYTES)
+    length = _envelope.write(wrapped[:parts.unsigned_length], version, parts.signature, result)
+    return bytes(result[:length])
+
+
+def test_a_wrapped_dek_naming_a_version_key_vault_does_not_have_leaves_no_client_behind(vault: FakeKeyVault) -> None:
+    wrapper = wrapper_over(vault)
+    wrapped = wrap_with(wrapper, os.urandom(32))
+    wrapper.unwrap(wrapped, bytearray(32))
+    kept = len(wrapper._clients)
+    vault.created.clear()
+    vault.calls.clear()
+
+    for _ in range(5):
+        with pytest.raises(CryptographicError, match="KeyNotFound \\(HTTP 404\\)"):
+            wrapper.unwrap(with_signing_version(wrapped, new_version()), bytearray(32))
+
+    assert len(wrapper._clients) == kept
+    assert len(vault.created) == 5
+    assert sorted(vault.closed) == sorted(vault.created)
+    assert not any(call.startswith("unwrap") for call in vault.calls)
+
+
+def test_a_signature_that_does_not_verify_leaves_no_client_for_its_version(vault: FakeKeyVault) -> None:
+    wrapper = wrapper_over(vault)
+    wrapped = wrap_with(wrapper, os.urandom(32))
+    signed_by = f"{SIGNING_KEY_ID}/{vault.current_version(SIGNING_KEY_NAME)}"
+    vault.verify_override = False
+
+    with pytest.raises(CryptographicError, match="signature doesn't verify"):
+        wrapper.unwrap(wrapped, bytearray(32))
+
+    assert signed_by not in wrapper._clients
+    assert vault.closed == [signed_by]
+
+
+def test_a_new_client_whose_call_fails_is_closed_and_the_next_call_makes_another(vault: FakeKeyVault) -> None:
+    wrapper = wrapper_over(vault)
+    vault.failures["wrap"] = refusal(403, "Forbidden")
+
+    with pytest.raises(CryptographicError, match="Forbidden \\(HTTP 403\\)"):
+        wrap_with(wrapper, os.urandom(32))
+    assert vault.closed == [WRAPPING_KEY_ID]
+    assert wrapper._clients == {}
+
+    del vault.failures["wrap"]
+    wrap_with(wrapper, os.urandom(32))
+    assert vault.created == [WRAPPING_KEY_ID, WRAPPING_KEY_ID, SIGNING_KEY_ID]
+    assert sorted(wrapper._clients) == sorted([WRAPPING_KEY_ID, SIGNING_KEY_ID])
+
+
+def test_an_answer_for_another_key_leaves_no_client_behind(vault: FakeKeyVault) -> None:
+    wrapper = wrapper_over(vault)
+    vault.reported_key_id["sign"] = f"{VAULT}/keys/other/{new_version()}"
+
+    with pytest.raises(CryptographicError, match="instead"):
+        wrap_with(wrapper, os.urandom(32))
+
+    assert list(wrapper._clients) == [WRAPPING_KEY_ID]
+    assert vault.closed == [SIGNING_KEY_ID]
+
+
+def test_a_successful_unwrap_keeps_its_clients(vault: FakeKeyVault) -> None:
+    wrapper = wrapper_over(vault)
+    wrapped = wrap_with(wrapper, os.urandom(32))
+    wrapper.unwrap(wrapped, bytearray(32))
+    created = list(vault.created)
+
+    wrapper.unwrap(wrapped, bytearray(32))
+
+    assert vault.created == created
+    assert vault.closed == []
+
+
+def test_concurrent_first_calls_for_a_version_keep_one_client_and_close_the_others(vault: FakeKeyVault) -> None:
+    threads = 4
+    barrier = threading.Barrier(threads)
+
+    def client(key_id: str) -> FakeClient:
+        barrier.wait(timeout=10)  # every thread has a new client before any call succeeds
+        return vault.client(key_id)
+
+    signing_key_id = f"{SIGNING_KEY_ID}/{vault.current_version(SIGNING_KEY_NAME)}"
+    wrapper = AzureKeyVaultKeyWrapper._over(WRAPPING_KEY_ID, signing_key_id, client, CONTEXT)
+    errors: list[BaseException] = []
+
+    def verify() -> None:
+        try:
+            wrapper._call(lambda c: c.verify(SignatureAlgorithm.es256, bytes(32), bytes(64)), lambda answer: answer, "verify", wrapper._signing_key)
+        except BaseException as error:
+            errors.append(error)
+
+    workers = [threading.Thread(target=verify) for _ in range(threads)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
+
+    assert errors == []
+    assert list(wrapper._clients) == [signing_key_id]
+    assert len(vault.created) == threads
+    assert len(vault.closed) == threads - 1
+    wrapper.close()
+    assert len(vault.closed) == threads
 
 
 # --- Through the Azure SDK's own client -------------------------------------------------------------

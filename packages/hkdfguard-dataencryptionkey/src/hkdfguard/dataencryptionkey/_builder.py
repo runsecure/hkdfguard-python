@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Final, Self
 
 from hkdfguard import abstractions
@@ -20,9 +20,11 @@ from hkdfguard.abstractions import (
     WrappedKeyLimits,
 )
 from hkdfguard.dataencryptionkey._format import DefaultFormatProvider
-from hkdfguard.dataencryptionkey._ring import DataEncryptionKey, KeyRing
+from hkdfguard.dataencryptionkey._ring import DataEncryptionKey, EncryptionDeadline, KeyRing
+from hkdfguard.diagnostics import HkdfGuardLog
 
 _DEFAULT_LOGGER: Final = logging.getLogger("hkdfguard.dataencryptionkey")
+_DAY_SECONDS: Final = 24 * 60 * 60
 
 
 class KeyRingBuilder:
@@ -37,6 +39,9 @@ class KeyRingBuilder:
     :attr:`ephemeral_key_rotation_interval` (24 hours unless configured otherwise). Each rotation
     lands above whatever is current, so while rotation is on, build refuses a key file registered
     above every ephemeral version: the first rotation would replace it as the current version.
+
+    A key file also stops encrypting :attr:`key_file_max_age_days` after it was last written (365
+    days unless configured otherwise); see :meth:`with_key_file_max_age_days`.
     """
 
     DEFAULT_EPHEMERAL_KEY_ROTATION_INTERVAL: Final = timedelta(hours=24)
@@ -47,6 +52,16 @@ class KeyRingBuilder:
     DEFAULT_EPHEMERAL_KEY_RETENTION: Final = timedelta(hours=24)
     MIN_EPHEMERAL_KEY_RETENTION: Final = timedelta(minutes=1)
     DEFAULT_MAX_REFRESH_FAILURES: Final = RefreshFailurePolicy.DEFAULT_MAX_REFRESH_FAILURES
+    DEFAULT_KEY_FILE_MAX_AGE_DAYS: Final = 365
+    """How many days after it was last written a key file stops encrypting, unless configured otherwise.
+    AES-GCM with random nonces is safe for about 2^32 encryptions under one key in total, and a key
+    file outlives the process that counts them, so it is bounded by age instead: rotate key files by
+    deploying a new one at a higher version. Decryption under an old key file never stops."""
+    MIN_KEY_FILE_MAX_AGE_DAYS: Final = 1
+    MAX_KEY_FILE_MAX_AGE_DAYS: Final = 3650
+    """The longest key-file age accepted, in days."""
+    KEY_FILE_AGE_WARNING_FRACTION: Final = 0.9
+    """The fraction of the maximum age after which a warning is logged: 90%, about five weeks of a year."""
 
     def __init__(self) -> None:
         self._key_files: dict[int, str] = {}
@@ -65,6 +80,8 @@ class KeyRingBuilder:
         """How often a ring with ephemeral keys adds a fresh one; ``None`` only after turning rotation off."""
         self.ephemeral_key_retention: timedelta = self.DEFAULT_EPHEMERAL_KEY_RETENTION
         """How long a superseded ephemeral key stays registered for decryption."""
+        self.key_file_max_age_days: int = self.DEFAULT_KEY_FILE_MAX_AGE_DAYS
+        """Days after a key file was last written that it stops encrypting."""
 
     def with_ephemeral_key_rotation(self, interval: timedelta) -> Self:
         """:raises ValueError: ``interval`` is outside the minimum to maximum range"""
@@ -95,8 +112,24 @@ class KeyRingBuilder:
         self.ephemeral_key_retention = retention
         return self
 
+    def with_key_file_max_age_days(self, days: int) -> Self:
+        """Days (1-3650) after a key file was last written that it stops encrypting; 365 unless set.
+        Its age is its modification time, so copy key files with their timestamps preserved (``cp -p``,
+        ``rsync -t``); a plain copy resets the clock. A warning is logged at 90% of the age; past it,
+        encrypt raises :class:`~hkdfguard.abstractions.EncryptionLimitReachedError`, and decryption
+        still works. Only the current version ever encrypts, so only it is reported.
+
+        :raises ValueError: not a whole number of days between 1 and 3650
+        """
+        low, high = self.MIN_KEY_FILE_MAX_AGE_DAYS, self.MAX_KEY_FILE_MAX_AGE_DAYS
+        if isinstance(days, bool) or not isinstance(days, int) or not low <= days <= high:
+            raise ValueError(f"key_file_max_age_days must be between {low} and {high}; it is {days}.")
+        self.key_file_max_age_days = days
+        return self
+
     def with_logger(self, logger: logging.Logger | None) -> Self:
-        """Receives an info entry per rotation and retirement and an error per failed one; ``None`` for
+        """Receives an info entry per rotation and retirement and an error per failed one, and a
+        warning or critical entry for a current key file nearing or past its maximum age; ``None`` for
         the ``hkdfguard.dataencryptionkey`` logger."""
         self._logger = logger
         return self
@@ -180,6 +213,10 @@ class KeyRingBuilder:
         """Reads every key file, creates every ephemeral key, and returns a populated ring. If anything
         fails partway, every provider created so far is closed.
 
+        Each key file's modification time, taken right after it is read, starts its age (see
+        :meth:`with_key_file_max_age_days`). The current version is checked once the ring is built, so
+        a current key file already nearing or past its age is logged now, not at its first encrypt.
+
         Every key file is read through the key wrapper (:meth:`KeyWrapper.read_key_file`), so a native
         KMS reads its own key files, with its own checks on who could have written them.
 
@@ -211,23 +248,28 @@ class KeyRingBuilder:
                                    "without_ephemeral_key_rotation().")
 
         wrapper, factory, interval, failures = self._key_wrapper, self._factory, self.key_refresh_interval, self.max_refresh_failures
+        logger = self._logger if self._logger is not None else _DEFAULT_LOGGER
         ring = KeyRing(self._format_provider)
         try:
             for version in sorted(self._key_files):
                 # Read through the key wrapper: a native KMS reads its own key files, with its own
                 # checks on who could have written them.
-                wrapped = wrapper.read_key_file(self._key_files[version])
+                path = self._key_files[version]
+                wrapped = wrapper.read_key_file(path)
+                modified = os.stat(path).st_mtime  # the key file's age starts here
                 # Whatever the key wrapper, a wrapped key is never empty and never over the limit.
                 if not wrapped:
-                    raise InvalidKeyFileError(f"Key file '{self._key_files[version]}' is empty.")
+                    raise InvalidKeyFileError(f"Key file '{path}' is empty.")
                 if len(wrapped) > WrappedKeyLimits.MAX_BYTES:
-                    raise InvalidKeyFileError(f"Key file '{self._key_files[version]}' is larger than {WrappedKeyLimits.MAX_BYTES} bytes "
+                    raise InvalidKeyFileError(f"Key file '{path}' is larger than {WrappedKeyLimits.MAX_BYTES} bytes "
                                               "(WrappedKeyLimits.MAX_BYTES); a wrapped key never is.")
                 provider = factory.create(wrapper, wrapped, interval, failures)
-                _add_owned(ring, version, provider)
+                _add_owned(ring, version, provider, _key_file_deadline(version, path, modified, self.key_file_max_age_days, logger))
 
             for version in self._ephemeral_versions:
                 _add_owned(ring, version, factory.create_ephemeral(wrapper, interval, failures))
+
+            _report_current_key_file_age(ring)
 
             if self._ephemeral_versions and self.ephemeral_key_rotation_interval is not None:
                 # Each rotation creates its key exactly as an ephemeral version above was created.
@@ -235,17 +277,41 @@ class KeyRingBuilder:
                 ring._start_ephemeral_key_rotation(
                     self.ephemeral_key_rotation_interval,
                     lambda: DataEncryptionKey(factory.create_ephemeral(wrapper, interval, failures)),
-                    self._logger if self._logger is not None else _DEFAULT_LOGGER)
+                    logger)
             return ring
         except BaseException:
             ring.close()
             raise
 
 
-def _add_owned(ring: KeyRing, version: int, provider: CryptoProvider) -> None:
-    key: abstractions.DataEncryptionKey = DataEncryptionKey(provider)
+def _add_owned(ring: KeyRing, version: int, provider: CryptoProvider, deadline: EncryptionDeadline | None = None) -> None:
+    key: abstractions.DataEncryptionKey = DataEncryptionKey(provider, deadline)
     try:
         ring.add(version, key)
     except BaseException:
         provider.close()
         raise
+
+
+def _report_current_key_file_age(ring: KeyRing) -> None:
+    """Reports a current key file already nearing or past its age now, not at its first encrypt. A
+    superseded key file never encrypts, so it is never reported; an ephemeral key has no deadline."""
+    current = ring.find(ring.current_version)
+    if isinstance(current, DataEncryptionKey):
+        current.check_deadline()
+
+
+def _key_file_deadline(version: int, path: str, modified: float, max_age_days: int, logger: logging.Logger) -> EncryptionDeadline:
+    """When the key file at ``path``, last written at ``modified`` (seconds since the epoch), stops
+    encrypting, and who hears about it."""
+    refuse_at = modified + max_age_days * _DAY_SECONDS
+    written = datetime.fromtimestamp(modified, UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    return EncryptionDeadline(
+        warn_at=modified + max_age_days * _DAY_SECONDS * KeyRingBuilder.KEY_FILE_AGE_WARNING_FRACTION,
+        refuse_at=refuse_at,
+        reason=f"Key file '{path}' (version {version}) was last written {written}, more than {max_age_days} days ago (key_file_max_age_days), "
+               "so it no longer encrypts: AES-GCM is only safe for a bounded number of encryptions under one key. Deploy a new key file at a "
+               "higher version; values under this one still decrypt.",
+        on_warning=lambda: HkdfGuardLog.key_file_age_warning(logger, version, path, datetime.fromtimestamp(refuse_at, UTC)),
+        on_expired=lambda: HkdfGuardLog.key_file_expired(logger, version, path),
+    )

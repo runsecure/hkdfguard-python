@@ -1227,6 +1227,22 @@ def test_an_ssl_context_given_is_the_one_every_https_request_uses(vault: FakeVau
     assert wrapped == ["127.0.0.1"] * (1 + Options.MIN_RETRY_COUNT)
 
 
+def test_a_refused_vault_certificate_is_not_retried(vault: FakeVault, create: Create) -> None:
+    attempts: list[str | None] = []
+
+    class Refusing(ssl.SSLContext):
+        def wrap_socket(self, *args: Any, **kwargs: Any) -> ssl.SSLSocket:
+            attempts.append(kwargs.get("server_hostname"))
+            raise ssl.SSLCertVerificationError(1, "certificate verify failed: unable to get local issuer certificate")
+
+    cache = create(address=f"https://127.0.0.1:{vault.port}/", ssl_context=Refusing(ssl.PROTOCOL_TLS_CLIENT))
+
+    with pytest.raises(ssl.SSLCertVerificationError):
+        cache.decrypt("item", bytearray(16))
+
+    assert attempts == ["127.0.0.1"]
+
+
 # --- StaticVaultToken -------------------------------------------------------------------------
 
 

@@ -76,10 +76,33 @@ def test_trusted_principals_add_the_listed_deployers() -> None:
     assert DEPLOYERS in trusted(DEPLOYERS)
 
 
-@pytest.mark.parametrize("sid", ["S-1-1-0", "S-1-5-11", "S-1-5-32-545", "S-1-5-4", "S-1-5-7"])  # Everyone, Authenticated Users, Users, Interactive, Anonymous
-def test_trusted_principals_refuse_groups_everyone_is_in(sid: str) -> None:
-    with pytest.raises(ValueError, match="every account"):
+@pytest.mark.parametrize("sid", sorted(WindowsKeyFileChecks.NEVER_TRUSTED))
+def test_trusted_principals_refuse_broad_groups(sid: str) -> None:
+    with pytest.raises(ValueError, match="a broad group"):
         trusted(sid)
+
+
+@pytest.mark.parametrize("sid", [
+    "S-1-1-0", "S-1-5-11", "S-1-5-32-545", "S-1-5-4", "S-1-5-7",  # Everyone, Authenticated Users, Users, Interactive, Anonymous
+    "S-1-5-32-546", "S-1-15-2-1", "S-1-5-2", "S-1-5-6", "S-1-5-32-555", "S-1-3-0", "S-1-3-4",  # Guests ... Owner Rights
+])
+def test_the_broad_groups_include_the_ones_every_account_or_service_is_in(sid: str) -> None:
+    assert sid in WindowsKeyFileChecks.NEVER_TRUSTED
+
+
+@pytest.mark.parametrize("rid", [513, 514, 515])  # Domain Users, Domain Guests, Domain Computers
+def test_trusted_principals_refuse_a_domains_broad_groups(rid: int) -> None:
+    with pytest.raises(ValueError, match="a broad group"):
+        trusted(f"S-1-5-21-1111111111-2222222222-3333333333-{rid}")
+
+
+@pytest.mark.parametrize("sid", [
+    "S-1-5-21-1111111111-2222222222-3333333333-512",   # Domain Admins: narrow, may be trusted
+    "S-1-5-21-1111111111-2222222222-3333333333-5130",  # an ordinary group whose RID merely starts with 513
+    "S-1-5-21-1111111111-2222222222-513",              # too few parts to be a domain RID
+])
+def test_other_domain_groups_and_accounts_may_be_trusted(sid: str) -> None:
+    assert sid in trusted(sid)
 
 
 @pytest.mark.parametrize("value", ["HkdfGuardDeployers", ""])

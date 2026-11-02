@@ -359,6 +359,11 @@ class HashiCorpVaultTransitKeyWrapper(KeyWrapper):
                     failure = error
                     if not error.is_transient:
                         break
+                except ssl.SSLCertVerificationError as error:
+                    # Vault's certificate is refused: retrying can't change that, and would only turn a
+                    # clear refusal into a wait for the retries to run out.
+                    failure = error
+                    break
                 except (OSError, http.client.HTTPException) as error:
                     failure = error
 

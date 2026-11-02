@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import os
 import threading
@@ -82,13 +83,15 @@ class AzureKeyVaultKeyWrapper(KeyWrapper):
     (``hkdfguard-keywrapping-v1``'s ``NativeProcessHardening``) is what keeps such copies out of reach
     of a debugger or a crash dump.
 
-    The wrapper creates one Key Vault client per key version it uses, and keeps it: each caches the
-    public key it works with, and a key ring's refresh unwraps under the same versions every interval.
-    :meth:`close` closes them; the wrapper is a context manager. Every call blocks until Key Vault
-    answers. Argument errors raise ``ValueError`` or ``TypeError``; a Key Vault refusal, an unreachable
-    vault or a credential that can't get a token raises :class:`CryptographicError` naming the
-    operation, the key, and Key Vault's error code and HTTP status, with the Azure exception as its
-    ``__cause__``.
+    The wrapper creates one Key Vault client per key version it uses, and keeps it once a call through
+    it has succeeded: each caches the public key it works with, and a key ring's refresh unwraps under
+    the same versions every interval. A client whose first call fails - Key Vault refused it, the
+    signature didn't verify, or the answer was for another key - is closed, not kept, so a wrapped DEK
+    naming a version Key Vault refuses leaves nothing behind. :meth:`close` closes the kept clients;
+    the wrapper is a context manager. Every call blocks until Key Vault answers. Argument errors raise
+    ``ValueError`` or ``TypeError``; a Key Vault refusal, an unreachable vault or a credential that
+    can't get a token raises :class:`CryptographicError` naming the operation, the key, and Key
+    Vault's error code and HTTP status, with the Azure exception as its ``__cause__``.
     """
 
     GENERATED_KEY_LENGTH: Final = 32
@@ -186,8 +189,10 @@ class AzureKeyVaultKeyWrapper(KeyWrapper):
         return self._wrap(key, result)
 
     def _wrap(self, key: bytes, result: WritableBuffer) -> int:
-        wrapped = self._call(lambda client: client.wrap_key(KeyWrapAlgorithm.rsa_oaep_256, key), "wrap", self._wrapping_key)
-        unsigned = _envelope.build_unsigned(self._version_of(wrapped.key_id, self._wrapping_key, "wrap"), wrapped.encrypted_key)
+        version, encrypted_key = self._call(lambda client: client.wrap_key(KeyWrapAlgorithm.rsa_oaep_256, key),
+                                            lambda answer: (self._version_of(answer.key_id, self._wrapping_key, "wrap"), answer.encrypted_key), "wrap",
+                                            self._wrapping_key)
+        unsigned = _envelope.build_unsigned(version, encrypted_key)
         length = len(unsigned) + _envelope.KEY_VERSION_LENGTH + _envelope.SIGNATURE_LENGTH
         if length > WrappedKeyLimits.MAX_BYTES:
             raise CryptographicError(f"The wrapped DEK would be {length} bytes; a wrapped DEK is at most {WrappedKeyLimits.MAX_BYTES}. Use a 2048- or "
@@ -195,8 +200,10 @@ class AzureKeyVaultKeyWrapper(KeyWrapper):
 
         # ES256 signs the SHA-256 digest of the data, which the SDK takes already computed.
         digest = hashlib.sha256(_envelope.signed_data(unsigned, self._context)).digest()
-        signature = self._call(lambda client: client.sign(SignatureAlgorithm.es256, digest), "sign", self._signing_key)
-        return _envelope.write(unsigned, self._version_of(signature.key_id, self._signing_key, "sign"), signature.signature, result)
+        version, signature = self._call(lambda client: client.sign(SignatureAlgorithm.es256, digest),
+                                        lambda answer: (self._version_of(answer.key_id, self._signing_key, "sign"), answer.signature), "sign",
+                                        self._signing_key)
+        return _envelope.write(unsigned, version, signature, result)
 
     def unwrap(self, wrapped: Buffer, result: WritableBuffer) -> int:
         """Verifies the wrapped DEK's signature under the signing key version it records, and only then
@@ -217,18 +224,23 @@ class AzureKeyVaultKeyWrapper(KeyWrapper):
             # The signature first: nothing reaches unwrap_key that a principal allowed to sign didn't make.
             digest = hashlib.sha256(_envelope.signed_data(envelope[:parts.unsigned_length], self._context)).digest()
             signed_by = self._signing_key.with_version(parts.signing_key_version)
-            verify = self._call(lambda client: client.verify(SignatureAlgorithm.es256, digest, parts.signature), "verify", signed_by)
-            if verify.is_valid is not True:
-                raise CryptographicError(f"The wrapped DEK's signature doesn't verify under '{self._signing_key.name}' version "
-                                         f"{parts.signing_key_version}: it was tampered with, wrapped under a different context, or not made by "
-                                         "a principal allowed to sign.")
+
+            def verified(answer: VerifyResult) -> None:
+                if answer.is_valid is not True:
+                    raise CryptographicError(f"The wrapped DEK's signature doesn't verify under '{self._signing_key.name}' version "
+                                             f"{parts.signing_key_version}: it was tampered with, wrapped under a different context, or not made by "
+                                             "a principal allowed to sign.")
+
+            self._call(lambda client: client.verify(SignatureAlgorithm.es256, digest, parts.signature), verified, "verify", signed_by)
+
+            def revealed_key(answer: UnwrapResult) -> bytes:
+                # Immutable bytes from the SDK: copied into result, but it can't be zeroed (see the class comment).
+                if not answer.key:
+                    raise CryptographicError(f"Azure Key Vault unwrap for key '{self._wrapping_key.name}' returned no key.")
+                return answer.key
 
             wrapped_by = self._wrapping_key.with_version(parts.wrapping_key_version)
-            unwrapped = self._call(lambda client: client.unwrap_key(KeyWrapAlgorithm.rsa_oaep_256, parts.wrapped_dek), "unwrap", wrapped_by)
-            # Immutable bytes from the SDK: copied into result, but it can't be zeroed (see the class comment).
-            revealed = unwrapped.key
-            if not revealed:
-                raise CryptographicError(f"Azure Key Vault unwrap for key '{self._wrapping_key.name}' returned no key.")
+            revealed = self._call(lambda client: client.unwrap_key(KeyWrapAlgorithm.rsa_oaep_256, parts.wrapped_dek), revealed_key, "unwrap", wrapped_by)
             with memoryview(revealed) as source, memoryview(result) as target_raw, target_raw.cast("B") as target:
                 if len(source) > len(target):
                     raise ValueError(f"The revealed key is {len(source)} bytes; result holds {len(target)}.")
@@ -276,8 +288,8 @@ class AzureKeyVaultKeyWrapper(KeyWrapper):
         return TrustedKeyFile.read(path, self._key_file_trust)
 
     def close(self) -> None:
-        """Closes every Key Vault client the wrapper created. Later calls raise :class:`CryptographicError`;
-        closing again does nothing."""
+        """Closes every Key Vault client the wrapper kept (one whose first call failed was closed then).
+        Later calls raise :class:`CryptographicError`; closing again does nothing."""
         with self._lock:
             self._closed = True
             clients = list(self._clients.values())
@@ -291,23 +303,55 @@ class AzureKeyVaultKeyWrapper(KeyWrapper):
     def __exit__(self, exc_type: type[BaseException] | None, exc: BaseException | None, traceback: TracebackType | None) -> None:
         self.close()
 
-    def _client(self, key: KeyVaultKeyId) -> KeyVaultCryptoClient:
-        # One client per key version, kept: each caches the public key it works with.
+    def _client(self, key: KeyVaultKeyId) -> tuple[KeyVaultCryptoClient, bool]:
+        # The kept client for a key version (True), or a new one not yet kept (False): see _call.
+        key_id = str(key)
         with self._lock:
             if self._closed:
                 raise CryptographicError("This AzureKeyVaultKeyWrapper is closed.")
-            key_id = str(key)
             client = self._clients.get(key_id)
-            if client is None:
-                client = self._clients[key_id] = self._client_factory(key_id)
-            return client
+        if client is not None:
+            return client, True
+        return self._client_factory(key_id), False
 
-    def _call[T](self, call: Callable[[KeyVaultCryptoClient], T], operation: str, key: KeyVaultKeyId) -> T:
+    def _keep(self, key: KeyVaultKeyId, client: KeyVaultCryptoClient) -> None:
+        # Keeps a new client whose call succeeded, unless another thread kept one for the key version
+        # first or the wrapper was closed meanwhile: then it is closed instead.
+        key_id = str(key)
+        with self._lock:
+            if not self._closed and key_id not in self._clients:
+                self._clients[key_id] = client
+                return
+        self._discard(client)
+
+    @staticmethod
+    def _discard(client: KeyVaultCryptoClient) -> None:
+        # Closes a client that isn't kept; a failure to close must not replace the call's outcome.
+        with contextlib.suppress(Exception):
+            client.close()
+
+    def _call[T, R](self, call: Callable[[KeyVaultCryptoClient], T], accept: Callable[[T], R], operation: str, key: KeyVaultKeyId) -> R:
+        # Makes one call to Key Vault and has accept check its answer (raising CryptographicError if
+        # this wrapper doesn't take it) and return what's wanted from it. A client new to the key
+        # version is kept only once both succeed, and closed otherwise: a wrapped DEK naming a version
+        # Key Vault refuses, or a signature that doesn't verify, leaves no client behind.
+        client, kept = self._client(key)
+        try:
+            answer = accept(self._invoke(call, client, operation, key))
+        except BaseException:
+            if not kept:
+                self._discard(client)
+            raise
+        if not kept:
+            self._keep(key, client)
+        return answer
+
+    @staticmethod
+    def _invoke[T](call: Callable[[KeyVaultCryptoClient], T], client: KeyVaultCryptoClient, operation: str, key: KeyVaultKeyId) -> T:
         # Turns Azure failures - service refusals (HttpResponseError with a response) and client-side
         # ones such as a credential that can't get a token, an unreachable vault or a local key the SDK
         # refuses to use - into the CryptographicError every KeyWrapper fails with, naming Key Vault's
         # error code and the HTTP status. KeyboardInterrupt and the like are left as they are.
-        client = self._client(key)
         try:
             return call(client)
         except CryptographicError:

@@ -4,6 +4,6 @@ ephemeral ones, :class:`KeyRingBuilder` builds a ring from wrapped key files and
 
 from hkdfguard.dataencryptionkey._builder import KeyRingBuilder
 from hkdfguard.dataencryptionkey._format import Base64ConversionUtility, DefaultFormatProvider
-from hkdfguard.dataencryptionkey._ring import DataEncryptionKey, KeyRing
+from hkdfguard.dataencryptionkey._ring import DataEncryptionKey, EncryptionDeadline, KeyRing
 
-__all__ = ["Base64ConversionUtility", "DataEncryptionKey", "DefaultFormatProvider", "KeyRing", "KeyRingBuilder"]
+__all__ = ["Base64ConversionUtility", "DataEncryptionKey", "DefaultFormatProvider", "EncryptionDeadline", "KeyRing", "KeyRingBuilder"]

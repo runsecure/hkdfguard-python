@@ -233,6 +233,10 @@ class HashiCorpVaultSecretCache(RemoteSecretCache):
                 if not error.is_transient:
                     raise
                 failure = error
+            except ssl.SSLCertVerificationError:
+                # Vault's certificate is refused: retrying can't change that, and would only turn a clear
+                # refusal into a wait for the retries to run out.
+                raise
             except (OSError, http.client.HTTPException) as error:
                 failure = error
 
