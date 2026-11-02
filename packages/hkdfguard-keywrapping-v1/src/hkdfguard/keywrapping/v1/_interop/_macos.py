@@ -29,7 +29,7 @@ def _account_home() -> str | None:
     import pwd  # noqa: PLC0415
 
     try:
-        return pwd.getpwuid(os.geteuid()).pw_dir  # type: ignore[attr-defined,unused-ignore]
+        return pwd.getpwuid(os.geteuid()).pw_dir  # type: ignore[attr-defined,no-any-return,unused-ignore]
     except (KeyError, OSError):
         return None
 

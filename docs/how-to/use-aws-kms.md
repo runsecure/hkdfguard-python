@@ -235,8 +235,8 @@ library's rules, through `TrustedKeyFile` in `hkdfguard-securefile`:
   writable by neither their group nor others. A symbolic link is followed only if root owns it. So
   nothing under `/tmp`, `/var/tmp` or a home directory is trusted. macOS is supported on Apple
   silicon only.
-- **Everywhere:** a file that is empty, over 512 bytes, exactly 32 bytes, or a 32-byte key written
-  as hex or base64 is refused. Those last ones are probably a plaintext key: treat it as exposed.
+- **Everywhere:** a file that is empty, over 512 bytes, 32 raw bytes (optionally followed by one line
+  ending, LF or CRLF), or a 32-byte key written as hex or base64 is refused. Those last ones are probably a plaintext key: treat it as exposed.
 
 Prepare the folder once, as an administrator. On Windows, give it its own permissions, with
 inheritance removed:
@@ -278,8 +278,10 @@ wrapper = AwsKmsKeyWrapper(kms, key_arn, encryption_context, KeyFileTrust(
 
 > **Security:** never trust the account the application itself runs as, except on a developer
 > machine. An application that can rewrite its own key files can be made to switch to an older,
-> still-valid one. Everyone, Authenticated Users, Users, Interactive and Anonymous are refused if
-> listed.
+> still-valid one. Broad groups are refused if listed: Everyone, Authenticated Users, Users,
+> Interactive, Anonymous, Guests, Remote Desktop Users, Network, Service, All Application Packages,
+> Creator Owner, Owner Rights and others like them, and a domain's Domain Users, Domain Guests and
+> Domain Computers.
 
 ## 7. Use the key file
 

@@ -36,8 +36,8 @@ class OptionsValidationError(ValueError):
 @dataclass
 class HkdfGuardOptions:
     """Plain-data mirror of the settings :class:`KeyRingBuilder` itself exposes: the service name, key
-    refresh interval, refresh-failure policy, ephemeral key rotation and retention, key files and
-    ephemeral keys. It carries no behavior: the key wrapper, crypto provider factory and format
+    refresh interval, refresh-failure policy, ephemeral key rotation and retention, key-file maximum
+    age, key files and ephemeral keys. It carries no behavior: the key wrapper, crypto provider factory and format
     provider a real ring needs still come from the caller - :meth:`apply_to` copies this data onto
     a builder the caller finishes and builds.
 
@@ -54,6 +54,9 @@ class HkdfGuardOptions:
     MAX_EPHEMERAL_KEY_ROTATION_HOURS: ClassVar[int] = 1193
     """The largest :attr:`ephemeral_key_rotation_hours`: the longest rotation interval
     :class:`KeyRingBuilder` accepts, in whole hours."""
+
+    MAX_KEY_FILE_MAX_AGE_DAYS: ClassVar[int] = KeyRingBuilder.MAX_KEY_FILE_MAX_AGE_DAYS
+    """The largest :attr:`key_file_max_age_days` (3650)."""
 
     service_name: str | None = None
     """The service name identifying this ring's KEK to the native KMS library."""
@@ -90,6 +93,11 @@ class HkdfGuardOptions:
     """Hours a superseded ephemeral key stays registered for decryption after a rotation replaces
     it. At least 1. ``None`` keeps the builder's 24-hour default."""
 
+    key_file_max_age_days: int | None = None
+    """Days (1 to :attr:`MAX_KEY_FILE_MAX_AGE_DAYS`) after a key file was last written that it stops
+    encrypting; decryption under it still works. ``None`` keeps the builder's 365-day default. The age
+    is the file's modification time (see ``KeyRingBuilder.with_key_file_max_age_days``)."""
+
     key_files: list[KeyFileOptions] = field(default_factory=list)
     """Versions whose wrapped DEK is read from a file on disk."""
 
@@ -119,6 +127,7 @@ class HkdfGuardOptions:
             ephemeral_key_rotation_hours=reader.read("ephemeral_key_rotation_hours", _integer),
             disable_ephemeral_key_rotation=reader.read("disable_ephemeral_key_rotation", _boolean) or False,
             ephemeral_key_retention_hours=reader.read("ephemeral_key_retention_hours", _integer),
+            key_file_max_age_days=reader.read("key_file_max_age_days", _integer),
             key_files=reader.read("key_files", _list_of(_key_file)) or [],
             ephemeral_keys=reader.read("ephemeral_keys", _list_of(_integer)) or [],
         )
@@ -150,6 +159,9 @@ class HkdfGuardOptions:
 
         if self.ephemeral_key_retention_hours is not None and self.ephemeral_key_retention_hours < 1:
             failures.append("ephemeral_key_retention_hours must be at least 1.")
+
+        if self.key_file_max_age_days is not None and not 1 <= self.key_file_max_age_days <= self.MAX_KEY_FILE_MAX_AGE_DAYS:
+            failures.append(f"key_file_max_age_days must be between 1 and {self.MAX_KEY_FILE_MAX_AGE_DAYS}.")
 
         if self.disable_ephemeral_key_rotation and self.ephemeral_key_rotation_hours is not None:
             failures.append("disable_ephemeral_key_rotation and ephemeral_key_rotation_hours can't both be set: "
@@ -221,6 +233,9 @@ class HkdfGuardOptions:
         if self.ephemeral_key_retention_hours is not None:
             builder.with_ephemeral_key_retention(timedelta(hours=self.ephemeral_key_retention_hours))
 
+        if self.key_file_max_age_days is not None:
+            builder.with_key_file_max_age_days(self.key_file_max_age_days)
+
         for key_file in self.key_files:
             builder.with_key_file(key_file.version, key_file.path)
 
@@ -234,7 +249,7 @@ class HkdfGuardOptions:
 
 _FIELDS: tuple[str, ...] = (
     "service_name", "key_refresh_interval", "max_refresh_failures", "fail_open_on_refresh_failure", "ephemeral_key_rotation_hours",
-    "disable_ephemeral_key_rotation", "ephemeral_key_retention_hours", "key_files", "ephemeral_keys",
+    "disable_ephemeral_key_rotation", "ephemeral_key_retention_hours", "key_file_max_age_days", "key_files", "ephemeral_keys",
 )
 _KEY_FILE_FIELDS: tuple[str, ...] = ("version", "path")
 

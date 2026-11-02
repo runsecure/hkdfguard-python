@@ -9,7 +9,8 @@ event ids are identical.
 Requires **Python 3.12** or later. Cryptography is [`cryptography`](https://cryptography.io);
 telemetry is the OpenTelemetry API; logging is the standard `logging` module; native KMS calls, and
 the Windows key-file checks, use `ctypes`; AWS KMS calls go through `botocore`, Azure Key Vault calls
-through `azure-keyvault-keys`, and Google Cloud KMS calls through `google-cloud-kms`.
+through `azure-keyvault-keys`, Google Cloud KMS calls through `google-cloud-kms`, and HashiCorp Vault
+calls through the standard library's `http.client`.
 
 ## Packages
 
@@ -18,15 +19,21 @@ Each distribution installs one subpackage of the `hkdfguard` namespace package.
 | Distribution                          | Import                                  | .NET assembly                        | Contents |
 |---------------------------------------|-----------------------------------------|--------------------------------------|----------|
 | `hkdfguard-diagnostics`               | `hkdfguard.diagnostics`                 | HkdfGuard.Diagnostics                | `HkdfGuardTelemetry`, `CacheMetrics`, span/attribute/event/metric names, `HkdfGuardLog` |
-| `hkdfguard-abstractions`              | `hkdfguard.abstractions`                | HkdfGuard.Abstractions               | `CryptoProvider`, `KeyWrapper`, `KeyRing`, `DataProtector`, ... ; `ProtectedCacheBase`, `ServiceNames`, `ProtectedConfigurationPurpose`, the exception types |
+| `hkdfguard-abstractions`              | `hkdfguard.abstractions`                | HkdfGuard.Abstractions               | `CryptoProvider`, `KeyWrapper`, `KeyRing`, `DataProtector`, ... ; `ProtectedCacheBase`, `ServiceNames`, `ProtectedConfigurationPurpose`, the exception types; `JsonReader`, the strict JSON reader secrets are parsed with |
 | `hkdfguard-cryptoprovider-aesgcm256`  | `hkdfguard.cryptoprovider.aesgcm256`    | HkdfGuard.CryptoProvider.AesGcm256   | `AesGcmCryptoProvider`, `AesGcmCryptoProviderFactory`, `AesGcmPipelineDataProtector` |
 | `hkdfguard-keywrapping-v1`            | `hkdfguard.keywrapping.v1`              | HkdfGuard.KeyWrapping.V1             | `NativeHkdfKeyWrapperV1` over the native KMS library |
 | `hkdfguard-securefile`                | `hkdfguard.securefile`                  | HkdfGuard.SecureFile                 | `TrustedKeyFile`, `KeyFileTrust`: the native library's key-file location and content checks, in Python |
 | `hkdfguard-keywrapping-awskms`        | `hkdfguard.keywrapping.awskms`          | HkdfGuard.KeyWrapping.AwsKms         | `AwsKmsKeyWrapper` over one symmetric AWS KMS key, through a botocore client |
 | `hkdfguard-keywrapping-azurekeyvault` | `hkdfguard.keywrapping.azurekeyvault`   | HkdfGuard.KeyWrapping.AzureKeyVault  | `AzureKeyVaultKeyWrapper` over an RSA wrapping key and an EC P-256 signing key in Azure Key Vault |
 | `hkdfguard-keywrapping-googlekms`     | `hkdfguard.keywrapping.googlekms`       | HkdfGuard.KeyWrapping.GoogleKms      | `GoogleKmsKeyWrapper` over one symmetric Google Cloud KMS key, through a Cloud KMS client |
+| `hkdfguard-hashicorpvault-common`     | `hkdfguard.hashicorpvault.common`       | HkdfGuard.HashiCorpVault.Common      | `VaultRequestError` and what every Vault integration shares: the address, path and token checks, the retry limits and backoff |
+| `hkdfguard-keywrapping-hashicorpvault` | `hkdfguard.keywrapping.hashicorpvault` | HkdfGuard.KeyWrapping.HashiCorpVault | `HashiCorpVaultTransitKeyWrapper` over one key in a HashiCorp Vault transit secrets engine, through the standard library's HTTP client |
 | `hkdfguard-dataencryptionkey`         | `hkdfguard.dataencryptionkey`           | HkdfGuard.DataEncryptionKey          | `KeyRing`, `KeyRingBuilder`, `DataEncryptionKey`, `DefaultFormatProvider` |
-| `hkdfguard-cache`                     | `hkdfguard.cache`                       | HkdfGuard.Cache                      | `ProtectedCache`, `ProtectedCacheCollection` |
+| `hkdfguard-cache`                     | `hkdfguard.cache`                       | HkdfGuard.Cache                      | `ProtectedCache`, `ProtectedCacheCollection`; `RemoteSecretCache`, `SecretValueSink`, `SecretJsonBody` for caches over a secret store |
+| `hkdfguard-cache-awssecretsmanager`   | `hkdfguard.cache.awssecretsmanager`     | HkdfGuard.Cache.AwsSecretsManager    | `AwsSecretsManagerSecretCache` over AWS Secrets Manager, through a botocore client |
+| `hkdfguard-cache-azurekeyvault`       | `hkdfguard.cache.azurekeyvault`         | HkdfGuard.Cache.AzureKeyVault        | `AzureKeyVaultSecretCache` over Azure Key Vault secrets |
+| `hkdfguard-cache-googlesecretmanager` | `hkdfguard.cache.googlesecretmanager`   | HkdfGuard.Cache.GoogleSecretManager  | `GoogleSecretManagerSecretCache` over Google Cloud Secret Manager, through a gRPC Secret Manager client |
+| `hkdfguard-cache-hashicorpvault`      | `hkdfguard.cache.hashicorpvault`        | HkdfGuard.Cache.HashiCorpVault       | `HashiCorpVaultSecretCache` over HashiCorp Vault's KV secrets engine, through the standard library's HTTP client |
 | `hkdfguard-options`                   | `hkdfguard.options`                     | HkdfGuard.Options                    | `HkdfGuardOptions`, `KeyFileOptions`, `OptionsValidationError` |
 
 Naming: abstract base classes drop the .NET `I` prefix (`ICryptoProvider` -> `CryptoProvider`), and
@@ -76,7 +83,18 @@ exits, which suits caches and other in-process data; never persist it.
 
 If an application does encrypt values that must outlive the process under a key file, its
 encryptions under that file are not counted together across instances and restarts. Bound them by
-deploying a new key file at a higher version regularly.
+deploying a new key file at a higher version regularly. `key_file_max_age_days` (365 days by default) enforces this: a
+current key file stops encrypting at that age, and decryption under it never stops.
+
+Rotate key files at least yearly. A key file stops encrypting 365 days after it was last written
+(`KeyRingBuilder.with_key_file_max_age_days`, or `key_file_max_age_days` / `KeyFileMaxAgeDays` in
+configuration, sets anywhere from 1 to 3650). A warning is logged at 90% of that age
+(`HkdfGuardEventId.KEY_FILE_AGE_WARNING`, event 11), and a critical entry once it is past
+(`KEY_FILE_EXPIRED`, event 12); only the current version ever encrypts, so only it is reported,
+already at build. After it, encrypting raises `EncryptionLimitReachedError` (a `CryptographicError`;
+the AES-GCM budget's limit raises it too), and values under that key file still decrypt: wrap a new
+key file and register it at a higher version. The age is the file's modification time, so copy key
+files with their timestamps kept (`cp -p`, `rsync -t`). A plain copy resets the clock.
 
 ## Configuration
 
@@ -105,6 +123,7 @@ service_name = "com.example.orders"
 key_refresh_interval = 60
 key_files = [{ version = 3, path = "/etc/myapp/wrapped-dek-v3.bin" }]
 ephemeral_keys = [100]
+key_file_max_age_days = 365   # optional, 1-3650: see Encryption budget
 ```
 
 Unlike .NET's binder, an unknown key is an error rather than ignored, so a misspelt setting can't
@@ -112,9 +131,12 @@ silently fall back to a default.
 
 ## Differences from .NET, by design
 
-- **Synchronous API.** Every .NET `...Async` method is a blocking call (`build()`, `create(...)`,
-  `wrap(...)`); there is no `CancellationToken`. Background key refresh and ephemeral key rotation
-  run on daemon threads.
+- **Synchronous API, except cache reads.** Every .NET `...Async` method is a blocking call
+  (`build()`, `create(...)`, `wrap(...)`); there is no `CancellationToken`. Background key refresh
+  and ephemeral key rotation run on daemon threads. The one exception is the read surface of a
+  cache: `ProtectedReadOnlyCache` has `decrypt_async` and `find_max_decrypted_length_async`
+  coroutines (asyncio), which a cache over a secret store uses so a miss doesn't block the event
+  loop. Cancelling the awaiting task takes the place of the `CancellationToken`.
 - **Disposal** is `close()`, and every disposable type is a context manager. `KeyRing.close()`
   never waits for a rotation blocked in the KMS: a key that rotation creates after the ring closed
   is closed instead of added.
@@ -165,7 +187,9 @@ silently fall back to a default.
   into the caller's buffer but can't be zeroed (see *Wrapping under AWS KMS instead*), and
   `AzureKeyVaultKeyWrapper` hands the Azure SDK, and gets back from it, keys as immutable `bytes`
   (see *Wrapping under Azure Key Vault instead*), as `GoogleKmsKeyWrapper` does with the Cloud KMS
-  client (see *Wrapping under Google Cloud KMS instead*). Process
+  client (see *Wrapping under Google Cloud KMS instead*). `HashiCorpVaultTransitKeyWrapper` keeps
+  its DEKs and token in bytearrays it zeroes, but `http.client` copies the token's header line into
+  `bytes` of its own (see *Wrapping under HashiCorp Vault transit instead*). Process
   hardening, which blocks core dumps and debugger attachment, is what keeps such copies out of
   reach.
 - **Logging:** a `None` logger means the package's own logger (e.g. `hkdfguard.cache`). The event id
@@ -263,28 +287,29 @@ hkdfguard provision)`.
 | -1 .. -6   | invalid argument, buffer too small, provider unavailable, provider error, crypto error, internal error |
 | -8, -9     | invalid service name, invalid machine policy                                                  |
 | -10 .. -12 | wrapped payload malformed, failed authentication, unsupported version                         |
+| -13        | wrapped payload version this host's policy doesn't use (Windows: `ClassicalMode`)            |
 | -16 .. -20 | KEK fingerprint mismatch, KEK not found, KEK access denied, KEK invalid, process hardening failed |
 | -32 .. -39 | key file not found, access denied, I/O, too short, too long, plaintext key, malformed, untrusted |
 | -64        | Windows: an invalid `KeyUseGroups` policy entry                                               |
 | -96 .. -100 | macOS: access control creation, key generation, keychain write, KEK verification, keychain read failed |
 
-Every other code (-7, -13 .. -15, -21 .. -31, -40 .. -63, ...) is reserved.
+Every other code (-7, -14 .. -15, -21 .. -31, -40 .. -63, ...) is reserved.
 
 **Key files are read through the key wrapper.** `KeyRingBuilder.build` reads every key file with
 `KeyWrapper.read_key_file`. `NativeHkdfKeyWrapperV1` reads it through the native library's
 `hkdfguard_open_file`, which returns the file's bytes still wrapped - it never unwraps or touches a
 KEK - after checks only the platform can make. It refuses a missing (-32) or unreadable (-33) file,
 anything but a regular file (-34), a file of the wrong size (-35, -36), one holding what looks like
-an unwrapped DEK - 32 raw bytes, or 64 hex digits or base64, with optional whitespace (-37, treat it
-as a key exposure) - a right-size file that isn't a valid wrapped payload (-38), and an untrusted
-path (-39): a symbolic link, junction or other reparse point, an 8.3 short name, a UNC, mapped or
+an unwrapped DEK - 32 raw bytes, optionally followed by one line ending (LF or CRLF), or 64 hex
+digits or base64, with optional whitespace (-37, treat it as a key exposure) - a right-size file
+that isn't a valid wrapped payload (-38), and an untrusted path (-39): a symbolic link, junction or other reparse point, an 8.3 short name, a UNC, mapped or
 SUBST path, or a file or folder another account could write or replace. These checks can't be
 turned off. `read_key_file` has no default implementation: a custom key wrapper must read key
 files itself, and must refuse a file another account could have written or replaced, since whoever
 can replace a key file chooses the key new data is encrypted under. A key wrapper with no native
 library to read through can use `TrustedKeyFile.read` from `hkdfguard-securefile`, which makes the
-same location and content checks in Python, as `AwsKmsKeyWrapper`, `AzureKeyVaultKeyWrapper` and
-`GoogleKmsKeyWrapper` do.
+same location and content checks in Python, as `AwsKmsKeyWrapper`, `AzureKeyVaultKeyWrapper`,
+`GoogleKmsKeyWrapper` and `HashiCorpVaultTransitKeyWrapper` do.
 
 ### Process hardening
 
@@ -532,6 +557,108 @@ IAM roles for each principal, credentials, and creating key files.
 [Run the Google Cloud KMS integration tests](docs/how-to/run-google-kms-integration-tests.md) sets up
 a key of your own for `test_googlekms_integration.py`, which is otherwise reported as skipped.
 
+## Wrapping under HashiCorp Vault transit instead
+
+`HashiCorpVaultTransitKeyWrapper` (distribution `hkdfguard-keywrapping-hashicorpvault`) is a
+`KeyWrapper` over one key in a HashiCorp Vault transit secrets engine. Use it in place of
+`NativeHkdfKeyWrapperV1` wherever a wrapper is taken. Every call is a request to Vault's HTTP API,
+authorized by the token's policy and recorded in Vault's audit log:
+
+```python
+import os
+
+from hkdfguard.keywrapping.hashicorpvault import HashiCorpVaultTransitKeyWrapper, StaticVaultTokenSource
+
+token = StaticVaultTokenSource(os.environ["VAULT_TOKEN"])     # or your own VaultTokenSource
+wrapper = HashiCorpVaultTransitKeyWrapper("https://vault.example.com:8200", "myapp-kek", token,
+                                          "com.example.myapp")  # the context
+```
+
+- `wrap` calls `transit/encrypt/{key}` and `unwrap` calls `transit/decrypt/{key}`. Without a context,
+  `generate_and_wrap` calls `transit/datakey/wrapped/{key}`, so the plaintext DEK never leaves Vault;
+  with one, which that endpoint ignores, it generates the DEK in this process and calls `encrypt`.
+- **The key is pinned by its path**, and a ciphertext carries only its key version, so a key file
+  wrapped under another transit key fails to authenticate. Rotating the key needs nothing here; old
+  key files reveal while their version is at or above `min_decryption_version`. The key must be an
+  AEAD key that isn't derived (`aes256-gcm96`, the default).
+- **The context** is bound into every wrapped DEK as Vault's `associated_data` and must be given
+  again, exactly, to reveal it; `None` and `""` are the same. A Vault that answers that it ignored a
+  parameter (one too old for `associated_data`) is refused, so a context is never silently dropped.
+- **Key files are interchangeable between ports**, byte for byte: a wrapped DEK is Vault's
+  ciphertext, `vault:v1:...` in ASCII (about 89 bytes), and the request bodies are the .NET
+  `HashiCorpVaultTransitKeyWrapper`'s. Anyone whose policy allows `encrypt` on the key can make a key
+  file, so give the application `update` on `decrypt` only, never `create`; key files are read
+  through `hkdfguard-securefile` by the same rules as `AwsKmsKeyWrapper`'s.
+- **No third-party dependency.** HashiCorp ships no Python SDK, and `hvac` decodes responses into
+  `str`, which would leave each revealed DEK unzeroable, so requests go through `http.client`, as the
+  Vault cache's do: https only, except on loopback; no proxy; no redirect ever followed (it would
+  carry the token elsewhere); `X-Vault-Request`, and `X-Vault-Namespace` for a namespace.
+- **The token** comes from a `VaultTokenSource`, asked once per call on a thread of its own within
+  the timeout, which copies it into a bytearray the wrapper zeroes once the request is sent.
+  `StaticVaultTokenSource` holds one you already have, zeroed by `close()`. Unlike the cache's
+  `VaultTokenProvider`, it isn't protected by the key ring: a key wrapper runs before there is one.
+- **Memory.** The request body `encrypt` is sent (the DEK, base64-encoded straight into a bytearray),
+  the response (read into a bytearray of the wrapper's own, at most 16 KiB), the value read out of it
+  and the decoded DEK are all zeroed, and so is the caller's buffer when an unwrap fails. Out of
+  reach: `http.client`'s copy of each header line (the token's among them) and of the request head,
+  the buffered reader it reads the response through, the socket's and OpenSSL's buffers, and, with a
+  context, the `bytes` `os.urandom` returns for `generate_and_wrap`'s DEK. Process hardening is what
+  keeps those out of reach.
+- Calls block until Vault answers. A request that gets no answer, loses its connection, times out
+  (30 seconds per attempt), or is answered 429 or a 5xx other than 501 is retried 3 times, backing off
+  from 200 ms, plus up to 100 ms of jitter. Failures raise `CryptographicError` naming the operation,
+  the key and Vault's status and errors, for example `Vault answered 400 Bad Request: cipher: message
+  authentication failed`, with a `VaultRequestError` (its `status_code`), `OSError` or
+  `http.client.HTTPException` as its `__cause__`. A token source's own failure propagates as it is.
+  Argument errors raise `ValueError` or `TypeError`.
+
+`HashiCorpVaultTransitKeyWrapperOptions` sets the mount, a Vault Enterprise namespace, the timeout,
+the retries and an `ssl_context` (a private CA, a client certificate). There is no configuration
+integration for it: create the wrapper and pass it to `KeyRingBuilder.with_key_wrapper`.
+
+[Wrap keys with HashiCorp Vault transit](docs/how-to/use-hashicorp-vault-transit.md) walks through
+creating the key, the policy for each role, tokens, and creating key files.
+[Run the HashiCorp Vault transit integration tests](docs/how-to/run-hashicorp-vault-transit-integration-tests.md)
+sets up a dev Vault for `test_hashicorpvault_transit_integration.py`, which is otherwise reported as
+skipped.
+
+## Caching secrets from a secret store
+
+The four `hkdfguard-cache-*` distributions are `ProtectedReadOnlyCache`s over a secret store. Each
+one fetches a secret the first time it is looked up, encrypts it under the key ring's current key,
+bound to its name, and from then on holds only the ciphertext. Nothing is listed or fetched up front.
+A name is a secret's name, optionally followed by `#` and a key: `app-config#api-key` is the
+`api-key` member of the JSON object the secret `app-config` holds, and `app-config` is the whole
+value. One fetch caches the whole value and every key, and concurrent lookups of one secret, from
+threads or event loops, share that fetch. A missing secret reads as 0 bytes and isn't remembered.
+
+The response body is taken out of the SDK's response before the SDK parses it, so the secret never
+becomes a `str`; the SDK parses a copy with the value blanked out. What Python can't zero (the
+immutable `bytes` the HTTP or gRPC stack read the body into) is described in each package's
+README.
+
+```python
+import boto3
+from hkdfguard.cache import ProtectedCacheCollection
+from hkdfguard.cache.awssecretsmanager import AwsSecretsManagerSecretCache
+
+client = boto3.client("secretsmanager")  # the application creates, configures and owns the client
+secrets = AwsSecretsManagerSecretCache(client, key_ring)
+caches = ProtectedCacheCollection().add(local_cache).add(secrets)
+
+result = bytearray(caches.find_max_decrypted_length("prod/app-config#api-key") or 0)
+written = caches.decrypt("prod/app-config#api-key", result)  # or: await caches.decrypt_async(...)
+```
+
+| Store | Distribution | How the body is captured |
+|---|---|---|
+| AWS Secrets Manager | `hkdfguard-cache-awssecretsmanager` | a botocore `before-parse` handler, active only for the cache's own calls |
+| Azure Key Vault | `hkdfguard-cache-azurekeyvault` | a per-retry azure-core pipeline policy reading the body as a stream |
+| Google Cloud Secret Manager | `hkdfguard-cache-googlesecretmanager` | the gRPC call made with the cache's own response deserializer, so no protobuf message holds the payload |
+| HashiCorp Vault | `hkdfguard-cache-hashicorpvault` | the HTTP response streamed straight into the parser |
+
+Each package's README covers its names, options and errors.
+
 ## Building
 
 Uses a [uv](https://docs.astral.sh/uv/) workspace:
@@ -548,7 +675,7 @@ uv build --all-packages --build-constraints build-constraints.txt --require-hash
 
 `.github/workflows/ci.yml` tests every push and pull request on Linux, Windows and macOS with Python
 3.12 to 3.14, lints, and builds and checks the packages. `.github/workflows/release.yml` publishes all
-eleven distributions together as a GitHub Release, with Sigstore-signed build provenance and no stored
+seventeen distributions together as a GitHub Release, with Sigstore-signed build provenance and no stored
 token. Nothing is published to PyPI yet.
 
 To release: set the same version in every `packages/*/pyproject.toml`, merge to `main`, then push a tag
@@ -719,3 +846,57 @@ uv run pytest packages/hkdfguard-keywrapping-googlekms
 [Run the Google Cloud KMS integration tests](docs/how-to/run-google-kms-integration-tests.md) sets up
 a test key and its permissions. Every other Google Cloud KMS test runs against a fake Cloud KMS on
 the loopback address, reached through Google's own client, and sends nothing to Google.
+
+## HashiCorp Vault transit integration tests
+
+`test_hashicorpvault_transit_integration.py` in `hkdfguard-keywrapping-hashicorpvault` makes real
+calls against a transit key. Its tests are reported as skipped, never passed, until
+`HKDFGUARD_TEST_VAULT_TRANSIT_KEY` names one - the variables are the .NET integration tests' - in
+the environment or in `vault.test.properties` at the repository root, the file the Vault cache's
+integration tests read. `HKDFGUARD_TEST_VAULT_TRANSIT_OTHER_KEY` names a second key for the
+cross-key test, `HKDFGUARD_TEST_VAULT_TRANSIT_MOUNT` a mount other than `transit`,
+`HKDFGUARD_TEST_VAULT_ADDR` the address (`http://127.0.0.1:8200` by default) and
+`HKDFGUARD_TEST_VAULT_CACERT` a CA to trust. The token, `HKDFGUARD_TEST_VAULT_TOKEN`, is read from the
+environment only. `scripts/provision-vault-transit-test-key.sh` creates both keys on a dev server and
+prints a token that may use only them; the tests never create, rotate or delete a key:
+
+```bash
+HKDFGUARD_TEST_VAULT_TOKEN=<printed token> HKDFGUARD_TEST_VAULT_TRANSIT_KEY=hkdfguard-test \
+HKDFGUARD_TEST_VAULT_TRANSIT_OTHER_KEY=hkdfguard-test-other \
+uv run pytest packages/hkdfguard-keywrapping-hashicorpvault
+```
+
+[Run the HashiCorp Vault transit integration tests](docs/how-to/run-hashicorp-vault-transit-integration-tests.md)
+starts the dev server and provisions it. Every other transit test runs against a fake transit
+engine on the loopback address, reached through the wrapper's real `http.client`.
+
+## Secret cache integration tests
+
+Each `hkdfguard-cache-*` distribution has an integration test that reads a real secret. It is
+reported as skipped, never passed, until the secret is named. Set the matching `..._SECRET_JSON`
+variable to the JSON object the secret holds, and the tests also compare the whole value and every
+key with it. The variables are the ones the .NET and Java tests read, from the environment or the
+settings file. A settings file names secrets and test values only, never a credential, and
+`.gitignore` excludes it.
+
+| Store | Variables | Settings file | Signs in with |
+|---|---|---|---|
+| AWS Secrets Manager | `HKDFGUARD_TEST_AWS_SECRET_NAME`, `HKDFGUARD_TEST_AWS_SECRET_JSON` | `aws.test.properties` | the access keys in the environment, else `~/.aws/credentials` only |
+| Azure Key Vault | `HKDFGUARD_TEST_AZURE_SECRET_ID`, `HKDFGUARD_TEST_AZURE_SECRET_JSON`, `HKDFGUARD_TEST_AZURE_SEPARATE_SECRETS` | `azure.test.properties` | `DefaultAzureCredential` |
+| Google Cloud Secret Manager | `HKDFGUARD_TEST_GOOGLE_SECRET_NAME`, `HKDFGUARD_TEST_GOOGLE_SECRET_JSON` | `google.test.properties` | Application Default Credentials |
+| HashiCorp Vault | `HKDFGUARD_TEST_VAULT_ADDR`, `HKDFGUARD_TEST_VAULT_TOKEN` (environment only), `HKDFGUARD_TEST_VAULT_SECRET_NAME`, `HKDFGUARD_TEST_VAULT_SECRET_JSON` (environment only), `HKDFGUARD_TEST_VAULT_CACERT` | `vault.test.properties` | the token |
+
+```bash
+uv run pytest packages/hkdfguard-cache-awssecretsmanager packages/hkdfguard-cache-azurekeyvault \
+              packages/hkdfguard-cache-googlesecretmanager packages/hkdfguard-cache-hashicorpvault
+```
+
+The how-to guides set up each store:
+
+- [AWS Secrets Manager](docs/how-to/run-aws-secrets-manager-cache-integration-tests.md)
+- [Azure Key Vault](docs/how-to/run-azure-key-vault-secret-cache-integration-tests.md)
+- [Google Cloud Secret Manager](docs/how-to/run-google-secret-manager-cache-integration-tests.md)
+- [HashiCorp Vault](docs/how-to/run-hashicorp-vault-cache-integration-tests.md)
+
+Every other secret cache test runs against a fake store, reached through the store's own client
+where it has one, and sends nothing over the network.

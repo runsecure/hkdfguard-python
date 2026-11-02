@@ -15,6 +15,13 @@ class AuthenticationTagMismatchError(CryptographicError):
         super().__init__(message)
 
 
+class EncryptionLimitReachedError(CryptographicError):
+    """A key has performed as many encryptions as its cipher safely allows; rotate it. Decryption still
+    works. Raised when an AES-GCM key's encryption budget runs out, and when a key file passes its
+    maximum age (:meth:`KeyRingBuilder.with_key_file_max_age_days`). A :class:`CryptographicError`,
+    so code that catches every cryptographic failure still catches it."""
+
+
 class EncryptedFormatError(ValueError):
     """A formatted encrypted value is malformed - raised by EncryptedFormatProvider implementations."""
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import threading
 import time
@@ -55,9 +54,14 @@ def _reveal(key_wrapper: KeyWrapper, wrapped: Buffer, budget: EncryptionBudget |
 
 def _quietly(action: Callable[[], object]) -> None:
     """Runs code the application supplies (its logger, its tracer) so that an exception from it can
-    never decide whether the key stays in use."""
-    with contextlib.suppress(Exception):
+    never decide whether the key stays in use. That includes ``SystemExit``, which a handler may raise
+    and which would otherwise end the refresh thread without a word; only ``KeyboardInterrupt`` passes."""
+    try:
         action()
+    except KeyboardInterrupt:
+        raise
+    except BaseException:  # noqa: S110 - see the docstring
+        pass
 
 
 class _Reveal:
@@ -151,6 +155,8 @@ class AesGcmCryptoProvider(CryptoProvider):
         self._abandoned: _Reveal | None = None
         self._waiting: _Reveal | None = None
         self._closed = False
+        # Set if the refresh loop ever ends other than by close: no refresh will run again.
+        self._refresh_loop_terminated = False
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run_refresh_loop, name="hkdfguard-aesgcm-refresh", daemon=True)
         self._thread.start()
@@ -232,6 +238,10 @@ class AesGcmCryptoProvider(CryptoProvider):
             return session
         if self._closed:
             raise ObjectClosedError("This AES-GCM crypto provider has been closed.")
+        if self._refresh_loop_terminated:
+            raise CryptographicError(
+                "Key access is suspended: the background key refresh stopped unexpectedly, so the KEK can no longer be re-checked. "
+                "Create a new provider (restart the process) to resume.")
         raise CryptographicError(
             f"Key access is suspended: {self._max_refresh_failures} consecutive attempts to re-reveal the key through the key wrapper "
             "failed. Operations resume once a refresh succeeds.")
@@ -247,14 +257,33 @@ class AesGcmCryptoProvider(CryptoProvider):
     def _run_refresh_loop(self) -> None:
         # Ticks at fixed intervals from creation; ticks missed while a slow refresh ran collapse into one.
         next_tick = time.monotonic() + self._interval
-        while not self._stop.wait(max(0.0, next_tick - time.monotonic())):
-            next_tick = max(next_tick + self._interval, time.monotonic())
-            try:
-                self._refresh_once()
-            except Exception as error:
-                # Never let one refresh end the loop: with no more refreshes, the key would stay in
-                # use for good. Whatever went wrong counts as a failed refresh.
-                self._refresh_failed(None, error)
+        try:
+            while not self._stop.wait(max(0.0, next_tick - time.monotonic())):
+                next_tick = max(next_tick + self._interval, time.monotonic())
+                try:
+                    self._refresh_once()
+                except Exception as error:
+                    # Never let one refresh end the loop: with no more refreshes, the key would stay in
+                    # use for good. Whatever went wrong counts as a failed refresh.
+                    self._refresh_failed(None, error)
+        except BaseException as error:
+            # Something the per-refresh guard can't hold (SystemExit, MemoryError, a failure while
+            # handling a failure) ended the loop. With no refresh to come, a revoked KEK would never
+            # be noticed, so fail closed now rather than silently keep the key in use.
+            self._on_refresh_loop_terminated(error)
+            raise
+
+    def _on_refresh_loop_terminated(self, cause: BaseException) -> None:
+        if self._stop.is_set():
+            return  # closing: the loop was meant to end
+        self._refresh_loop_terminated = True
+        if self._max_refresh_failures is not None:
+            # Zero first: the log below runs application code that might fail too.
+            self._suspend_key_access()
+            consequence = "Key access has been suspended and the key zeroed; every operation fails until the process restarts."
+        else:
+            consequence = "The provider fails open, so the last good key stays in use, but a revoked KEK will no longer be detected."
+        _quietly(lambda: HkdfGuardLog.background_task_terminated(self._logger, "background key refresh", consequence, cause))
 
     def _refresh_once(self) -> None:
         """Re-reveals the key, waiting at most one refresh interval for the key wrapper.

@@ -81,6 +81,7 @@ class AbstractHkdfGuardKmsLibrary(ABC):
     ERR_PAYLOAD_MALFORMED: Final = -10
     ERR_PAYLOAD_AUTH_FAILED: Final = -11
     ERR_PAYLOAD_UNSUPPORTED: Final = -12
+    ERR_PAYLOAD_VERSION_REFUSED: Final = -13
 
     # KEK and process (-16..-31)
     ERR_KEK_FINGERPRINT_MISMATCH: Final = -16
@@ -122,9 +123,10 @@ class AbstractHkdfGuardKmsLibrary(ABC):
         ERR_INTERNAL_ERROR: "an unexpected internal failure in the native library",
         ERR_INVALID_SERVICE_NAME: "the service name is null, empty, too long, or has a character other than an ASCII letter, digit or '.'",
         ERR_POLICY_INVALID: "the machine's HkdfGuard policy is invalid",
-        ERR_PAYLOAD_MALFORMED: "the wrapped payload is not a valid WrappedDekV1",
+        ERR_PAYLOAD_MALFORMED: "the wrapped payload is not a valid wrapped DEK",
         ERR_PAYLOAD_AUTH_FAILED: "AES-GCM authentication failed: the wrapped payload was altered",
         ERR_PAYLOAD_UNSUPPORTED: "the wrapped payload's version or suite is not one this native library understands",
+        ERR_PAYLOAD_VERSION_REFUSED: "the wrapped payload's version is one this native library understands, but this host's policy does not use",
         ERR_KEK_FINGERPRINT_MISMATCH: "the payload was wrapped under a different KEK than this service's current one",
         ERR_KEK_NOT_FOUND: "no KEK is provisioned for this service; run hkdfguard provision",
         ERR_KEK_ACCESS_DENIED: "the KEK exists, but this account is not authorized to use it",
@@ -135,7 +137,8 @@ class AbstractHkdfGuardKmsLibrary(ABC):
         ERR_FILE_IO: "the key file is not a regular file, is in use by a writer, or could not be read",
         ERR_FILE_TOO_SHORT: "the key file is shorter than a wrapped DEK",
         ERR_FILE_TOO_LONG: "the key file is longer than a wrapped DEK",
-        ERR_FILE_PLAINTEXT_KEY: "the key file holds what looks like an UNWRAPPED key (32 raw bytes, or its hex or base64): treat it as a key exposure",
+        ERR_FILE_PLAINTEXT_KEY: "the key file holds what looks like an UNWRAPPED key (32 raw bytes, optionally followed by one line ending (LF or CRLF), "
+                                "or its hex or base64): treat it as a key exposure",
         ERR_FILE_MALFORMED: "the key file is the right size, but is not a valid wrapped DEK",
         ERR_FILE_UNTRUSTED: "the key file's path is not trusted: a link or reparse point, a short or network path, or a file or folder another "
                             "account could replace",

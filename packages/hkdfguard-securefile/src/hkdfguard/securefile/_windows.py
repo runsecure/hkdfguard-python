@@ -73,9 +73,48 @@ class WindowsKeyFileChecks:
 
     ALWAYS_TRUSTED: Final = (SYSTEM, ADMINISTRATORS, TRUSTED_INSTALLER)
 
-    NEVER_TRUSTED: Final = frozenset({"S-1-1-0", "S-1-5-11", "S-1-5-32-545", "S-1-5-4", "S-1-5-7"})
-    """Groups every account, or every signed-in one, is in - Everyone, Authenticated Users, Users,
-    Interactive, Anonymous: trusting one trusts everybody."""
+    NEVER_TRUSTED: Final = frozenset({
+        "S-1-1-0",       # Everyone
+        "S-1-5-11",      # Authenticated Users
+        "S-1-5-32-545",  # Users
+        "S-1-5-4",       # Interactive
+        "S-1-5-7",       # Anonymous
+        "S-1-5-32-546",  # Guests
+        "S-1-5-32-547",  # Power Users
+        "S-1-5-32-555",  # Remote Desktop Users
+        "S-1-5-1",       # Dialup
+        "S-1-5-2",       # Network
+        "S-1-5-3",       # Batch
+        "S-1-5-6",       # Service
+        "S-1-5-14",      # Remote Interactive Logon
+        "S-1-5-15",      # This Organization
+        "S-1-5-113",     # Local account
+        "S-1-5-1000",    # Other Organization
+        "S-1-2-0",       # Local
+        "S-1-2-1",       # Console Logon
+        "S-1-15-2-1",    # All Application Packages
+        "S-1-15-2-2",    # All Restricted Application Packages
+        "S-1-3-0",       # Creator Owner
+        "S-1-3-1",       # Creator Group
+        "S-1-3-4",       # Owner Rights
+    })
+    """Broad groups - every account, every signed-in or remote one, every service, batch job or app
+    package, or a placeholder that stands for whoever creates or owns the file - so trusting one
+    trusts far more than a deployer."""
+
+    NEVER_TRUSTED_DOMAIN_RIDS: Final = frozenset({513, 514, 515})
+    """The last part of a domain's Domain Users, Domain Guests and Domain Computers SIDs
+    (S-1-5-21-<domain>-513 and so on), which differ per domain, so they can't be listed above."""
+
+    @staticmethod
+    def is_never_trusted(sid: str) -> bool:
+        """Whether ``sid`` (canonical form) is a broad group no key file may trust."""
+        if sid in WindowsKeyFileChecks.NEVER_TRUSTED:
+            return True
+        parts = sid.split("-")
+        # S-1-5-21-a-b-c-RID: a domain (or machine) account or group.
+        return (len(parts) == 8 and parts[:4] == ["S", "1", "5", "21"]
+                and parts[7].isdigit() and int(parts[7]) in WindowsKeyFileChecks.NEVER_TRUSTED_DOMAIN_RIDS)
 
     # File access rights (winnt.h).
     WRITE_DATA: Final = 0x0002  # FILE_WRITE_DATA, FILE_ADD_FILE on a folder
@@ -119,9 +158,10 @@ class WindowsKeyFileChecks:
             if sid is None:
                 raise ValueError(f"KeyFileTrust.windows_principals holds '{value}', which is not a security identifier (S-1-...).")
 
-            if sid in WindowsKeyFileChecks.NEVER_TRUSTED:
-                raise ValueError(f"KeyFileTrust.windows_principals holds {WindowsKeyFileChecks._describe(sid, account_name)}, which every account "
-                                 "(or every signed-in one) is in; trusting it would trust anyone to replace a key file.")
+            if WindowsKeyFileChecks.is_never_trusted(sid):
+                raise ValueError(f"KeyFileTrust.windows_principals holds {WindowsKeyFileChecks._describe(sid, account_name)}, a broad group "
+                                 "(of every account, every signed-in, remote or service one, or whoever creates or owns a file); trusting "
+                                 "it would trust far more than a deployer to replace a key file.")
             trusted.append(sid)
         return tuple(trusted)
 

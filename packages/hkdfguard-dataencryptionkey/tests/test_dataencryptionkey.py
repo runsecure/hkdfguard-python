@@ -18,6 +18,7 @@ from hkdfguard.abstractions import (
     CryptoProviderFactory,
     EncryptedFormatError,
     EncryptedFormatProvider,
+    EncryptionLimitReachedError,
     InvalidKeyFileError,
     KeyNotFoundError,
     KeyTrackingValue,
@@ -29,7 +30,7 @@ from hkdfguard.abstractions import (
     WritableBuffer,
 )
 from hkdfguard.cryptoprovider.aesgcm256 import AesGcmCryptoProvider, AesGcmCryptoProviderFactory, AesGcmPipelineDataProtector
-from hkdfguard.dataencryptionkey import Base64ConversionUtility, DataEncryptionKey, DefaultFormatProvider, KeyRing, KeyRingBuilder
+from hkdfguard.dataencryptionkey import Base64ConversionUtility, DataEncryptionKey, DefaultFormatProvider, EncryptionDeadline, KeyRing, KeyRingBuilder
 from hkdfguard.diagnostics import AttributeNames, HkdfGuardEventId, HkdfGuardLog, HkdfGuardTelemetry, SpanNames
 from hkdfguard_test_support import key_directory, native_test_service
 from opentelemetry.sdk.trace import TracerProvider
@@ -612,6 +613,7 @@ def test_a_key_file_above_every_ephemeral_version_is_refused_before_any_read_unl
         wrapper_builder(wrapper, factory).with_key_file(5, tmp_path / "v5.bin").with_ephemeral_key(1).with_ephemeral_key(2).build()
     assert wrapper.reads == [] and factory.providers == []
 
+    (tmp_path / "v5.bin").write_bytes(b"wrapped")
     with wrapper_builder(wrapper, factory).with_key_file(5, tmp_path / "v5.bin").with_ephemeral_key(1).without_ephemeral_key_rotation().build() as ring:
         assert ring.current_version == 5 and ring.ephemeral_key_rotation_interval is None
 
@@ -951,11 +953,13 @@ def test_a_key_file_for_another_service_or_tampered_refuses_to_build(native_serv
     with pytest.raises(CryptographicError):
         native_builder(other).with_key_file(3, key_file).build()
 
+    # The last byte is part of the AEAD tag, which no platform's library can check without the KEK,
+    # so the file reads back fine and the build fails at unwrap. (A change to the payload's
+    # structure is refused earlier, when the file is read, as an InvalidKeyFileError.)
     data = bytearray(key_file.read_bytes())
-    data[len(data) // 2] ^= 0x01
+    data[-1] ^= 0x01
     key_file.write_bytes(data)
-    # Refused when the key file is read (a structural byte) or when it is unwrapped (anything else).
-    with pytest.raises((CryptographicError, InvalidKeyFileError)):
+    with pytest.raises(CryptographicError):
         native_builder(native_service).with_key_file(3, key_file).build()
 
 
@@ -1032,7 +1036,9 @@ def test_build_reads_every_key_file_through_the_key_wrapper(tmp_path: Path) -> N
     wrapper = FileReadingKeyWrapper()
     factory = RecordingFactory()
 
-    # Neither file exists: only the key wrapper is asked about them.
+    # Only the key wrapper reads them (the builder still takes each file's age from the file itself).
+    for name in ("v1.bin", "v2.bin"):
+        (tmp_path / name).write_bytes(b"never read by the builder")
     with wrapper_builder(wrapper, factory).with_key_file(2, tmp_path / "v2.bin").with_key_file(1, tmp_path / "v1.bin").build() as ring:
         assert ring.current_version == 2
 
@@ -1051,3 +1057,188 @@ def test_a_key_wrapper_refusing_a_key_file_stops_the_build_before_any_key_is_cre
 
     assert raised.value is error
     assert factory.providers == []
+
+
+# --- Key-file maximum age -----------------------------------------------------------------------
+
+DAY = 24 * 60 * 60
+
+
+def aged_key_file(directory: Path, name: str = "key.bin", contents: bytes = b"wrapped", age_days: float = 0) -> Path:
+    """A key file last written ``age_days`` ago."""
+    path = directory / name
+    path.write_bytes(contents)
+    if age_days:
+        written = time.time() - age_days * DAY
+        os.utime(path, (written, written))
+    return path
+
+
+def test_a_key_stops_encrypting_at_its_deadline_zeroing_the_plaintext_but_keeps_decrypting(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+    now = time.time()
+    deadline = EncryptionDeadline(warn_at=now + 1000, refuse_at=now + 2000, reason="rotate me",
+                                  on_warning=lambda: calls.append("warn"), on_expired=lambda: calls.append("expired"))
+    with DataEncryptionKey(AesGcmCryptoProvider.create(FixedKeyWrapper(), b"wrapped", 60), deadline) as key:
+        ciphertext = key.encrypt(bytearray(b"before"))
+        assert key.check_deadline(now) is False
+        assert calls == []
+
+        monkeypatch.setattr(time, "time", lambda: now + 1500)
+        key.encrypt(bytearray(b"warned"))
+        key.encrypt(bytearray(b"warned again"))
+        assert calls == ["warn"]
+
+        monkeypatch.setattr(time, "time", lambda: now + 2000)
+        plaintext = bytearray(b"refused")
+        with pytest.raises(EncryptionLimitReachedError, match=r"^rotate me$"):
+            key.encrypt(plaintext)
+        assert plaintext == bytearray(len(b"refused"))
+        with pytest.raises(EncryptionLimitReachedError):
+            key.encrypt(bytearray(b"refused again"))
+        assert calls == ["warn", "expired"]
+
+        result = bytearray(6)
+        assert key.decrypt(ciphertext, result) == 6 and result == b"before"
+
+
+def test_a_key_announces_expiry_once_even_when_the_warning_was_skipped_and_ignores_a_throwing_callback() -> None:
+    expired = 0
+
+    def never_called() -> None:
+        raise AssertionError("never called")
+
+    def bad_logger() -> None:
+        nonlocal expired
+        expired += 1
+        raise RuntimeError("bad logger")
+
+    deadline = EncryptionDeadline(warn_at=0, refuse_at=1, reason="old", on_warning=never_called, on_expired=bad_logger)
+    with DataEncryptionKey(AesGcmCryptoProvider.create(FixedKeyWrapper(), b"wrapped", 60), deadline) as key:
+        for _ in range(2):
+            with pytest.raises(EncryptionLimitReachedError, match="old"):
+                key.encrypt(bytearray(b"x"))
+        assert expired == 1
+        assert isinstance(EncryptionLimitReachedError("x"), CryptographicError)
+
+
+def test_a_key_announces_each_deadline_once_under_concurrent_checks() -> None:
+    warned = expired = 0
+    lock = threading.Lock()
+
+    def on_warning() -> None:
+        nonlocal warned
+        with lock:
+            warned += 1
+
+    def on_expired() -> None:
+        nonlocal expired
+        with lock:
+            expired += 1
+
+    key = DataEncryptionKey(AesGcmCryptoProvider.create(FixedKeyWrapper(), b"wrapped", 60),
+                            EncryptionDeadline(warn_at=100, refuse_at=200, reason="old", on_warning=on_warning, on_expired=on_expired))
+    with key:
+        for now in (150, 250):
+            start = threading.Barrier(16)
+
+            def check(at: float = now, barrier: threading.Barrier = start) -> None:
+                barrier.wait()
+                for _ in range(200):
+                    key.check_deadline(at)
+
+            threads = [threading.Thread(target=check) for _ in range(16)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+        assert (warned, expired) == (1, 1)
+
+
+def test_a_key_without_a_deadline_encrypts_without_limit() -> None:
+    with new_key() as key:
+        assert key.deadline is None
+        assert key.check_deadline(1e18) is False
+        assert len(key.encrypt(bytearray(b"hello"))) == 5 + 28
+
+
+def test_the_key_file_max_age_setting_and_its_limits() -> None:
+    assert KeyRingBuilder().key_file_max_age_days == KeyRingBuilder.DEFAULT_KEY_FILE_MAX_AGE_DAYS == 365
+    assert (KeyRingBuilder.MIN_KEY_FILE_MAX_AGE_DAYS, KeyRingBuilder.MAX_KEY_FILE_MAX_AGE_DAYS) == (1, 3650)
+    assert KeyRingBuilder.KEY_FILE_AGE_WARNING_FRACTION == 0.9
+    for days in (1, 3650):
+        assert KeyRingBuilder().with_key_file_max_age_days(days).key_file_max_age_days == days
+    for bad in (0, -1, 3651, True, 1.5):
+        with pytest.raises(ValueError, match="key_file_max_age_days must be between 1 and 3650"):
+            KeyRingBuilder().with_key_file_max_age_days(bad)  # type: ignore[arg-type]
+
+
+def test_build_limits_each_key_file_to_its_age_from_when_it_was_last_written_365_days_by_default(tmp_path: Path) -> None:
+    path = aged_key_file(tmp_path)
+    written = os.stat(path).st_mtime
+    for max_age, days in ((None, 365), (30, 30)):
+        b = builder().with_key_file(1, path)
+        if max_age is not None:
+            b.with_key_file_max_age_days(max_age)
+        with b.build() as ring:
+            key = ring.get(1)
+            assert isinstance(key, DataEncryptionKey) and key.deadline is not None
+            assert key.deadline.refuse_at == written + days * DAY
+            assert key.deadline.warn_at == written + days * DAY * 0.9
+            assert f"more than {days} days ago (key_file_max_age_days)" in key.deadline.reason
+            assert key.deadline.reason.startswith(f"Key file '{path}' (version 1) was last written ")
+
+
+def test_build_reports_a_current_key_file_nearing_its_age_at_startup_once_and_keeps_encrypting(tmp_path: Path) -> None:
+    logger, handler = recording_logger()
+    path = aged_key_file(tmp_path, age_days=340)
+    with builder().with_key_file(1, path).with_logger(logger).build() as ring:
+        (warning,) = handler.with_event_id(HkdfGuardEventId.KEY_FILE_AGE_WARNING)
+        assert warning.levelno == logging.WARNING
+        assert warning.getMessage().startswith(f"Key file '{path}' (version 1) stops encrypting at ")
+        protector = ring.create_protector("aging")
+        assert reveal(protector, protector.encrypt("still fine")) == "still fine"
+        assert len(handler.with_event_id(HkdfGuardEventId.KEY_FILE_AGE_WARNING)) == 1
+        assert handler.with_event_id(HkdfGuardEventId.KEY_FILE_EXPIRED) == []
+
+
+def test_build_refuses_to_encrypt_under_a_current_key_file_past_its_age_reporting_it_at_startup_but_still_decrypts(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = aged_key_file(tmp_path, age_days=20)
+    with builder().with_key_file(1, path).with_key_file_max_age_days(30).build() as before:
+        protector = before.create_protector("expiring")
+        formatted = protector.encrypt("written in time")
+
+        logger, handler = recording_logger()
+        now = time.time()
+        monkeypatch.setattr(time, "time", lambda: now + 15 * DAY)  # now 35 days old
+        with pytest.raises(EncryptionLimitReachedError):
+            protector.encrypt("too late")
+        assert reveal(protector, formatted) == "written in time"
+
+        with builder().with_key_file(1, path).with_key_file_max_age_days(30).with_logger(logger).build() as after:
+            (expired,) = handler.with_event_id(HkdfGuardEventId.KEY_FILE_EXPIRED)
+            assert expired.levelno == logging.CRITICAL
+            assert expired.getMessage() == (f"Key file '{path}' (version 1) has passed its maximum age and no longer encrypts; values under it "
+                                            "still decrypt. Deploy a new key file at a higher version.")
+            with pytest.raises(EncryptionLimitReachedError, match="no longer encrypts") as raised:
+                after.create_protector("expiring").encrypt("too late")
+            assert str(path) in str(raised.value)
+            assert len(handler.with_event_id(HkdfGuardEventId.KEY_FILE_EXPIRED)) == 1
+            assert handler.with_event_id(HkdfGuardEventId.KEY_FILE_AGE_WARNING) == []
+
+
+def test_build_never_reports_a_superseded_key_file_which_never_encrypts(tmp_path: Path) -> None:
+    logger, handler = recording_logger()
+    old, new = aged_key_file(tmp_path, "v1.bin", b"old", age_days=400), aged_key_file(tmp_path, "v2.bin", b"new")
+    with builder().with_key_file(1, old).with_key_file(2, new).with_logger(logger).build() as ring:
+        assert ring.current_version == 2
+        assert handler.records == []
+        protector = ring.create_protector("rotated")
+        assert reveal(protector, protector.encrypt("fine")) == "fine"
+
+
+def test_build_puts_no_age_limit_on_ephemeral_keys() -> None:
+    with builder().with_ephemeral_key(1).without_ephemeral_key_rotation().with_key_file_max_age_days(1).build() as ring:
+        key = ring.get(1)
+        assert isinstance(key, DataEncryptionKey) and key.deadline is None

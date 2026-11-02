@@ -1,0 +1,35 @@
+[project]
+name = "hkdfguard-cache-awssecretsmanager"
+version = "0.9.0"
+description = "A protected read-only cache over AWS Secrets Manager: each secret is read on its first lookup, taken out of the response before botocore can make it a str, encrypted under the key ring's current key and cached only as ciphertext."
+license = "MPL-2.0"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "hkdfguard-abstractions",
+    "hkdfguard-cache",
+    "hkdfguard-diagnostics",
+    "botocore>=1.40",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Security :: Cryptography",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Repository = "https://github.com/runsecure/hkdfguard-python"
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+# hkdfguard is a namespace package shared by every hkdfguard-* distribution, and hkdfguard.cache
+# extends its path to the provider subpackages: only this distribution's own subpackage is packed.
+[tool.hatch.build.targets.wheel]
+only-include = ["src/hkdfguard/cache/awssecretsmanager"]
+sources = ["src"]
+
+[tool.hatch.build]
+# Editable installs put src/ (the namespace root) on the path, not src/hkdfguard.
+dev-mode-dirs = ["src"]

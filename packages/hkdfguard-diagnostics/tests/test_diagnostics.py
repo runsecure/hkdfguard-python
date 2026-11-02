@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterator
+from datetime import UTC, datetime
 
 import pytest
 from hkdfguard.diagnostics import (
@@ -13,6 +14,7 @@ from hkdfguard.diagnostics import (
     HkdfGuardLog,
     HkdfGuardTelemetry,
     MetricNames,
+    SpanNames,
     record_exception,
 )
 from opentelemetry.sdk.metrics import MeterProvider
@@ -193,7 +195,29 @@ def test_event_ids_match_every_port() -> None:
         "EPHEMERAL_KEY_RETIRED": 8,
         "EPHEMERAL_KEY_RETIREMENT_FAILED": 9,
         "ENCRYPTION_BUDGET_WARNING": 10,
+        "KEY_FILE_AGE_WARNING": 11,
+        "KEY_FILE_EXPIRED": 12,
+        "BACKGROUND_TASK_TERMINATED": 13,
     }
+
+
+def test_background_task_terminated_writes_a_critical_entry_carrying_the_exception() -> None:
+    logger, handler = recording_logger()
+    failure = SystemExit(3)
+
+    HkdfGuardLog.background_task_terminated(logger, "background key refresh", "Key access has been suspended.", failure)
+
+    record = _single(handler)
+    assert record.levelno == logging.CRITICAL
+    assert _event_id(record) == 13
+    assert record.getMessage() == ("The background key refresh stopped unexpectedly and will not run again until the process restarts. "
+                                   "Key access has been suspended.")
+    assert record.exc_info is not None and record.exc_info[1] is failure
+
+
+def test_cache_span_names_match_every_port() -> None:
+    assert (SpanNames.Cache.ADD, SpanNames.Cache.ADD_OR_UPDATE, SpanNames.Cache.DECRYPT, SpanNames.Cache.POPULATE) == (
+        "hkdfguard.cache.add", "hkdfguard.cache.add_or_update", "hkdfguard.cache.decrypt", "hkdfguard.cache.populate")
 
 
 def test_a_record_carries_its_event_id_as_a_plain_int() -> None:
@@ -266,6 +290,12 @@ def test_key_access_suspended_writes_a_critical_entry() -> None:
      "Ephemeral key version 3 was removed from the ring, but disposing it failed."),
     (lambda lg: HkdfGuardLog.encryption_budget_warning(lg, 2, 10), 10, logging.WARNING,
      "This key has performed 2 encryptions of its 10 AES-GCM limit; rotate it before the limit, when it stops encrypting."),
+    (lambda lg: HkdfGuardLog.key_file_age_warning(lg, 3, "/etc/app/key.v3", datetime(2027, 1, 2, tzinfo=UTC)), 11, logging.WARNING,
+     "Key file '/etc/app/key.v3' (version 3) stops encrypting at 2027-01-02T00:00:00.000Z, when it reaches its maximum age; "
+     "deploy a new key file at a higher version before then."),
+    (lambda lg: HkdfGuardLog.key_file_expired(lg, 3, "/etc/app/key.v3"), 12, logging.CRITICAL,
+     "Key file '/etc/app/key.v3' (version 3) has passed its maximum age and no longer encrypts; values under it still decrypt. "
+     "Deploy a new key file at a higher version."),
 ])
 def test_every_entry_carries_its_event_id_level_and_message(log, event_id: int, level: int, message: str) -> None:  # type: ignore[no-untyped-def]
     logger, handler = recording_logger()

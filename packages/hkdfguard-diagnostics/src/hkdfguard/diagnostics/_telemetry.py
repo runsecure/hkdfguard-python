@@ -133,8 +133,11 @@ class HkdfGuardTelemetry:
 
 class CacheMetrics:
     """Cache component instruments, on :attr:`HkdfGuardTelemetry.CACHE`'s meter. ``operations``
-    counts every ProtectedCache add/add_or_update, tagged with :attr:`AttributeNames.OPERATION_NAME`
-    and :attr:`AttributeNames.RESULT` (``"success"`` or ``"error"``)."""
+    counts every ProtectedCache add/add_or_update and every fetch a populating cache (a
+    RemoteSecretCache, such as the AWS Secrets Manager, Azure Key Vault, Google Secret Manager and
+    HashiCorp Vault secret caches) makes on a miss, tagged with :attr:`AttributeNames.OPERATION_NAME`
+    (which :class:`SpanNames.Cache` constant ran) and :attr:`AttributeNames.RESULT` (``"success"`` or
+    ``"error"``, or ``"not_found"`` for a fetch whose source has no such value)."""
 
     OPERATIONS_UNIT: Final = "{operation}"
     OPERATIONS_DESCRIPTION: Final = "Number of ProtectedCache operations, tagged by operation and result."

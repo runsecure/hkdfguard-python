@@ -306,6 +306,19 @@ def private_key_directory(environ: Mapping[str, str] | None = None) -> Iterator[
         shutil.rmtree(directory, ignore_errors=True)
 
 
+def write_key_file(path: Path, contents: bytes) -> Path:
+    """Writes a key file the way hkdfguard wrap does: readable and writable by its owner only (0600),
+    whatever the process's umask, replacing any existing file's contents and mode. The Linux library
+    refuses (ERR_FILE_UNTRUSTED, -39) a key file another account could rewrite, and an Ubuntu desktop
+    session's umask of 002 would otherwise leave a Python-written file group-writable (0664)."""
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0), 0o600)
+    with os.fdopen(descriptor, "wb") as stream:
+        stream.write(contents)
+    if sys.platform != "win32":
+        os.chmod(path, 0o600)  # the mode given to os.open applies only when it creates the file, and less the umask
+    return path
+
+
 @contextmanager
 def key_directory(tmp_path: Path) -> Iterator[Path]:
     """Where a test writes a file the native library reads (hkdfguard_open_file, read_key_file) or the

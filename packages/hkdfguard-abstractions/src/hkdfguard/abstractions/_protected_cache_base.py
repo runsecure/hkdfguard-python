@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import threading
-from collections.abc import Buffer
+from collections.abc import Buffer, Iterator
+from contextlib import contextmanager
 
 from hkdfguard.abstractions._buffers import ArrayUtility, Utf8, WritableBuffer
 from hkdfguard.abstractions._interfaces import KeyRing, KeyTrackingValue, ProtectedReadOnlyCache
@@ -16,7 +17,9 @@ class ProtectedCacheBase(ProtectedReadOnlyCache):
     through, a thread-safe map of encrypted entries keyed by name, and the encrypt/decrypt/telemetry
     logic every concrete cache needs. decrypt and find_max_decrypted_length fall back to
     :meth:`_try_populate` on a miss - by default nothing, but a subclass backed by an external source
-    overrides it to fetch a value and encrypt it in on demand.
+    overrides it to fetch a value and encrypt it in on demand. decrypt_async and
+    find_max_decrypted_length_async fall back to :meth:`_try_populate_async` instead, which calls
+    _try_populate unless it is overridden too.
 
     **Keys come from the ring, so the cache follows rotation.** Every value is encrypted under the
     ring's current key when stored, and its entry records that version; decrypt uses exactly that
@@ -67,6 +70,15 @@ class ProtectedCacheBase(ProtectedReadOnlyCache):
         :meth:`_put_entry` for this same name) before returning ``True``."""
         return False
 
+    async def _try_populate_async(self, name: str) -> bool:
+        """:meth:`_try_populate` for decrypt_async/find_max_decrypted_length_async: override it too,
+        to do the same without blocking the event loop. The default calls _try_populate. Cancelling
+        the lookup cancels this coroutine.
+
+        :returns: ``True`` if ``name`` was populated as a result of this call
+        """
+        return self._try_populate(name)
+
     def _put_entry(self, name: str, entry: KeyTrackingValue) -> None:
         """Stores an entry from :meth:`_encrypt`/:meth:`_encrypt_text` for this same name, replacing any."""
         with self._lock:
@@ -96,21 +108,45 @@ class ProtectedCacheBase(ProtectedReadOnlyCache):
             return entry
         return self._get_entry(name) if self._try_populate(name) else None
 
+    async def _find_entry_async(self, name: str) -> KeyTrackingValue | None:
+        # _find_entry through _try_populate_async; cancelling the lookup cancels the population.
+        entry = self._get_entry(name)
+        if entry is not None:
+            return entry
+        return self._get_entry(name) if await self._try_populate_async(name) else None
+
     def decrypt(self, name: str, result: WritableBuffer) -> int:
         """:raises KeyNotFoundError: the entry's key version is no longer in the ring"""
-        telemetry = HkdfGuardTelemetry.ROOT
-        with telemetry.start_span(SpanNames.Cache.DECRYPT) as span:
-            if telemetry.sensitive_logging_enabled:
-                telemetry.log_sensitive_operation(span, SpanNames.Cache.DECRYPT, {AttributeNames.NAME: str(name)})
-
+        with self._decrypt_span(name):
             entry = self._find_entry(name)
-            if entry is None:
-                return 0
-            return self._key_ring.get(entry.key_version).decrypt(entry.value, result, aad=self.aad_for(name))
+            return 0 if entry is None else self._decrypt_entry(name, entry, result)
 
     def find_max_decrypted_length(self, name: str) -> int | None:
         entry = self._find_entry(name)
         return None if entry is None else len(entry.value)
+
+    async def decrypt_async(self, name: str, result: WritableBuffer) -> int:
+        """:raises KeyNotFoundError: the entry's key version is no longer in the ring"""
+        # The span is current across the await: OpenTelemetry's context lives in contextvars, which
+        # follow the task.
+        with self._decrypt_span(name):
+            entry = await self._find_entry_async(name)
+            return 0 if entry is None else self._decrypt_entry(name, entry, result)
+
+    async def find_max_decrypted_length_async(self, name: str) -> int | None:
+        entry = await self._find_entry_async(name)
+        return None if entry is None else len(entry.value)
+
+    @contextmanager
+    def _decrypt_span(self, name: str) -> Iterator[None]:
+        telemetry = HkdfGuardTelemetry.ROOT
+        with telemetry.start_span(SpanNames.Cache.DECRYPT) as span:
+            if telemetry.sensitive_logging_enabled:
+                telemetry.log_sensitive_operation(span, SpanNames.Cache.DECRYPT, {AttributeNames.NAME: str(name)})
+            yield
+
+    def _decrypt_entry(self, name: str, entry: KeyTrackingValue, result: WritableBuffer) -> int:
+        return self._key_ring.get(entry.key_version).decrypt(entry.value, result, aad=self.aad_for(name))
 
     def _encrypt(self, name: str, plaintext: WritableBuffer) -> KeyTrackingValue:
         """Encrypts ``plaintext`` under the ring's current key, bound to ``name`` - store the result
