@@ -1,6 +1,6 @@
 [project]
 name = "hkdfguard-keywrapping-hashicorpvault"
-version = "0.9.0"
+version = "0.9.1"
 description = "Wraps DEKs under one key in a HashiCorp Vault transit secrets engine, through the standard library's HTTP client, reading key files only from where no untrusted account could have replaced them."
 license = "MPL-2.0"
 readme = "README.md"

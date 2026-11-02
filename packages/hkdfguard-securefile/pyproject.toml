@@ -1,6 +1,6 @@
 [project]
 name = "hkdfguard-securefile"
-version = "0.9.0"
+version = "0.9.1"
 description = "Reads a wrapped-key file only from where no untrusted account could have written or replaced it: the native library's key-file checks, in Python."
 license = "MPL-2.0"
 readme = "README.md"

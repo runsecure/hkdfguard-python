@@ -1,6 +1,6 @@
 [project]
 name = "hkdfguard-hashicorpvault-common"
-version = "0.9.0"
+version = "0.9.1"
 description = "What every HkdfGuard integration with HashiCorp Vault shares: the address, path and token checks, the retry limits and backoff, and the error Vault's refusals are reported as."
 license = "MPL-2.0"
 readme = "README.md"
