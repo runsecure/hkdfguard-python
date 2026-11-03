@@ -11,6 +11,7 @@ from hkdfguard.integration.hashicorpvault import (
     MAX_RETRY_COUNT,
     MAX_RETRY_DELAY,
     MIN_RETRY_COUNT,
+    VaultConnectionOptions,
     VaultRequestError,
     api_base,
     check_connection_options,
@@ -21,14 +22,9 @@ from hkdfguard.integration.hashicorpvault import (
 )
 
 
-@dataclass(frozen=True, slots=True)
-class Options:
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Options(VaultConnectionOptions):
     mount_path: str = "transit"
-    namespace: str | None = None
-    timeout: timedelta = timedelta(seconds=30)
-    retry_count: int = MIN_RETRY_COUNT
-    retry_delay: timedelta = timedelta(milliseconds=200)
-    ssl_context: ssl.SSLContext | None = None
 
 
 # --- api_base ----------------------------------------------------------------------------------

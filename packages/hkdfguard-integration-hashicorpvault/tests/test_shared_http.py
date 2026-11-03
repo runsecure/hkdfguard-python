@@ -22,7 +22,6 @@ from hkdfguard.integration.hashicorpvault._http import (
     REQUEST_HEADER,
     VaultConnector,
     _NamedHttpsConnection,
-    check_tls_options,
     decrypt_token,
     put_protected_token,
     put_request,
@@ -30,6 +29,7 @@ from hkdfguard.integration.hashicorpvault._http import (
     set_remaining,
     with_retries,
 )
+from hkdfguard.integration.hashicorpvault._tls import check_tls_options
 
 TOKEN = "hvs.example-token"
 

@@ -1,6 +1,17 @@
-"""The exceptions Vault's refusals, and answers that aren't what was expected, are reported as."""
+"""The exceptions Vault's refusals, and answers that aren't what was expected, are reported as, and
+how every Vault integration reads and describes a refusal."""
 
 from __future__ import annotations
+
+import http
+from collections.abc import Sequence
+from typing import Final
+
+from hkdfguard.abstractions import JsonReader, JsonToken, MalformedJsonError
+
+MAX_ERROR_BODY_LENGTH: Final = 64 * 1024
+"""The largest refusal body an integration reads the errors out of; one cut off there reads as not
+Vault's JSON."""
 
 
 class VaultRequestError(Exception):
@@ -102,3 +113,71 @@ class VaultJsonError(ValueError):
     :class:`~hkdfguard.integration.hashicorpvault.VaultClient` method reads: malformed, or a value of
     another type where a model expects an object, a number or a date-time. Its message never quotes
     the response, which may hold a secret."""
+
+
+def read_errors(body: memoryview) -> list[str] | None:
+    """The errors a refusal's body lists: the elements of its top-level ``errors`` array - a string
+    as its text, anything else as its JSON text - or, failing those, its ``error`` string, as
+    vault-client-go reads them. Empty if the body is a JSON object listing neither; ``None`` if it
+    isn't a JSON object (a proxy's HTML page, say) or ``errors`` isn't an array. A refusal holds no
+    secret, so its strings may become ``str``; never use this on a body that may hold one."""
+    reader = JsonReader(body)
+    try:
+        if not reader.read() or reader.token() is not JsonToken.START_OBJECT:
+            return None
+
+        errors: list[str] = []
+        error: str | None = None
+        while reader.read() and reader.token() is JsonToken.PROPERTY_NAME:
+            if reader.value_text_equals("errors"):
+                reader.read()
+                if reader.token() is not JsonToken.START_ARRAY:
+                    return None
+                errors = _read_elements(reader, body)
+            elif reader.value_text_equals("error"):
+                reader.read()
+                if reader.token() is JsonToken.STRING:
+                    error = reader.get_string()
+                else:
+                    reader.skip()
+            else:
+                reader.read()
+                reader.skip()
+
+        # Anything after the object makes it not JSON.
+        if reader.read():
+            return None
+    except MalformedJsonError:
+        return None
+    if not errors and error:
+        return [error]
+    return errors
+
+
+def _read_elements(reader: JsonReader, body: memoryview) -> list[str]:
+    # The array the reader is on: a string as its text, anything else as its JSON text.
+    elements: list[str] = []
+    while reader.read() and reader.token() is not JsonToken.END_ARRAY:
+        start = reader.token_start
+        if reader.token() is JsonToken.STRING:
+            elements.append(reader.get_string())
+            continue
+        reader.skip()
+        elements.append(bytes(body[start:reader.bytes_consumed]).decode("utf-8", "replace"))
+    return elements
+
+
+def reason_phrase(status: int) -> str:
+    """A space and the status's reason, as Go's http.StatusText gives it - ``" Not Found"`` for 404;
+    empty for a status without one."""
+    try:
+        return " " + http.HTTPStatus(status).phrase
+    except ValueError:
+        return ""
+
+
+def describe_status(status: int, errors: Sequence[str] | None, separator: str = "; ") -> str:
+    """``"403 Forbidden: permission denied"``: the status, its reason and the errors Vault listed,
+    joined by ``separator``; just the status and reason if it listed none."""
+    detail = ": " + separator.join(errors) if errors else ""
+    return f"{status}{reason_phrase(status)}{detail}"

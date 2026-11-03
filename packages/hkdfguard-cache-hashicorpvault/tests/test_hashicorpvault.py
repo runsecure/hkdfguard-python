@@ -21,19 +21,12 @@ from urllib.parse import urlsplit
 import pytest
 from hkdfguard.abstractions import DataProtector, KeyWrapper, ObjectClosedError, ProtectedReadOnlyCache, WritableBuffer
 from hkdfguard.cache import InvalidSecretDataError, ProtectedCache, ProtectedCacheCollection
-from hkdfguard.cache.hashicorpvault import (
-    HashiCorpVaultSecretCache,
-    HashiCorpVaultSecretCacheOptions,
-    StaticVaultToken,
-    VaultKvVersion,
-    VaultRequestError,
-    VaultTlsOptions,
-    VaultTokenProvider,
-)
+from hkdfguard.cache.hashicorpvault import HashiCorpVaultSecretCache, HashiCorpVaultSecretCacheOptions, VaultKvVersion
 from hkdfguard.cryptoprovider.aesgcm256 import AesGcmCryptoProvider
 from hkdfguard.dataencryptionkey import DataEncryptionKey, DefaultFormatProvider
 from hkdfguard.dataencryptionkey import KeyRing as DefaultKeyRing
 from hkdfguard.diagnostics import AttributeNames, HkdfGuardEventId, HkdfGuardLog, HkdfGuardTelemetry, MetricNames, SpanNames
+from hkdfguard.integration.hashicorpvault import StaticVaultToken, VaultRequestError, VaultTlsOptions, VaultTokenProvider
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader, NumberDataPoint
 from opentelemetry.sdk.trace import TracerProvider
@@ -946,12 +939,12 @@ def test_a_response_that_cant_be_trusted_is_refused_and_not_retried(vault: FakeV
 
 @pytest.mark.parametrize(("status", "body", "expected"), [
     (404, '{"errors":["no handler for route \\"nope/data/item\\". route entry not found."]}', "no handler for route"),
-    (404, "<html>Not Found</html>", "HTTP 404"),
+    (404, "<html>Not Found</html>", "Vault refused to read 'item': 404 Not Found"),
     (503, '{"errors":["Vault is sealed"]}', "Vault is sealed"),
-    (500, '["internal"]', "HTTP 500"),
-    (500, '{"errors":"internal"}', "HTTP 500"),
-    (307, "", "HTTP 307"),
-    (502, '{"request_id":"x"}', "HTTP 502"),
+    (500, '["internal"]', "Vault refused to read 'item': 500 Internal Server Error"),
+    (500, '{"errors":"internal"}', "Vault refused to read 'item': 500 Internal Server Error"),
+    (307, "", "Vault refused to read 'item': 307 Temporary Redirect"),
+    (502, '{"request_id":"x"}', "Vault refused to read 'item': 502 Bad Gateway"),
 ])
 def test_any_other_answer_raises_with_vaults_status_and_errors(vault: FakeVault, create: Create, status: int, body: str, expected: str) -> None:
     cache = create()

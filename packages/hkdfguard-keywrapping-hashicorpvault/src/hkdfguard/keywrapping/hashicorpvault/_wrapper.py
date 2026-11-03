@@ -3,14 +3,10 @@
 from __future__ import annotations
 
 import base64
-import http
 import http.client
 import os
 import re
-import socket
-import time
 from collections.abc import Buffer
-from datetime import timedelta
 from types import TracebackType
 from typing import ClassVar, Final, Self
 
@@ -35,7 +31,8 @@ from hkdfguard.integration.hashicorpvault import (
     is_valid_segment,
     is_valid_token,
 )
-from hkdfguard.integration.hashicorpvault._http import VaultConnector, check_tls_options, put_request, put_token, set_remaining, with_retries
+from hkdfguard.integration.hashicorpvault._errors import describe_status, read_errors
+from hkdfguard.integration.hashicorpvault._http import DeadlineBody, VaultConnector, exchange, put_token, read_body, with_retries
 from hkdfguard.keywrapping.hashicorpvault._options import HashiCorpVaultTransitKeyWrapperOptions
 from hkdfguard.securefile import KeyFileTrust, TrustedKeyFile
 
@@ -191,7 +188,6 @@ class HashiCorpVaultTransitKeyWrapper(KeyWrapper):
         self._body_suffix = (b'","associated_data":"' + base64.b64encode(context_bytes) + b'"}') if self._has_context else b'"}'
         self._namespace = options.namespace
         self._timeout = options.timeout
-        self._timeout_seconds = options.timeout.total_seconds()
         self._retry_count = options.retry_count
         self._retry_delay = options.retry_delay
         self._connector = VaultConnector(https, host, port, options.timeout, options.ssl_context, options.tls)
@@ -369,47 +365,31 @@ class HashiCorpVaultTransitKeyWrapper(KeyWrapper):
         # One attempt: one request, and Vault's whole response, within the attempt's timeout. A
         # successful response is returned in a bytearray; any other is raised as a VaultRequestError
         # carrying Vault's status and errors.
-        deadline = time.monotonic() + self._timeout_seconds
-        connection = self._connector.connect()
-        try:
-            put_request(connection, "POST", path, self._namespace)
+        def headers(connection: http.client.HTTPConnection) -> None:
             connection.putheader("Content-Type", "application/json")
             connection.putheader("Content-Length", str(len(body)))
             # Checked by _post - printable ASCII, nothing to escape - so handed over as it is. http.client
             # copies it into the header line (see the class comment); the bytearray is zeroed by _post.
             put_token(connection, token)
-            # Sent from body itself, not a copy: http.client hands a buffer straight to the socket.
-            connection.endheaders(body)
-            sock = connection.sock
-            if sock is None:
-                raise ConnectionError("The connection to Vault was closed before its answer.")
-            set_remaining(sock, deadline, lambda: _timed_out(self._timeout))
-            response = connection.getresponse()
-            try:
-                return self._read_response(response, sock, deadline)
-            finally:
-                response.close()
-        finally:
-            connection.close()
 
-    def _read_response(self, response: http.client.HTTPResponse, sock: socket.socket, deadline: float) -> tuple[bytearray, int]:
+        with exchange(self._connector, "POST", path, self._namespace, self._timeout, headers=headers, body=body) as (status, response):
+            return self._read_response(status, response)
+
+    def _read_response(self, status: int, response: DeadlineBody) -> tuple[bytearray, int]:
         # One byte over the limit, so a body that doesn't fit is noticed rather than truncated.
         buffer = bytearray(self.MAX_RESPONSE_LENGTH + 1)
         handed_over = False
         try:
-            length = _read_body(response, sock, deadline, buffer, self._timeout)
+            length = read_body(response, buffer)
             if length > self.MAX_RESPONSE_LENGTH:
                 raise CryptographicError(f"Vault's answer for key '{self._key_name}' is over {self.MAX_RESPONSE_LENGTH} bytes; "
                                          "a transit answer is far smaller.")
 
-            status = response.status
             if 200 <= status < 300:
                 handed_over = True
                 return buffer, length
 
-            errors = _read_errors(memoryview(buffer)[:length])
-            detail = ": " + "; ".join(errors) if errors else ""
-            raise VaultRequestError(f"Vault answered {status}{_phrase(status)}{detail}", status)
+            raise VaultRequestError(f"Vault answered {describe_status(status, read_errors(memoryview(buffer)[:length]))}", status)
         finally:
             if not handed_over:
                 ArrayUtility.zero_memory(buffer)
@@ -578,74 +558,7 @@ def _decode_base64(encoded: memoryview, destination: bytearray) -> int:
     return written
 
 
-def _read_body(response: http.client.HTTPResponse, sock: socket.socket, deadline: float, buffer: bytearray, timeout: timedelta) -> int:
-    # Reads the response body into buffer until it ends or buffer is full, each read waiting at most
-    # the time left; a body shorter than its Content-Length is a lost connection, not the end.
-    expected = response.length
-    view = memoryview(buffer)
-    length = 0
-    while length < len(buffer) and not response.isclosed():
-        set_remaining(sock, deadline, lambda: _timed_out(timeout))
-        try:
-            read = response.readinto(view[length:])
-        except http.client.IncompleteRead:
-            # Its partial bytes may hold a DEK: neither kept nor chained.
-            raise ConnectionError("The connection was lost during Vault's response.") from None
-        except TimeoutError:
-            raise _timed_out(timeout) from None
-        if read == 0:
-            if expected is not None and length < expected:
-                raise ConnectionError("The connection was lost during Vault's response.")
-            break
-        length += read
-    return length
-
-
-def _read_errors(body: memoryview) -> list[str] | None:
-    # The errors Vault listed in an error response; None if it isn't Vault's JSON. An error response
-    # holds no key material, so its strings may become str.
-    reader = JsonReader(body)
-    try:
-        if not reader.read() or reader.token() is not JsonToken.START_OBJECT:
-            return None
-
-        found: list[str] = []
-        while reader.read() and reader.token() is JsonToken.PROPERTY_NAME:
-            is_errors = reader.value_text_equals("errors")
-            reader.read()
-            if not is_errors:
-                reader.skip()
-            elif reader.token() is not JsonToken.START_ARRAY:
-                return None
-            else:
-                found = []
-                while reader.read() and reader.token() is not JsonToken.END_ARRAY:
-                    start = reader.token_start
-                    if reader.token() is JsonToken.STRING:
-                        found.append(reader.get_string())
-                        continue
-                    reader.skip()
-                    found.append(bytes(body[start:reader.bytes_consumed]).decode("utf-8", "replace"))
-
-        # Anything after the object makes it not JSON.
-        return None if reader.read() else found
-    except MalformedJsonError:
-        return None
-
-
-def _phrase(status: int) -> str:
-    try:
-        return " " + http.HTTPStatus(status).phrase
-    except ValueError:
-        return ""
-
-
-def _timed_out(timeout: timedelta) -> TimeoutError:
-    return TimeoutError(f"Vault's response took longer than {timeout}.")
-
-
 def _check(options: HashiCorpVaultTransitKeyWrapperOptions) -> None:
     if not isinstance(options, HashiCorpVaultTransitKeyWrapperOptions):
         raise TypeError("options must be HashiCorpVaultTransitKeyWrapperOptions.")
     check_connection_options(options)
-    check_tls_options(options.ssl_context, options.tls)

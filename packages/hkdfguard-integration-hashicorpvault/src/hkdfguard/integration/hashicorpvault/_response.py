@@ -13,7 +13,7 @@ from typing import Self
 
 from hkdfguard.abstractions import ArrayUtility, CryptographicError, DataProtector, JsonReader, JsonToken, MalformedJsonError
 from hkdfguard.integration.hashicorpvault._connection import is_valid_token
-from hkdfguard.integration.hashicorpvault._errors import VaultJsonError, VaultResponseError
+from hkdfguard.integration.hashicorpvault._errors import VaultJsonError, VaultResponseError, describe_status, read_errors
 from hkdfguard.integration.hashicorpvault._json import JsonValue
 from hkdfguard.integration.hashicorpvault._token_provider import StaticVaultToken
 
@@ -223,24 +223,14 @@ def read_response[T](body: memoryview, token_protector: DataProtector, reader: C
 
 
 def response_error(status: int, body: memoryview, method: str, url: str) -> VaultResponseError:
-    """The error a refusal is reported as: the errors ``body`` lists, as {"errors":[...]} or
-    {"error":"..."}; failing those, the body itself."""
-    reason = reason_phrase(status)
-    errors = _read_errors(body)
+    """The error a refusal is reported as: the errors ``body`` lists (:func:`read_errors`); failing
+    those, the body itself."""
+    errors = read_errors(body)
     if errors:
-        return VaultResponseError(f"{status}{reason}: {', '.join(errors)}", status, errors, None, method, url)
+        return VaultResponseError(describe_status(status, errors, ", "), status, errors, None, method, url)
     raw = bytes(body) if len(body) else None
-    message = f"{status}{reason}" if raw is None else f"{status}{reason}: {raw.decode('utf-8', 'replace')}"
+    message = describe_status(status, None) if raw is None else f"{describe_status(status, None)}: {raw.decode('utf-8', 'replace')}"
     return VaultResponseError(message, status, [], raw, method, url)
-
-
-def reason_phrase(status: int) -> str:
-    """" Not Found" for 404: the space and the status's reason, as Go's http.StatusText; "" for one
-    without a name."""
-    try:
-        return " " + http.HTTPStatus(status).phrase
-    except ValueError:
-        return ""
 
 
 def _is_envelope(body: memoryview) -> bool:
@@ -337,51 +327,3 @@ def _protect_token(json: JsonReader, token_protector: DataProtector) -> StaticVa
                 raise VaultJsonError(f"Vault's token couldn't be protected: {type(error).__name__}.") from None
     finally:
         ArrayUtility.zero_memory(unescaped)
-
-
-def _read_errors(body: memoryview) -> list[str] | None:
-    if not len(body):
-        return None
-    try:
-        reader = JsonReader(body)
-        if not reader.read() or reader.token() is not JsonToken.START_OBJECT:
-            return None
-        errors: list[str] | None = None
-        error: str | None = None
-        while reader.read() and reader.token() is JsonToken.PROPERTY_NAME:
-            if reader.value_text_equals("errors"):
-                reader.read()
-                errors = _read_strings(reader)
-            elif reader.value_text_equals("error"):
-                reader.read()
-                if reader.token() is JsonToken.STRING:
-                    error = reader.get_string()
-                else:
-                    reader.skip()
-            else:
-                reader.read()
-                reader.skip()
-        # Anything after the object makes it not JSON: the reader is given the whole body.
-        if reader.read():
-            return None
-    except MalformedJsonError:
-        return None
-    if errors:
-        return errors
-    return [error] if error else None
-
-
-def _read_strings(reader: JsonReader) -> list[str] | None:
-    # A JSON array of strings; None if it is anything else.
-    if reader.token() is not JsonToken.START_ARRAY:
-        reader.skip()
-        return None
-    strings: list[str] = []
-    all_strings = True
-    while reader.read() and reader.token() is not JsonToken.END_ARRAY:
-        if reader.token() is JsonToken.STRING:
-            strings.append(reader.get_string())
-        else:
-            all_strings = False
-            reader.skip()
-    return strings if all_strings else None

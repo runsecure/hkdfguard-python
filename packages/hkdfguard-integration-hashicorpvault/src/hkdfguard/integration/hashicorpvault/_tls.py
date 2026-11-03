@@ -521,3 +521,18 @@ def _not_protected(what: str) -> ValueError:
     return ValueError(f"The {what}'s password isn't protected by password_protector: hand over VaultTlsOptions.protect_password's result, "
                       "never the password itself.")
 
+
+
+def check_tls_options(ssl_context: object, tls: object) -> None:
+    """Refuses an ``ssl_context`` or ``tls`` of the wrong type, or both together: each says how to
+    connect, so one would silently override the other.
+
+    :raises TypeError: ``ssl_context`` isn't an ``ssl.SSLContext`` or ``tls`` a :class:`VaultTlsOptions`
+    :raises ValueError: both are given
+    """
+    if ssl_context is not None and not isinstance(ssl_context, ssl.SSLContext):
+        raise TypeError("ssl_context must be an ssl.SSLContext.")
+    if tls is not None and not isinstance(tls, VaultTlsOptions):
+        raise TypeError("tls must be VaultTlsOptions.")
+    if ssl_context is not None and tls is not None:
+        raise ValueError("ssl_context and tls can't be given together: set the TLS settings with one or the other.")

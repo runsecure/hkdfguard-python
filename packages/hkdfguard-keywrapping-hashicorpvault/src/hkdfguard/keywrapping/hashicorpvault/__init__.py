@@ -1,9 +1,9 @@
 """Wraps and reveals DEKs under one key in a HashiCorp Vault transit secrets engine - encrypt, decrypt
 and datakey/wrapped (the key pinned by its path), through the standard library's ``http.client`` with
 no third-party dependency - and reads key files only from where no untrusted account could have
-written or replaced them (``hkdfguard-securefile``)."""
+written or replaced them (``hkdfguard-securefile``). The token sources, TLS options and the error
+Vault's refusals are reported as are ``hkdfguard-integration-hashicorpvault``'s."""
 
-from hkdfguard.integration.hashicorpvault import StaticVaultTokenSource, VaultRequestError, VaultTlsOptions, VaultTokenSource
 from hkdfguard.keywrapping.hashicorpvault._options import HashiCorpVaultTransitKeyWrapperOptions
 from hkdfguard.keywrapping.hashicorpvault._wrapper import HashiCorpVaultTransitKeyWrapper
 from hkdfguard.securefile import KeyFileTrust
@@ -12,8 +12,4 @@ __all__ = [
     "HashiCorpVaultTransitKeyWrapper",
     "HashiCorpVaultTransitKeyWrapperOptions",
     "KeyFileTrust",
-    "StaticVaultTokenSource",
-    "VaultRequestError",
-    "VaultTlsOptions",
-    "VaultTokenSource",
 ]

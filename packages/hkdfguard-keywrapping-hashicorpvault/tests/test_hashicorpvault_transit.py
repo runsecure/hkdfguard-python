@@ -30,15 +30,8 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from hkdfguard.abstractions import CryptographicError, KeyWrapper, ObjectClosedError, WrappedKeyLimits
 from hkdfguard.cryptoprovider.aesgcm256 import AesGcmCryptoProviderFactory
-from hkdfguard.keywrapping.hashicorpvault import (
-    HashiCorpVaultTransitKeyWrapper,
-    HashiCorpVaultTransitKeyWrapperOptions,
-    KeyFileTrust,
-    StaticVaultTokenSource,
-    VaultRequestError,
-    VaultTlsOptions,
-    VaultTokenSource,
-)
+from hkdfguard.integration.hashicorpvault import StaticVaultTokenSource, VaultRequestError, VaultTlsOptions, VaultTokenSource
+from hkdfguard.keywrapping.hashicorpvault import HashiCorpVaultTransitKeyWrapper, HashiCorpVaultTransitKeyWrapperOptions, KeyFileTrust
 from hkdfguard.keywrapping.hashicorpvault._wrapper import _decode_base64, _encode_base64, is_vault_ciphertext
 from hkdfguard_test_support import long_path
 

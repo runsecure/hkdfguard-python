@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 from abc import ABC, abstractmethod
+from datetime import timedelta
 
 from hkdfguard.abstractions import DataProtector
+from hkdfguard.integration.hashicorpvault._http import run_within
 
 
 class VaultTokenProvider(ABC):
@@ -74,3 +76,42 @@ class StaticVaultToken(VaultTokenProvider):
 
     async def get_token_async(self) -> str:
         return self._protected_token
+
+
+def get_token_within(provider: VaultTokenProvider, timeout: timedelta) -> str:
+    """The protected token ``provider.get_token`` returns, asked for on a thread of its own and waited
+    for at most ``timeout`` (:func:`run_within`). A provider's failure is re-raised as it is.
+
+    :raises TimeoutError: the provider returned no token within ``timeout``
+    :raises RuntimeError: the provider returned no token, or something that isn't a ``str``
+    """
+    token = run_within(provider.get_token, timeout, thread_name="hkdfguard-vault-token",
+                       timeout_message=f"The Vault token provider returned no token within {timeout}.")
+    return _require_token(token)
+
+
+async def get_token_within_async(provider: VaultTokenProvider, timeout: timedelta) -> str:
+    """The protected token ``provider.get_token_async`` returns, cancelled once ``timeout`` passes. A
+    provider's failure - its own ``TimeoutError`` included - is re-raised as it is.
+
+    :raises TimeoutError: the provider returned no token within ``timeout``
+    :raises RuntimeError: the provider returned no token, or something that isn't a ``str``
+    """
+    try:
+        async with asyncio.timeout(timeout.total_seconds()) as deadline:
+            token = await provider.get_token_async()
+    except TimeoutError:
+        if not deadline.expired():
+            raise
+        expired = True
+    else:
+        expired = False
+    if expired:
+        raise TimeoutError(f"The Vault token provider returned no token within {timeout}.")
+    return _require_token(token)
+
+
+def _require_token(token: object) -> str:
+    if not isinstance(token, str) or not token:
+        raise RuntimeError("The Vault token provider returned no token.")
+    return token

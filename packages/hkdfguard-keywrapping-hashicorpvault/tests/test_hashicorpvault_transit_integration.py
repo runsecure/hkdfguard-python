@@ -27,7 +27,8 @@ from pathlib import Path
 import pytest
 from hkdfguard.abstractions import ArrayUtility, CryptographicError, WrappedKeyLimits
 from hkdfguard.cryptoprovider.aesgcm256 import AesGcmCryptoProviderFactory
-from hkdfguard.keywrapping.hashicorpvault import HashiCorpVaultTransitKeyWrapper, HashiCorpVaultTransitKeyWrapperOptions, StaticVaultTokenSource
+from hkdfguard.integration.hashicorpvault import StaticVaultTokenSource
+from hkdfguard.keywrapping.hashicorpvault import HashiCorpVaultTransitKeyWrapper, HashiCorpVaultTransitKeyWrapperOptions
 
 KEY_VARIABLE = "HKDFGUARD_TEST_VAULT_TRANSIT_KEY"
 OTHER_KEY_VARIABLE = "HKDFGUARD_TEST_VAULT_TRANSIT_OTHER_KEY"

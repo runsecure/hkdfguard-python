@@ -1,8 +1,10 @@
 """What the Vault integrations share to make a request: the connection, the headers every request
-carries, the token's header, the retries, and running a caller's code within a timeout."""
+carries, the token's header, one attempt within its deadline and its body read within it, the
+retries, abandoning a cancelled request, and running a caller's code within a timeout."""
 
 from __future__ import annotations
 
+import contextlib
 import http.client
 import itertools
 import secrets
@@ -10,14 +12,14 @@ import socket
 import ssl
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import timedelta
-from typing import Final
+from typing import Final, Protocol
 
 from hkdfguard.abstractions import ArrayUtility, CryptographicError, DataProtector
 from hkdfguard.integration.hashicorpvault._connection import TOKEN_HEADER, is_valid_token, retry_delay
 from hkdfguard.integration.hashicorpvault._errors import VaultRequestError
-from hkdfguard.integration.hashicorpvault._tls import VaultTlsOptions
+from hkdfguard.integration.hashicorpvault._tls import VaultTlsOptions, check_tls_options
 
 REQUEST_HEADER: Final = "X-Vault-Request"
 """Marks every request as Vault's own clients do, so Vault answers an unauthenticated one 403 rather
@@ -25,21 +27,6 @@ than redirecting it to the UI."""
 
 NAMESPACE_HEADER: Final = "X-Vault-Namespace"
 """The header a request's Vault Enterprise namespace is sent in."""
-
-
-def check_tls_options(ssl_context: object, tls: object) -> None:
-    """Refuses an ``ssl_context`` or ``tls`` of the wrong type, or both together: each says how to
-    connect, so one would silently override the other.
-
-    :raises TypeError: ``ssl_context`` isn't an ``ssl.SSLContext`` or ``tls`` a :class:`VaultTlsOptions`
-    :raises ValueError: both are given
-    """
-    if ssl_context is not None and not isinstance(ssl_context, ssl.SSLContext):
-        raise TypeError("ssl_context must be an ssl.SSLContext.")
-    if tls is not None and not isinstance(tls, VaultTlsOptions):
-        raise TypeError("tls must be VaultTlsOptions.")
-    if ssl_context is not None and tls is not None:
-        raise ValueError("ssl_context and tls can't be given together: set the TLS settings with one or the other.")
 
 
 class VaultConnector:
@@ -231,9 +218,184 @@ def run_within[T](action: Callable[[], T], timeout: timedelta, *, thread_name: s
 
 
 def set_remaining(sock: socket.socket, deadline: float, timed_out: Callable[[], BaseException]) -> None:
-    """Lets the next read or write on ``sock`` wait at most until ``deadline`` (``time.monotonic``);
-    raises ``timed_out()`` if it has passed."""
+    """Lets the next read or write on ``sock`` wait at most until ``deadline`` (``time.monotonic``;
+    infinity for no deadline); raises ``timed_out()`` if it has passed."""
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise timed_out()
-    sock.settimeout(remaining)
+    sock.settimeout(None if remaining == float("inf") else remaining)
+
+
+class Abandon:
+    """Abandons a request whose asynchronous call was cancelled: shuts down the socket of the request
+    in flight, so a read blocked on it ends, and stops the waits between retries. Shared by the
+    threads of one call: the one making the request, and the one cancelling it."""
+
+    __slots__ = ("_event", "_lock", "_message", "_sock")
+
+    def __init__(self, message: str) -> None:
+        """:param message: what :meth:`error` says, naming what was cancelled"""
+        self._event = threading.Event()
+        self._lock = threading.Lock()
+        self._sock: socket.socket | None = None
+        self._message = message
+
+    @property
+    def abandoned(self) -> bool:
+        """Whether :meth:`abandon` has been called."""
+        return self._event.is_set()
+
+    def error(self) -> ConnectionAbortedError:
+        """The error an abandoned request fails with."""
+        return ConnectionAbortedError(self._message)
+
+    def wait(self, seconds: float) -> bool:
+        """Waits ``seconds``, or until the request is abandoned; ``True`` if it was."""
+        return self._event.wait(seconds)
+
+    def track(self, sock: socket.socket | None) -> None:
+        """The socket of the request in flight, if any. Raises :meth:`error` if the request was
+        abandoned meanwhile."""
+        with self._lock:
+            self._sock = sock
+        if sock is not None and self.abandoned:
+            raise self.error()
+
+    def abandon(self) -> None:
+        """Abandons the request: no retry follows, and the socket in flight is shut down."""
+        self._event.set()
+        with self._lock:
+            sock = self._sock
+            if sock is not None:
+                # Already closed, the read it would end fails anyway.
+                with contextlib.suppress(OSError):
+                    sock.shutdown(socket.SHUT_RDWR)
+
+
+class Readable(Protocol):
+    """A response body, read as a buffered stream is: ``readinto`` returns 0 at its end."""
+
+    def readinto(self, buffer: memoryview, /) -> int: ...
+
+
+class DeadlineBody:
+    """A response body read within the attempt's deadline: each read waits at most the time left,
+    and a body shorter than its Content-Length is a lost connection, not the end. Its bytes go only
+    into the buffers it is given - never kept, nor quoted in an error - so it can be read straight
+    into a bytearray that is zeroed."""
+
+    __slots__ = ("_abandon", "_deadline", "_expected", "_lost_message", "_read", "_response", "_sock", "_timed_out")
+
+    def __init__(self, response: http.client.HTTPResponse, sock: socket.socket, deadline: float, timed_out: Callable[[], BaseException], *,
+                 lost_message: str, abandon: Abandon | None = None) -> None:
+        """:param sock: the socket the response arrives on (``http.client`` drops its connection's
+            reference once a response that closes it is read, so it is taken before)
+        :param deadline: when the attempt's time is up (``time.monotonic``; infinity for no deadline)
+        :param timed_out: the error a read that would pass the deadline raises
+        :param lost_message: the ``ConnectionError``'s message for a connection lost mid-body
+        :param abandon: the call's :class:`Abandon`; a read once it is abandoned raises its error
+        """
+        self._response = response
+        self._sock = sock
+        self._deadline = deadline
+        self._timed_out = timed_out
+        self._lost_message = lost_message
+        self._abandon = abandon
+        self._expected = response.length
+        self._read = 0
+
+    def readinto(self, buffer: memoryview, /) -> int:
+        """Reads what has arrived of the body into ``buffer``; 0 at its end.
+
+        :raises ConnectionError: the connection was lost before the body's end
+        :raises ConnectionAbortedError: the call was abandoned
+        :raises OSError: reading failed otherwise
+        """
+        if self._response.isclosed():
+            # Read to its end: http.client has closed the socket.
+            return 0
+        set_remaining(self._sock, self._deadline, self._timed_out)
+        lost = False
+        timed_out = False
+        read = 0
+        try:
+            read = self._response.readinto(buffer)
+        except http.client.IncompleteRead:
+            # Its partial bytes may hold a secret: neither kept nor chained.
+            lost = True
+        except TimeoutError:
+            timed_out = True
+        except OSError:
+            if self._abandon is not None and self._abandon.abandoned:
+                raise self._abandon.error() from None
+            raise
+        if self._abandon is not None and self._abandon.abandoned:
+            raise self._abandon.error()
+        if timed_out:
+            raise self._timed_out()
+        if lost or (read == 0 and len(buffer) > 0 and self._expected is not None and self._read < self._expected):
+            raise ConnectionError(self._lost_message)
+        self._read += read
+        return read
+
+
+def read_body(body: Readable, buffer: bytearray) -> int:
+    """Reads ``body`` into ``buffer`` until it ends or ``buffer`` is full, and returns how much it
+    read. Give ``buffer`` a byte more than the most that may be read, to tell a body that doesn't fit
+    from one that just fits."""
+    length = 0
+    with memoryview(buffer) as view:
+        while length < len(buffer):
+            with view[length:] as rest:
+                read = body.readinto(rest)
+            if not read:
+                break
+            length += read
+    return length
+
+
+@contextlib.contextmanager
+def exchange(connector: VaultConnector, method: str, path: str, namespace: str | None, timeout: timedelta, *,
+             headers: Callable[[http.client.HTTPConnection], None] | None = None, body: memoryview | None = None,
+             abandon: Abandon | None = None, description: str | None = None) -> Iterator[tuple[int, DeadlineBody]]:
+    """One attempt, within ``timeout``: a connection of its own, the request - with the headers every
+    Vault request carries (:func:`put_request`), those ``headers`` adds (the token, a body's), and
+    ``body`` - and Vault's status and body (a :class:`DeadlineBody`), both closed as the block exits.
+
+    :param abandon: the call's :class:`Abandon`, given the socket in flight
+    :param description: what the request is, e.g. ``"the read of 'myapp/db'"``, for the errors of
+        one that times out or loses its connection
+    :raises TimeoutError: the attempt took longer than ``timeout``
+    :raises ConnectionError: the connection was lost
+    :raises OSError: or ``http.client.HTTPException``: Vault couldn't be reached, or answered with
+        something that isn't HTTP
+    """
+    deadline = time.monotonic() + timeout.total_seconds()
+    to = f" to {description}" if description else ""
+
+    def timed_out() -> TimeoutError:
+        return TimeoutError(f"Vault's response{to} took longer than {timeout}.")
+
+    connection = connector.connect()
+    try:
+        put_request(connection, method, path, namespace)
+        if headers is not None:
+            headers(connection)
+        # Sent from body itself, not a copy: http.client hands a buffer straight to the socket.
+        connection.endheaders(body)
+        sock = connection.sock
+        if sock is None:
+            raise ConnectionError("The connection to Vault was closed before its answer.")
+        if abandon is not None:
+            abandon.track(sock)
+        set_remaining(sock, deadline, timed_out)
+        response = connection.getresponse()
+        try:
+            yield response.status, DeadlineBody(response, sock, deadline, timed_out, lost_message=f"The connection was lost during Vault's response{to}.",
+                                                abandon=abandon)
+        finally:
+            response.close()
+    finally:
+        if abandon is not None:
+            abandon.track(None)
+        connection.close()

@@ -8,10 +8,8 @@ import contextlib
 import dataclasses
 import http.client
 import importlib.metadata
-import ipaddress
 import logging
 import platform
-import re
 import socket
 import ssl
 import threading
@@ -24,10 +22,20 @@ from typing import Any, ClassVar, Final, Protocol, Self, overload
 from urllib.parse import urljoin, urlsplit
 
 from hkdfguard.abstractions import ArrayUtility, DataProtector
+from hkdfguard.integration.hashicorpvault._connection import is_loopback, parse_address
 from hkdfguard.integration.hashicorpvault._duration import format_go_duration
-from hkdfguard.integration.hashicorpvault._errors import VaultRedirectError, VaultRequestError
+from hkdfguard.integration.hashicorpvault._errors import VaultRedirectError, VaultRequestError, reason_phrase
 from hkdfguard.integration.hashicorpvault._generated import VaultApis
-from hkdfguard.integration.hashicorpvault._http import NAMESPACE_HEADER, REQUEST_HEADER, VaultConnector, check_tls_options, decrypt_token, put_token
+from hkdfguard.integration.hashicorpvault._http import (
+    NAMESPACE_HEADER,
+    REQUEST_HEADER,
+    Abandon,
+    DeadlineBody,
+    VaultConnector,
+    decrypt_token,
+    put_token,
+    set_remaining,
+)
 from hkdfguard.integration.hashicorpvault._json import JsonValue, JsonWriter, SecureBuffer
 from hkdfguard.integration.hashicorpvault._options import (
     VaultClientOptions,
@@ -41,13 +49,14 @@ from hkdfguard.integration.hashicorpvault._options import (
     merge_headers,
 )
 from hkdfguard.integration.hashicorpvault._replication import INDEX_HEADER, ReplicationForwardingMode, ReplicationStateCache
-from hkdfguard.integration.hashicorpvault._response import VaultRawResponse, VaultResponse, read_response, reason_phrase, response_error
+from hkdfguard.integration.hashicorpvault._response import VaultRawResponse, VaultResponse, read_response, response_error
 from hkdfguard.integration.hashicorpvault._retry import default_retry_policy, linear_jitter_backoff
+from hkdfguard.integration.hashicorpvault._tls import check_tls_options
 from hkdfguard.integration.hashicorpvault._token_provider import StaticVaultToken, VaultTokenProvider
 
 _HEALTH_PATH: Final = "/v1/sys/health"
 _DEFAULT_LOGGER: Final = logging.getLogger("hkdfguard.integration.hashicorpvault")
-_IPV4_LITERAL: Final = re.compile(r"\d{1,3}(\.\d{1,3}){3}")
+_ABANDONED: Final = "The Vault request was abandoned: the task awaiting it was cancelled."
 _UNRESERVED: Final = frozenset(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~")
 
 type Query = builtins.list[tuple[str, str]]
@@ -120,37 +129,6 @@ class _DeadlineExceededError(Exception):
     pass
 
 
-class _Abandon:
-    """Abandons a request whose asynchronous call was cancelled: shuts down the socket in flight,
-    and stops the waits between retries."""
-
-    def __init__(self) -> None:
-        self._event = threading.Event()
-        self._lock = threading.Lock()
-        self._sock: socket.socket | None = None
-
-    @property
-    def abandoned(self) -> bool:
-        return self._event.is_set()
-
-    def wait(self, seconds: float) -> bool:
-        return self._event.wait(seconds)
-
-    def track(self, sock: socket.socket | None) -> None:
-        with self._lock:
-            self._sock = sock
-        if sock is not None and self.abandoned:
-            raise _abandoned()
-
-    def abandon(self) -> None:
-        self._event.set()
-        with self._lock:
-            sock = self._sock
-            if sock is not None:
-                with contextlib.suppress(OSError):
-                    sock.shutdown(socket.SHUT_RDWR)
-
-
 @dataclass(slots=True)
 class _Target:
     # Where a request goes: scheme, host and port, and the path with its query.
@@ -170,6 +148,8 @@ class _Sent:
     request: VaultRequest
     connection: http.client.HTTPConnection
     response: http.client.HTTPResponse
+    # Taken before the response is read: http.client drops the connection's once one that closes it is.
+    sock: socket.socket
 
 
 class VaultClient(VaultApis):
@@ -227,7 +207,7 @@ class VaultClient(VaultApis):
             options = VaultClientOptions()
         if not isinstance(options, VaultClientOptions):
             raise TypeError("options must be VaultClientOptions.")
-        self._https, self._host, self._port, self._prefix = _base_address(options)
+        self._https, self._host, self._port, self._prefix = parse_address(options.address, allow_unencrypted_http=bool(options.allow_unencrypted_http))
         if not isinstance(options.request_timeout, timedelta) or options.request_timeout < timedelta(0):
             raise ValueError(f"The request timeout must not be negative; it is {options.request_timeout}.")
         if options.retry.retry_wait_min < timedelta(0) or options.retry.retry_wait_max < timedelta(0):
@@ -421,7 +401,7 @@ class VaultClient(VaultApis):
         checked for an error status, and its body not bound by
         :attr:`VaultClientOptions.request_timeout` - for a large or streamed body. Close it once read."""
         work = self._raw(v1_path(_require_str(path, "path")), options)
-        return work(_Abandon())
+        return work(_abandon())
 
     async def read_raw_async(self, path: str, options: VaultRequestOptions | None = None) -> VaultRawResponse:
         """:meth:`read_raw` without blocking the event loop while Vault answers."""
@@ -441,7 +421,7 @@ class VaultClient(VaultApis):
     def write_from_bytes(self, path: str, body: Buffer, options: VaultRequestOptions | None = None) -> VaultResponse[JsonDict] | None:
         """Writes ``body`` as it is to ``path`` (POST /v1/path). It is sent from the buffer itself,
         every attempt: leave it unchanged until this returns, then clear it if it holds a secret."""
-        return self._bytes(path, body, options)(_Abandon())
+        return self._bytes(path, body, options)(_abandon())
 
     async def write_from_bytes_async(self, path: str, body: Buffer, options: VaultRequestOptions | None = None) -> VaultResponse[JsonDict] | None:
         """:meth:`write_from_bytes` without blocking the event loop."""
@@ -450,7 +430,7 @@ class VaultClient(VaultApis):
     def write_from_stream(self, path: str, body: _Readable, options: VaultRequestOptions | None = None) -> VaultResponse[JsonDict] | None:
         """Writes what ``body`` (a binary stream) holds to ``path`` (POST /v1/path). It's read whole
         first - into a bytearray zeroed afterwards - so a retry can send it again. ``body`` isn't closed."""
-        return self._stream(path, body, options)(_Abandon())
+        return self._stream(path, body, options)(_abandon())
 
     async def write_from_stream_async(self, path: str, body: _Readable, options: VaultRequestOptions | None = None) -> VaultResponse[JsonDict] | None:
         """:meth:`write_from_stream` without blocking the event loop."""
@@ -515,11 +495,11 @@ class VaultClient(VaultApis):
         with self._modifiers_lock:
             self._modifiers = dataclasses.replace(self._modifiers, **changes)
 
-    def _raw(self, path: str, options: VaultRequestOptions | None) -> Callable[[_Abandon], VaultRawResponse]:
+    def _raw(self, path: str, options: VaultRequestOptions | None) -> Callable[[Abandon], VaultRawResponse]:
         modifiers = self._modifiers.merge(options)
         query = query_parameters(options)
 
-        def work(abandon: _Abandon) -> VaultRawResponse:
+        def work(abandon: Abandon) -> VaultRawResponse:
             sent = self._send_core("GET", path, None, query, modifiers, _deadline(self._options.request_timeout), abandon)
             # The body isn't bound by the timeout.
             if sent.connection.sock is not None:
@@ -528,27 +508,27 @@ class VaultClient(VaultApis):
 
         return work
 
-    def _bytes(self, path: str, body: Buffer, options: VaultRequestOptions | None) -> Callable[[_Abandon], VaultResponse[JsonDict] | None]:
+    def _bytes(self, path: str, body: Buffer, options: VaultRequestOptions | None) -> Callable[[Abandon], VaultResponse[JsonDict] | None]:
         v1 = v1_path(_require_str(path, "path"))
         if not isinstance(body, Buffer):
             raise TypeError("body must be a buffer.")
         modifiers = self._modifiers.merge(options)
         query = query_parameters(options)
 
-        def work(abandon: _Abandon) -> VaultResponse[JsonDict] | None:
+        def work(abandon: Abandon) -> VaultResponse[JsonDict] | None:
             with memoryview(body).cast("B") as view:
                 return self._send("POST", v1, view, query, modifiers, JsonValue.read_json_dict, abandon)
 
         return work
 
-    def _stream(self, path: str, body: _Readable, options: VaultRequestOptions | None) -> Callable[[_Abandon], VaultResponse[JsonDict] | None]:
+    def _stream(self, path: str, body: _Readable, options: VaultRequestOptions | None) -> Callable[[Abandon], VaultResponse[JsonDict] | None]:
         v1 = v1_path(_require_str(path, "path"))
         if body is None or not callable(getattr(body, "readinto", None)):
             raise TypeError("body must be a binary stream.")
         modifiers = self._modifiers.merge(options)
         query = query_parameters(options)
 
-        def work(abandon: _Abandon) -> VaultResponse[JsonDict] | None:
+        def work(abandon: Abandon) -> VaultResponse[JsonDict] | None:
             with SecureBuffer() as buffer:
                 buffer.read_from(lambda b: body.readinto(b) or 0)
                 with buffer.view() as view:
@@ -557,7 +537,7 @@ class VaultClient(VaultApis):
         return work
 
     def _prepare[T](self, method: str, path: str, body: object, query: Query | None, options: VaultRequestOptions | None,  # noqa: PLR0917 - private
-                    reader: Callable[[JsonValue], T | None]) -> Callable[[_Abandon], VaultResponse[T] | None]:
+                    reader: Callable[[JsonValue], T | None]) -> Callable[[Abandon], VaultResponse[T] | None]:
         # Checked, and the body written, before this returns, so a model the caller changes
         # afterwards isn't half-sent.
         modifiers = self._modifiers.merge(options)
@@ -570,7 +550,7 @@ class VaultClient(VaultApis):
                 json.close()
                 raise
 
-        def work(abandon: _Abandon) -> VaultResponse[T] | None:
+        def work(abandon: Abandon) -> VaultResponse[T] | None:
             if json is None:
                 return self._send(method, path, None, query, modifiers, reader, abandon)
             try:
@@ -582,7 +562,7 @@ class VaultClient(VaultApis):
         return work
 
     def _send[T](self, method: str, path: str, body: memoryview | None, query: Query | None, modifiers: _Modifiers,  # noqa: PLR0917 - private
-                 reader: Callable[[JsonValue], T | None], abandon: _Abandon) -> VaultResponse[T] | None:
+                 reader: Callable[[JsonValue], T | None], abandon: Abandon) -> VaultResponse[T] | None:
         # One request within the request timeout: sent, its whole body read, and parsed.
         timeout = self._options.request_timeout
         deadline = _deadline(timeout)
@@ -590,8 +570,10 @@ class VaultClient(VaultApis):
         try:
             sent = self._send_core(method, path, body, query, modifiers, deadline, abandon)
             try:
+                lost = f"The connection was lost during Vault's response to {sent.request.method} {_without_query(sent.request.url)}."
+                body_stream = DeadlineBody(sent.response, sent.sock, deadline, _DeadlineExceededError, lost_message=lost, abandon=abandon)
                 with SecureBuffer(sent.response.length or 0) as content:
-                    content.read_from(lambda b: self._read_body(sent, b, deadline, abandon))
+                    content.read_from(body_stream.readinto)
                     # sys/health answers 429, 472, 473, 501 and 503 with the health status itself.
                     status = sent.response.status
                     with content.view() as view:
@@ -605,31 +587,8 @@ class VaultClient(VaultApis):
         except _DeadlineExceededError:
             raise TimeoutError(timed_out) from None
 
-    def _read_body(self, sent: _Sent, buffer: memoryview, deadline: float, abandon: _Abandon) -> int:
-        sock = sent.connection.sock
-        if sent.response.isclosed():
-            return 0
-        if sock is not None:
-            _set_remaining(sock, deadline)
-        try:
-            return sent.response.readinto(buffer)
-        except http.client.IncompleteRead:
-            # Its partial bytes may hold a secret: neither kept nor chained.
-            raise ConnectionError(f"The connection was lost during Vault's response to {sent.request.method} {_without_query(sent.request.url)}.") \
-                from None
-        except TimeoutError:
-            if abandon.abandoned:
-                raise _abandoned() from None
-            if _remaining(deadline) <= 0:
-                raise _DeadlineExceededError from None
-            raise
-        except OSError:
-            if abandon.abandoned:
-                raise _abandoned() from None
-            raise
-
     def _send_core(self, method: str, path: str, body: memoryview | None, query: Query | None, modifiers: _Modifiers,  # noqa: PLR0917 - private
-                   deadline: float, abandon: _Abandon) -> _Sent:
+                   deadline: float, abandon: Abandon) -> _Sent:
         # Sends the request, retrying and following a redirect as configured, and calls the response
         # callbacks. The body of the response it returns is unread; the caller closes it.
         if self._closed[0]:
@@ -696,14 +655,14 @@ class VaultClient(VaultApis):
         scheme = parts.scheme.lower()
         if request.url.lower().startswith("https:") and scheme != "https":
             raise VaultRedirectError(status, "the redirect would cause a protocol downgrade", location, request.method, request.url)
-        if scheme != "https" and not (scheme == "http" and (_is_loopback(parts.hostname) or self._options.allow_unencrypted_http)):
+        if scheme != "https" and not (scheme == "http" and (is_loopback(parts.hostname) or self._options.allow_unencrypted_http)):
             raise VaultRedirectError(status, "the redirect would send the token over unencrypted http", location, request.method, request.url)
 
         path = parts.path or "/"
         return _Target(scheme == "https", parts.hostname, parts.port, path + (f"?{parts.query}" if parts.query else ""))
 
     def _send_with_retries(self, method: str, target: _Target, path: str, body: memoryview | None, modifiers: _Modifiers,  # noqa: PLR0917 - private
-                           states: tuple[str, ...], protected_token: str | None, deadline: float, abandon: _Abandon) -> _Sent:
+                           states: tuple[str, ...], protected_token: str | None, deadline: float, abandon: Abandon) -> _Sent:
         # One request, sent until it succeeds, fails in a way not worth retrying, or runs out of retries.
         retry = self._options.retry
         attempt = 0
@@ -749,7 +708,7 @@ class VaultClient(VaultApis):
             attempt += 1
 
     def _send_once(self, target: _Target, request: VaultRequest, body: memoryview | None, protected_token: str | None,  # noqa: PLR0917 - private
-                   deadline: float, abandon: _Abandon) -> _Sent:
+                   deadline: float, abandon: Abandon) -> _Sent:
         # One attempt: a connection of its own, the request with the token, if any, in its header -
         # decrypted into a bytearray zeroed once http.client has copied it.
         remaining = _remaining(deadline)
@@ -776,7 +735,7 @@ class VaultClient(VaultApis):
                         put_token(connection, header)
                 finally:
                     ArrayUtility.zero_memory(token)
-            _set_remaining(sock, deadline)
+            set_remaining(sock, deadline, _DeadlineExceededError)
             connection.endheaders(body)
             response = connection.getresponse()
         except TimeoutError:
@@ -791,7 +750,7 @@ class VaultClient(VaultApis):
             if abandon.abandoned:
                 raise _abandoned() from None
             raise
-        return _Sent(request, connection, response)
+        return _Sent(request, connection, response, sock)
 
     def _create_request(self, method: str, target: _Target, body: memoryview | None, modifiers: _Modifiers, states: tuple[str, ...]) -> VaultRequest:
         # A request carrying the client's headers, as vault-client-go's newRequest builds it; the
@@ -824,7 +783,7 @@ class VaultClient(VaultApis):
         context = self._connector.ssl_context or (_default_context() if target.https else None)
         return VaultConnector(target.https, target.host, target.port, self._options.request_timeout, context)
 
-    def _get_token(self, provider: VaultTokenProvider, deadline: float, abandon: _Abandon) -> str:
+    def _get_token(self, provider: VaultTokenProvider, deadline: float, abandon: Abandon) -> str:
         # The protected token get_token returns, waited for within the deadline on a thread of its own.
         done = threading.Event()
         outcome: builtins.list[tuple[object, BaseException | None]] = []
@@ -859,7 +818,7 @@ def send[T](client: VaultClient, method: str, path: str, body: object, query: Qu
             reader: Callable[[JsonValue], T | None]) -> VaultResponse[T] | None:
     """Sends a request - ``body``, if any, as JSON - and reads Vault's response into a
     :class:`VaultResponse`; ``None`` if it has no body. The generated methods all come here."""
-    return client._prepare(method, path, body, query, options, reader)(_Abandon())
+    return client._prepare(method, path, body, query, options, reader)(_abandon())
 
 
 async def send_async[T](client: VaultClient, method: str, path: str, body: object, query: Query | None,  # noqa: PLR0917
@@ -918,12 +877,12 @@ def v1_path(path: str) -> str:
 # --- Internals -----------------------------------------------------------------------------------
 
 
-async def _run_async[T](work: Callable[[_Abandon], T], discard: Callable[[T], object] | None = None) -> T:
+async def _run_async[T](work: Callable[[Abandon], T], discard: Callable[[T], object] | None = None) -> T:
     # Runs work on a thread of its own; cancelling the awaiting task abandons it. A result that
     # arrives once the task is cancelled is handed to discard.
     loop = asyncio.get_running_loop()
     future: asyncio.Future[T] = loop.create_future()
-    abandon = _Abandon()
+    abandon = _abandon()
 
     def settle(result: T | None, error: BaseException | None) -> None:
         if future.cancelled():
@@ -986,15 +945,12 @@ def _remaining(deadline: float) -> float:
     return deadline - time.monotonic()
 
 
-def _set_remaining(sock: socket.socket, deadline: float) -> None:
-    remaining = _remaining(deadline)
-    if remaining <= 0:
-        raise _DeadlineExceededError
-    sock.settimeout(None if remaining == float("inf") else remaining)
+def _abandon() -> Abandon:
+    return Abandon(_ABANDONED)
 
 
 def _abandoned() -> ConnectionAbortedError:
-    return ConnectionAbortedError("The Vault request was abandoned: the task awaiting it was cancelled.")
+    return ConnectionAbortedError(_ABANDONED)
 
 
 def _without_query(url: str) -> str:
@@ -1005,44 +961,3 @@ def _default_context() -> ssl.SSLContext:
     context = ssl.create_default_context()
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     return context
-
-
-def _base_address(options: VaultClientOptions) -> tuple[bool, str, int | None, str]:
-    # Whether the address is https, its host and port, and its path prefix with no trailing '/', to
-    # put /v1/... after. Refuses an address that would send tokens in the clear (http anywhere but
-    # loopback, unless allowed) or that carries credentials, a query or a fragment.
-    address = options.address
-    if not isinstance(address, str):
-        raise TypeError("address must be a str.")
-    parts = urlsplit(address)
-    scheme = parts.scheme.lower()
-    if scheme == "unix":
-        raise ValueError(f"Vault's address '{address}' is a unix socket, which this client can't connect to: reach Vault (or its agent) "
-                         "over https, or http on loopback.")
-    try:
-        host = parts.hostname
-        port = parts.port
-    except ValueError:
-        host, port = None, None
-    if not scheme or not parts.netloc or not host:
-        raise ValueError(f"Vault's address '{address}' isn't absolute, e.g. https://vault.example.com:8200.")
-    if scheme != "https" and not (scheme == "http" and (_is_loopback(host) or options.allow_unencrypted_http)):
-        raise ValueError(f"Vault's address '{address}' must be https; http is allowed only on a loopback address (a local Vault Agent or "
-                         "dev server), or with allow_unencrypted_http, since every request carries a token.")
-    if "@" in parts.netloc or parts.query or parts.fragment or "?" in address or "#" in address:
-        raise ValueError(f"Vault's address '{address}' must not hold credentials, a query or a fragment.")
-    return scheme == "https", host, port, parts.path.rstrip("/")
-
-
-def _is_loopback(host: str) -> bool:
-    # localhost, or an IP literal on the loopback network. Only literals are parsed, so no name is
-    # ever resolved.
-    if host.lower() == "localhost":
-        return True
-    if ":" not in host and not _IPV4_LITERAL.fullmatch(host):
-        return False
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
-
