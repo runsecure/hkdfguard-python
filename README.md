@@ -567,7 +567,8 @@ authorized by the token's policy and recorded in Vault's audit log:
 ```python
 import os
 
-from hkdfguard.keywrapping.hashicorpvault import HashiCorpVaultTransitKeyWrapper, StaticVaultTokenSource
+from hkdfguard.integration.hashicorpvault import StaticVaultTokenSource
+from hkdfguard.keywrapping.hashicorpvault import HashiCorpVaultTransitKeyWrapper
 
 token = StaticVaultTokenSource(os.environ["VAULT_TOKEN"])     # or your own VaultTokenSource
 wrapper = HashiCorpVaultTransitKeyWrapper("https://vault.example.com:8200", "myapp-kek", token,

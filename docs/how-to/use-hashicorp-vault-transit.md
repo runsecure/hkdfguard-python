@@ -95,7 +95,7 @@ bytearray, zeroed by `close()` (it is a context manager):
 ```python
 import os
 
-from hkdfguard.keywrapping.hashicorpvault import StaticVaultTokenSource
+from hkdfguard.integration.hashicorpvault import StaticVaultTokenSource
 
 token = StaticVaultTokenSource(os.environ["VAULT_TOKEN"])
 ```
@@ -170,7 +170,8 @@ a `VaultTlsOptions` - the same settings the .NET and Java wrappers and Vault's o
 `VAULT_CLIENT_CERT`, `VAULT_CLIENT_KEY` and `VAULT_TLS_SERVER_NAME` take:
 
 ```python
-from hkdfguard.keywrapping.hashicorpvault import HashiCorpVaultTransitKeyWrapperOptions, VaultTlsOptions
+from hkdfguard.integration.hashicorpvault import VaultTlsOptions
+from hkdfguard.keywrapping.hashicorpvault import HashiCorpVaultTransitKeyWrapperOptions
 
 options = HashiCorpVaultTransitKeyWrapperOptions(
     mount_path="transit/team-a",
@@ -190,7 +191,7 @@ password is never held in the clear. Protect it once with a protector on a key r
 options the result and that protector:
 
 ```python
-from hkdfguard.keywrapping.hashicorpvault import VaultTlsOptions
+from hkdfguard.integration.hashicorpvault import VaultTlsOptions
 
 protector = key_ring.create_protector(VaultTlsOptions.PASSWORD_PURPOSE)
 password = VaultTlsOptions.protect_password(protector, os.environ["MYAPP_KEYSTORE_PASSWORD"])

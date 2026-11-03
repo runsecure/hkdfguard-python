@@ -33,9 +33,16 @@ See [Call Vault's API with the HashiCorp Vault client](https://github.com/runsec
 [hkdfguard-cache-hashicorpvault](https://pypi.org/project/hkdfguard-cache-hashicorpvault/) and
 [hkdfguard-keywrapping-hashicorpvault](https://pypi.org/project/hkdfguard-keywrapping-hashicorpvault/)
 depend on this distribution - though not on the client itself, since each makes its few requests its
-own way, never holding a secret in a `str` - so the two refuse the same addresses, paths and tokens, retry the same way and connect the same way.
-The names you meet through them are `VaultRequestError` and `VaultTlsOptions`, which both re-export,
-and the token sources.
+own way, never holding a secret in a `str`. Both make each attempt the same way: a connection of its
+own with the headers every Vault request carries, the token added from a bytearray that is zeroed,
+the response's body read within the attempt's deadline straight into bytearrays, a body cut short
+taken as a lost connection, and a call cancelled from asyncio abandoned by shutting its socket down.
+A refusal's errors are read and described the same way by both and by `VaultClient`
+(`403 Forbidden: permission denied`). Their options extend `VaultConnectionOptions` - the mount,
+namespace, timeout, retries and TLS settings, with their limits - and are checked by one function, so
+the two refuse the same addresses, paths and tokens, retry the same way and connect the same way.
+The names you meet through them - `VaultRequestError`, `VaultTlsOptions`, the token sources and
+providers - are imported from here.
 
 `VaultTlsOptions` takes CA certificates from PEM (a file, bytes or a directory) or a PKCS#12 trust
 store, and a client certificate and key from PEM or a PKCS#12 key store - choosing the key by

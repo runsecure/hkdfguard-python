@@ -13,7 +13,8 @@ pip install hkdfguard-cache-hashicorpvault
 ```python
 import os
 
-from hkdfguard.cache.hashicorpvault import HashiCorpVaultSecretCache, HashiCorpVaultSecretCacheOptions, StaticVaultToken
+from hkdfguard.cache.hashicorpvault import HashiCorpVaultSecretCache, HashiCorpVaultSecretCacheOptions
+from hkdfguard.integration.hashicorpvault import StaticVaultToken
 
 token_protector = ring.create_protector(HashiCorpVaultSecretCache.TOKEN_PURPOSE)
 with HashiCorpVaultSecretCache(
@@ -93,6 +94,12 @@ reading Vault; cached secrets can still be read.
 
 Unlike the Java module, there is no HTTP client option: `http.client` never follows redirects, so
 there is nothing to refuse, and `tls` or `ssl_context` covers what a supplied client is for there.
+
+The token providers, `VaultTlsOptions`, `VaultRequestError` and the options' base,
+`VaultConnectionOptions`, are
+[hkdfguard-integration-hashicorpvault](https://pypi.org/project/hkdfguard-integration-hashicorpvault/)'s,
+which makes and reads each request the same way for this cache, the Vault transit key wrapper and
+the Vault client.
 
 Requires Python 3.12 or later. See the
 [repository README](https://github.com/runsecure/hkdfguard-python#readme) for the full package list,
