@@ -8,6 +8,7 @@ requires-python = ">=3.12"
 dependencies = [
     "hkdfguard-abstractions",
     "hkdfguard-diagnostics",
+    "hkdfguard-securefile",
 ]
 classifiers = [
     "Programming Language :: Python :: 3",

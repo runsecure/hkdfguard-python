@@ -24,6 +24,9 @@ class KeyFileTrust:
     developer machine: an application that can rewrite its own key files can be made to roll back to
     an older one.
 
+    :class:`TrustedFile` holds secret files, certificates and any other file it reads to the same
+    rules, with the same trust.
+
     Immutable, and every list is copied, so a list changed afterwards doesn't change what is trusted::
 
         trust = KeyFileTrust(windows_principals=["S-1-5-21-1111111111-2222222222-3333333333-1005"],

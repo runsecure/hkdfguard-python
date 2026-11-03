@@ -22,14 +22,14 @@ Each distribution installs one subpackage of the `hkdfguard` namespace package.
 | `hkdfguard-abstractions`              | `hkdfguard.abstractions`                | HkdfGuard.Abstractions               | `CryptoProvider`, `KeyWrapper`, `KeyRing`, `DataProtector`, ... ; `ProtectedCacheBase`, `ServiceNames`, `ProtectedConfigurationPurpose`, the exception types; `JsonReader`, the strict JSON reader secrets are parsed with |
 | `hkdfguard-cryptoprovider-aesgcm256`  | `hkdfguard.cryptoprovider.aesgcm256`    | HkdfGuard.CryptoProvider.AesGcm256   | `AesGcmCryptoProvider`, `AesGcmCryptoProviderFactory`, `AesGcmPipelineDataProtector` |
 | `hkdfguard-keywrapping-v1`            | `hkdfguard.keywrapping.v1`              | HkdfGuard.KeyWrapping.V1             | `NativeHkdfKeyWrapperV1` over the native KMS library |
-| `hkdfguard-securefile`                | `hkdfguard.securefile`                  | HkdfGuard.SecureFile                 | `TrustedKeyFile`, `KeyFileTrust`: the native library's key-file location and content checks, in Python |
+| `hkdfguard-securefile`                | `hkdfguard.securefile`                  | HkdfGuard.SecureFile                 | `TrustedKeyFile`, `KeyFileTrust`: the native library's key-file location and content checks, in Python; `TrustedFile`, `FileTooLargeError`: the same location checks for any file of a bounded size |
 | `hkdfguard-keywrapping-awskms`        | `hkdfguard.keywrapping.awskms`          | HkdfGuard.KeyWrapping.AwsKms         | `AwsKmsKeyWrapper` over one symmetric AWS KMS key, through a botocore client |
 | `hkdfguard-keywrapping-azurekeyvault` | `hkdfguard.keywrapping.azurekeyvault`   | HkdfGuard.KeyWrapping.AzureKeyVault  | `AzureKeyVaultKeyWrapper` over an RSA wrapping key and an EC P-256 signing key in Azure Key Vault |
 | `hkdfguard-keywrapping-googlekms`     | `hkdfguard.keywrapping.googlekms`       | HkdfGuard.KeyWrapping.GoogleKms      | `GoogleKmsKeyWrapper` over one symmetric Google Cloud KMS key, through a Cloud KMS client |
 | `hkdfguard-integration-hashicorpvault` | `hkdfguard.integration.hashicorpvault` | HkdfGuard.Integration.HashiCorpVault | The Vault client library, and what every Vault integration shares: `VaultTlsOptions` (PEM or PKCS#12 trust and client keys, store passwords protected by the key ring), the token sources, the address, path and token checks, the retries, and `VaultRequestError` |
 | `hkdfguard-keywrapping-hashicorpvault` | `hkdfguard.keywrapping.hashicorpvault` | HkdfGuard.KeyWrapping.HashiCorpVault | `HashiCorpVaultTransitKeyWrapper` over one key in a HashiCorp Vault transit secrets engine, through the standard library's HTTP client |
 | `hkdfguard-dataencryptionkey`         | `hkdfguard.dataencryptionkey`           | HkdfGuard.DataEncryptionKey          | `KeyRing`, `KeyRingBuilder`, `DataEncryptionKey`, `DefaultFormatProvider` |
-| `hkdfguard-cache`                     | `hkdfguard.cache`                       | HkdfGuard.Cache                      | `ProtectedCache`, `ProtectedCacheCollection`; `RemoteSecretCache`, `SecretValueSink`, `SecretJsonBody` for caches over a secret store |
+| `hkdfguard-cache`                     | `hkdfguard.cache`                       | HkdfGuard.Cache                      | `ProtectedCache`, `ProtectedCacheCollection`; `FilePerSecretCache` over a trusted folder of one already encrypted file per secret; `RemoteSecretCache`, `SecretValueSink`, `SecretJsonBody` for caches over a secret store |
 | `hkdfguard-cache-awssecretsmanager`   | `hkdfguard.cache.awssecretsmanager`     | HkdfGuard.Cache.AwsSecretsManager    | `AwsSecretsManagerSecretCache` over AWS Secrets Manager, through a botocore client |
 | `hkdfguard-cache-azurekeyvault`       | `hkdfguard.cache.azurekeyvault`         | HkdfGuard.Cache.AzureKeyVault        | `AzureKeyVaultSecretCache` over Azure Key Vault secrets |
 | `hkdfguard-cache-googlesecretmanager` | `hkdfguard.cache.googlesecretmanager`   | HkdfGuard.Cache.GoogleSecretManager  | `GoogleSecretManagerSecretCache` over Google Cloud Secret Manager, through a gRPC Secret Manager client |
@@ -167,7 +167,8 @@ silently fall back to a default.
     other status `OSError`. An empty path is a `ValueError` (and `None` a `TypeError`) before
     anything is read. `TrustedKeyFile` (`hkdfguard-securefile`) raises the same types for the same
     refusals, and a `KeyFileTrust` naming a principal that can't be trusted is a `ValueError`
-    (.NET's `ArgumentException`).
+    (.NET's `ArgumentException`). `TrustedFile` raises them too, and `FileTooLargeError` (an
+    `OSError`) for .NET's `InvalidDataException` when a file is longer than its caller allows.
   - `PlatformNotSupportedException` -> `NotImplementedError`, as `NativeHkdfKeyWrapperV1` reports a
     platform with no native library.
   - `CryptographicException` and `AuthenticationTagMismatchException` become `CryptographicError`
@@ -624,6 +625,49 @@ creating the key, the policy for each role, tokens, and creating key files.
 [Run the HashiCorp Vault transit integration tests](docs/how-to/run-hashicorp-vault-transit-integration-tests.md)
 sets up a dev Vault for `test_hashicorpvault_transit_integration.py`, which is otherwise reported as
 skipped.
+
+## Reading secrets from a folder, one file per secret
+
+`FilePerSecretCache` (`hkdfguard-cache`) is a `ProtectedReadOnlyCache` over a local folder holding
+one file per secret: the file named `Db-Password` holds that secret's value, already encrypted and
+formatted (`enc::v3::...`). Nothing is read up front: the first lookup of a name reads that one
+file, checks its value authenticates, and caches it in memory still encrypted, exactly as the file
+holds it. Every later lookup is served from memory:
+
+```python
+from hkdfguard.cache import FilePerSecretCache
+from hkdfguard.dataencryptionkey import DefaultFormatProvider
+from hkdfguard.securefile import KeyFileTrust
+
+deployers = KeyFileTrust(windows_principals=["S-1-5-21-...-1005"], unix_user_ids=[1001])  # the account that deploys secrets
+secrets = FilePerSecretCache(r"C:\HkdfGuardSecrets\myapp", deployers, key_ring, DefaultFormatProvider())
+
+result = bytearray(secrets.find_max_decrypted_length("Db-Password") or 0)
+written = secrets.decrypt("Db-Password", result)  # 0 if there's no such file; or: await secrets.decrypt_async(...)
+```
+
+Each file must be encrypted for its own name, with the purpose
+`ProtectedConfigurationPurpose.for_key(name)`. That is what `AesGcmPipelineDataProtector.encrypt(value,
+name)` writes for the secret identifier `name`, and what
+`key_ring.create_protector(ProtectedConfigurationPurpose.for_key(name)).encrypt(value)` writes. A file
+copied under another name fails with an `AuthenticationTagMismatchError` when it is loaded, and isn't
+cached, so a corrected file is read on the next lookup.
+
+Every file is read through `TrustedFile` (`hkdfguard-securefile`), so it is refused, with a
+`PermissionError`, unless it and every folder above it are owned and modifiable only by the operating
+system's administrators and the principals the `KeyFileTrust` adds. Add the account that deploys
+secrets, never the one the application runs as: one that can rewrite its own secrets can be made to
+roll one back.
+
+A name is a file name: 1-255 ASCII letters, digits, `-`, `_` and `.`, not starting with `.`, so it
+can't reach outside the folder. Any other name (for example `ConnectionStrings:Admin`), a missing or
+empty file and a missing folder all return 0, so the cache can sit in a `ProtectedCacheCollection`
+beside other sources - ahead of any remote one; a missing secret isn't remembered, so a file added
+later is found. Names are matched exactly. A file over 64 KiB raises `FileTooLargeError` (an
+`OSError`); any other read failure raises the `OSError`, and a file that isn't a formatted value
+`EncryptedFormatError`. `decrypt` reads a file on the calling thread; `decrypt_async` reads it in a
+worker thread, so the event loop isn't blocked. A cached value isn't refreshed: a changed file is
+picked up by a new cache instance.
 
 ## Caching secrets from a secret store
 

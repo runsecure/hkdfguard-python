@@ -655,12 +655,14 @@ source = { editable = "packages/hkdfguard-cache" }
 dependencies = [
     { name = "hkdfguard-abstractions" },
     { name = "hkdfguard-diagnostics" },
+    { name = "hkdfguard-securefile" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "hkdfguard-abstractions", editable = "packages/hkdfguard-abstractions" },
     { name = "hkdfguard-diagnostics", editable = "packages/hkdfguard-diagnostics" },
+    { name = "hkdfguard-securefile", editable = "packages/hkdfguard-securefile" },
 ]
 
 [[package]]
