@@ -26,7 +26,7 @@ Each distribution installs one subpackage of the `hkdfguard` namespace package.
 | `hkdfguard-keywrapping-awskms`        | `hkdfguard.keywrapping.awskms`          | HkdfGuard.KeyWrapping.AwsKms         | `AwsKmsKeyWrapper` over one symmetric AWS KMS key, through a botocore client |
 | `hkdfguard-keywrapping-azurekeyvault` | `hkdfguard.keywrapping.azurekeyvault`   | HkdfGuard.KeyWrapping.AzureKeyVault  | `AzureKeyVaultKeyWrapper` over an RSA wrapping key and an EC P-256 signing key in Azure Key Vault |
 | `hkdfguard-keywrapping-googlekms`     | `hkdfguard.keywrapping.googlekms`       | HkdfGuard.KeyWrapping.GoogleKms      | `GoogleKmsKeyWrapper` over one symmetric Google Cloud KMS key, through a Cloud KMS client |
-| `hkdfguard-hashicorpvault-common`     | `hkdfguard.hashicorpvault.common`       | HkdfGuard.HashiCorpVault.Common      | `VaultRequestError` and what every Vault integration shares: the address, path and token checks, the retry limits and backoff |
+| `hkdfguard-integration-hashicorpvault` | `hkdfguard.integration.hashicorpvault` | HkdfGuard.Integration.HashiCorpVault | The Vault client library, and what every Vault integration shares: `VaultTlsOptions` (PEM or PKCS#12 trust and client keys, store passwords protected by the key ring), the token sources, the address, path and token checks, the retries, and `VaultRequestError` |
 | `hkdfguard-keywrapping-hashicorpvault` | `hkdfguard.keywrapping.hashicorpvault` | HkdfGuard.KeyWrapping.HashiCorpVault | `HashiCorpVaultTransitKeyWrapper` over one key in a HashiCorp Vault transit secrets engine, through the standard library's HTTP client |
 | `hkdfguard-dataencryptionkey`         | `hkdfguard.dataencryptionkey`           | HkdfGuard.DataEncryptionKey          | `KeyRing`, `KeyRingBuilder`, `DataEncryptionKey`, `DefaultFormatProvider` |
 | `hkdfguard-cache`                     | `hkdfguard.cache`                       | HkdfGuard.Cache                      | `ProtectedCache`, `ProtectedCacheCollection`; `RemoteSecretCache`, `SecretValueSink`, `SecretJsonBody` for caches over a secret store |
@@ -613,7 +613,9 @@ wrapper = HashiCorpVaultTransitKeyWrapper("https://vault.example.com:8200", "mya
   Argument errors raise `ValueError` or `TypeError`.
 
 `HashiCorpVaultTransitKeyWrapperOptions` sets the mount, a Vault Enterprise namespace, the timeout,
-the retries and an `ssl_context` (a private CA, a client certificate). There is no configuration
+the retries, and the TLS settings: `tls` (a `VaultTlsOptions`: a CA bundle or PKCS#12 trust store, a
+client certificate from PEM or a PKCS#12 key store, a server name), or an `ssl_context` of your own.
+There is no configuration
 integration for it: create the wrapper and pass it to `KeyRingBuilder.with_key_wrapper`.
 
 [Wrap keys with HashiCorp Vault transit](docs/how-to/use-hashicorp-vault-transit.md) walks through

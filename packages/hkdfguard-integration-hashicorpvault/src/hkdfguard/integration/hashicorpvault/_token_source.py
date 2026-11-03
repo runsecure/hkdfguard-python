@@ -1,4 +1,4 @@
-"""The Vault token a HashiCorpVaultTransitKeyWrapper makes its requests with, copied into memory the
+"""The Vault token a key wrapper (HashiCorpVaultTransitKeyWrapper) makes its requests with, copied into memory the
 wrapper zeroes."""
 
 from __future__ import annotations
@@ -11,7 +11,8 @@ from types import TracebackType
 from typing import Final, Self
 
 from hkdfguard.abstractions import ArrayUtility
-from hkdfguard.hashicorpvault.common import is_valid_token
+from hkdfguard.integration.hashicorpvault._connection import is_valid_token
+from hkdfguard.integration.hashicorpvault._http import run_within
 
 MAX_TOKEN_LENGTH: Final = 2048
 """The longest token a :class:`VaultTokenSource` may supply, in bytes."""
@@ -101,35 +102,26 @@ class StaticVaultTokenSource(VaultTokenSource):
 
 
 def copy_token_within(source: VaultTokenSource, destination: bytearray, timeout: timedelta) -> int:
-    """Asks ``source`` for the token on a thread of its own, waiting at most ``timeout``, and returns
-    its length in ``destination``. The source writes into a scratch bytearray, zeroed as the thread
-    ends, and the token reaches ``destination`` only if the wait hasn't been given up: a source that
-    answers after the timeout leaves nothing behind. A source's failure is re-raised as it is."""
-    done = threading.Event()
-    lock = threading.Lock()
-    abandoned = False
-    outcome: list[tuple[int, BaseException | None]] = []
+    """Asks ``source`` for the token on a thread of its own, waiting at most ``timeout``
+    (:func:`run_within`), and returns its length in ``destination``. The source writes into a scratch
+    bytearray, zeroed once the token is copied out of it or the source fails, and the token reaches
+    ``destination`` only if the wait hasn't been given up: a source that answers after the timeout
+    leaves nothing behind. A source's failure is re-raised as it is."""
+    scratch = bytearray(len(destination))
 
-    def run() -> None:
-        scratch = bytearray(len(destination))
+    def copy() -> int:
         try:
             length = source.copy_token(memoryview(scratch))
-            with lock:
-                if not abandoned and isinstance(length, int) and not isinstance(length, bool) and 0 < length <= len(scratch):
-                    destination[:length] = memoryview(scratch)[:length]
-                outcome.append((length if isinstance(length, int) and not isinstance(length, bool) else -1, None))
-        except BaseException as error:  # re-raised on the calling thread
-            outcome.append((-1, error))
-        finally:
+        except BaseException:
             ArrayUtility.zero_memory(scratch)
-            done.set()
+            raise
+        return length if isinstance(length, int) and not isinstance(length, bool) else -1
 
-    threading.Thread(target=run, name="hkdfguard-vault-token", daemon=True).start()
-    if not done.wait(timeout.total_seconds()):
-        with lock:
-            abandoned = True
-        raise TimeoutError(f"The Vault token source returned no token within {timeout}.")
-    length, error = outcome[0]
-    if error is not None:
-        raise error
-    return length
+    length = run_within(copy, timeout, thread_name="hkdfguard-vault-token", timeout_message=f"The Vault token source returned no token within {timeout}.",
+                        abandoned=lambda _: ArrayUtility.zero_memory(scratch))
+    try:
+        if 0 < length <= len(scratch):
+            destination[:length] = memoryview(scratch)[:length]
+        return length
+    finally:
+        ArrayUtility.zero_memory(scratch)

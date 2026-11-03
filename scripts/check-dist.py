@@ -36,7 +36,7 @@ EXPECTED = {
     "hkdfguard-cryptoprovider-aesgcm256",
     "hkdfguard-dataencryptionkey",
     "hkdfguard-diagnostics",
-    "hkdfguard-hashicorpvault-common",
+    "hkdfguard-integration-hashicorpvault",
     "hkdfguard-keywrapping-awskms",
     "hkdfguard-keywrapping-azurekeyvault",
     "hkdfguard-keywrapping-googlekms",

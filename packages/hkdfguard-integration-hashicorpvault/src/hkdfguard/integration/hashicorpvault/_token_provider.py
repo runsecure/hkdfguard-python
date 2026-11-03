@@ -1,4 +1,4 @@
-"""The Vault token a HashiCorpVaultSecretCache reads with, handed over protected."""
+"""The Vault token a VaultClient or HashiCorpVaultSecretCache makes its requests with, handed over protected."""
 
 from __future__ import annotations
 

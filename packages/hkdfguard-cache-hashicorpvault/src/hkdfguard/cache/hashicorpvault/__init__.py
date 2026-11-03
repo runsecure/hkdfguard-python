@@ -4,8 +4,7 @@ current key and cached only as ciphertext."""
 
 from hkdfguard.cache.hashicorpvault._cache import HashiCorpVaultSecretCache
 from hkdfguard.cache.hashicorpvault._options import HashiCorpVaultSecretCacheOptions, VaultKvVersion
-from hkdfguard.cache.hashicorpvault._token import StaticVaultToken, VaultTokenProvider
-from hkdfguard.hashicorpvault.common import VaultRequestError
+from hkdfguard.integration.hashicorpvault import StaticVaultToken, VaultRequestError, VaultTlsOptions, VaultTokenProvider
 
 __all__ = [
     "HashiCorpVaultSecretCache",
@@ -13,5 +12,6 @@ __all__ = [
     "StaticVaultToken",
     "VaultKvVersion",
     "VaultRequestError",
+    "VaultTlsOptions",
     "VaultTokenProvider",
 ]

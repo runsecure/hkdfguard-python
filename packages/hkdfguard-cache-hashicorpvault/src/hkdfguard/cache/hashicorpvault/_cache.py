@@ -5,22 +5,33 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import http.client
-import itertools
 import logging
-import secrets
 import socket
-import ssl
 import threading
 import time
 from datetime import timedelta
 from types import TracebackType
 from typing import ClassVar, Self
 
-from hkdfguard.abstractions import ArrayUtility, CryptographicError, DataProtector, KeyRing, ObjectClosedError
+from hkdfguard.abstractions import DataProtector, KeyRing, ObjectClosedError
 from hkdfguard.cache import ErrorResponseBody, RemoteSecretCache, SecretJsonBody, SecretNameMatching, SecretValueSink
 from hkdfguard.cache.hashicorpvault._options import HashiCorpVaultSecretCacheOptions, VaultKvVersion
-from hkdfguard.cache.hashicorpvault._token import VaultTokenProvider
-from hkdfguard.hashicorpvault.common import TOKEN_HEADER, VaultRequestError, api_base, check_connection_options, is_valid_path, is_valid_token, retry_delay
+from hkdfguard.integration.hashicorpvault import (
+    VaultRequestError,
+    VaultTokenProvider,
+    api_base,
+    check_connection_options,
+    is_valid_path,
+)
+from hkdfguard.integration.hashicorpvault._http import (
+    VaultConnector,
+    check_tls_options,
+    put_protected_token,
+    put_request,
+    run_within,
+    set_remaining,
+    with_retries,
+)
 
 
 class HashiCorpVaultSecretCache(RemoteSecretCache):
@@ -120,7 +131,7 @@ class HashiCorpVaultSecretCache(RemoteSecretCache):
         super().__init__(key_ring, SecretNameMatching.EXACT, logger)
         if options is None:
             options = HashiCorpVaultSecretCacheOptions()
-        self._https, self._host, self._port, v1_path = api_base(address)
+        https, host, port, v1_path = api_base(address)
         _check(options)
 
         self._token_provider = token_provider
@@ -137,7 +148,7 @@ class HashiCorpVaultSecretCache(RemoteSecretCache):
         else:
             self._read_base = f"{v1_path}{options.mount_path}/"
             self._data_path = ("data",)
-        self._ssl_context = (options.ssl_context or ssl.create_default_context()) if self._https else None
+        self._connector = VaultConnector(https, host, port, options.timeout, options.ssl_context, options.tls)
         self._closed = False
 
     @staticmethod
@@ -189,23 +200,8 @@ class HashiCorpVaultSecretCache(RemoteSecretCache):
 
     def _get_token(self) -> str:
         # The protected token get_token returns, waited for within the timeout on a thread of its own.
-        done = threading.Event()
-        outcome: list[tuple[str | None, BaseException | None]] = []
-
-        def run() -> None:
-            try:
-                outcome.append((self._token_provider.get_token(), None))
-            except BaseException as error:  # re-raised on the fetching thread
-                outcome.append((None, error))
-            finally:
-                done.set()
-
-        threading.Thread(target=run, name="hkdfguard-vault-token", daemon=True).start()
-        if not done.wait(self._timeout_seconds):
-            raise TimeoutError(f"The Vault token provider returned no token within {self._timeout}.")
-        token, error = outcome[0]
-        if error is not None:
-            raise error
+        token = run_within(self._token_provider.get_token, self._timeout, thread_name="hkdfguard-vault-token",
+                           timeout_message=f"The Vault token provider returned no token within {self._timeout}.")
         return _require_token(token)
 
     async def _get_token_async(self) -> str:
@@ -224,42 +220,22 @@ class HashiCorpVaultSecretCache(RemoteSecretCache):
         return _require_token(token)
 
     def _read_with_retries(self, path: str, protected_token: str, value: SecretValueSink, abandon: _Abandon) -> None:
-        failure: Exception
-        for retry in itertools.count():
-            try:
-                self._read(path, protected_token, value, abandon)
-                return
-            except VaultRequestError as error:
-                if not error.is_transient:
-                    raise
-                failure = error
-            except ssl.SSLCertVerificationError:
-                # Vault's certificate is refused: retrying can't change that, and would only turn a clear
-                # refusal into a wait for the retries to run out.
-                raise
-            except (OSError, http.client.HTTPException) as error:
-                failure = error
-
-            if abandon.abandoned or retry >= self._retry_count or self._closed:
-                raise failure
-
-            # A failed attempt has handed nothing to value: the body is read whole before anything is
-            # parsed out of it, and a parse failure isn't transient.
-            if abandon.wait(retry_delay(self._retry_delay, retry, secrets.randbelow(101)).total_seconds()):
-                raise failure
+        # A failed attempt has handed nothing to value: the body is read whole before anything is
+        # parsed out of it, and a parse failure isn't transient.
+        with_retries(lambda: self._read(path, protected_token, value, abandon), self._retry_count, self._retry_delay,
+                     stopped=lambda: abandon.abandoned or self._closed, wait=abandon.wait)
 
     def _read(self, path: str, protected_token: str, value: SecretValueSink, abandon: _Abandon) -> None:
         # One attempt: one request, and Vault's whole response, within the attempt's timeout.
         deadline = time.monotonic() + self._timeout_seconds
-        connection = (http.client.HTTPSConnection(self._host, self._port, timeout=self._timeout_seconds, context=self._ssl_context)
-                      if self._https else http.client.HTTPConnection(self._host, self._port, timeout=self._timeout_seconds))
+        connection = self._connector.connect()
         try:
             self._send(connection, path, protected_token)
             sock = connection.sock
             if sock is None:
                 raise ConnectionError("The connection to Vault was closed before its answer.")
             abandon.track(sock)
-            _set_remaining(sock, deadline, path, self._timeout)
+            set_remaining(sock, deadline, lambda: _timed_out(path, self._timeout))
             response = connection.getresponse()
             try:
                 body = _DeadlineBody(response, sock, deadline, abandon, path, self._timeout)
@@ -272,18 +248,11 @@ class HashiCorpVaultSecretCache(RemoteSecretCache):
 
     def _send(self, connection: http.client.HTTPConnection, path: str, protected_token: str) -> None:
         # Sends the request for path's secret, with the token protected_token holds - decrypted into a
-        # bytearray zeroed once http.client has copied it.
-        token, length = self._decrypt_token(protected_token)
-        try:
-            connection.putrequest("GET", self._read_base + path)
-            connection.putheader("X-Vault-Request", "true")
-            if self._namespace is not None:
-                connection.putheader("X-Vault-Namespace", self._namespace)
-            with memoryview(token) as view, view[:length] as header:
-                connection.putheader(TOKEN_HEADER, header)
-            connection.endheaders()
-        finally:
-            ArrayUtility.zero_memory(token)
+        # bytearray zeroed once http.client has copied it. A token that isn't protected by the token
+        # protector, or isn't a token, raises RuntimeError.
+        put_request(connection, "GET", self._read_base + path, self._namespace)
+        put_protected_token(connection, self._token_protector, protected_token)
+        connection.endheaders()
 
     def _read_response(self, path: str, status: int, body: _DeadlineBody, value: SecretValueSink) -> None:
         if 200 <= status < 300:
@@ -300,30 +269,6 @@ class HashiCorpVaultSecretCache(RemoteSecretCache):
 
         detail = ": " + "; ".join(errors) if errors else ""
         raise VaultRequestError(f"Vault refused to read '{path}': HTTP {status}{detail}", status)
-
-    def _decrypt_token(self, protected_token: str) -> tuple[bytearray, int]:
-        # The token protected_token holds, decrypted into a bytearray the caller zeroes, and its
-        # length. Refused unless it is protected by the token protector - it parses, its key version
-        # is on the ring, and it authenticates under TOKEN_PURPOSE - and is a token. Raised outside
-        # the protector's exceptions, so nothing is chained: a parser handed an unprotected token
-        # could quote it.
-        token: bytearray | None = None
-        length = -1
-        try:
-            max_length = self._token_protector.get_max_decrypted_length(protected_token)
-            if max_length >= 0:
-                token = bytearray(max_length)
-                length = self._token_protector.decrypt(protected_token, token)
-        except (ValueError, LookupError, CryptographicError):
-            length = -1
-        if token is None or length < 0:
-            ArrayUtility.zero_memory(token)
-            raise _not_protected()
-
-        if not is_valid_token(memoryview(token)[:length]):
-            ArrayUtility.zero_memory(token)
-            raise RuntimeError("The protected Vault token isn't a token: printable ASCII, with no spaces.")
-        return token, length
 
 
 class _Abandon:
@@ -378,7 +323,7 @@ class _DeadlineBody:
         if self._response.isclosed():
             # Read to its end: http.client has closed the socket.
             return 0
-        _set_remaining(self._sock, self._deadline, self._path, self._timeout)
+        set_remaining(self._sock, self._deadline, lambda: _timed_out(self._path, self._timeout))
         lost = False
         timed_out = False
         read = 0
@@ -405,13 +350,6 @@ def _require_token(token: object) -> str:
     return token
 
 
-def _set_remaining(sock: socket.socket, deadline: float, path: str, timeout: timedelta) -> None:
-    remaining = deadline - time.monotonic()
-    if remaining <= 0:
-        raise _timed_out(path, timeout)
-    sock.settimeout(remaining)
-
-
 def _timed_out(path: str, timeout: timedelta) -> TimeoutError:
     return TimeoutError(f"Vault's response to the read of '{path}' took longer than {timeout}.")
 
@@ -420,17 +358,13 @@ def _abandoned() -> ConnectionAbortedError:
     return ConnectionAbortedError("The read from Vault was abandoned: the lookup that started it was cancelled.")
 
 
-def _not_protected() -> RuntimeError:
-    return RuntimeError("The Vault token provider returned a token that isn't protected by the cache's token protector: "
-                        "hand over token_protector.encrypt(token), never the token itself.")
-
-
 def _check(options: HashiCorpVaultSecretCacheOptions) -> None:
     if not isinstance(options, HashiCorpVaultSecretCacheOptions):
         raise TypeError("options must be HashiCorpVaultSecretCacheOptions.")
     if not isinstance(options.kv_version, VaultKvVersion):
         raise TypeError("kv_version must be a VaultKvVersion.")
     check_connection_options(options)
+    check_tls_options(options.ssl_context, options.tls)
     if not RemoteSecretCache.is_valid_key(options.default_key):
         raise ValueError(f"The default key '{options.default_key}' isn't a key: 1-{RemoteSecretCache.MAX_KEY_LENGTH} printable ASCII "
                          "characters other than space, '!' and '#'.")

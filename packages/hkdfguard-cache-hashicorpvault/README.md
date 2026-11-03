@@ -60,9 +60,12 @@ Python can't zero, and drops it once the request is sent.
 
 **The address** must be https, except on a loopback address (`localhost`, `127.0.0.0/8`, `[::1]`:
 a local Vault Agent or dev server), and must not hold credentials, a query or a fragment; a path is
-kept as a prefix (Vault behind a reverse proxy). Set `ssl_context` to trust a private CA
-(`ssl.create_default_context(cafile="vault-ca.pem")`) or present a client certificate; otherwise the
-system's trust store verifies the certificate and host name. Every request has a connection of its
+kept as a prefix (Vault behind a reverse proxy). Set `tls` to trust a private CA or present a client
+certificate: a `VaultTlsOptions`, from PEM files or PKCS#12 stores whose passwords are held protected
+by the key ring (`VaultTlsOptions.protect_password`, with
+`key_ring.create_protector(VaultTlsOptions.PASSWORD_PURPOSE)` as its `password_protector`) - or an
+`ssl_context` of your own instead. Otherwise the system's trust store verifies the certificate and
+host name. Every request has a connection of its
 own, through no proxy. `namespace` sends `X-Vault-Namespace` (Vault Enterprise).
 
 **The secret never becomes a `str`.** The response body is read straight off the socket into a
@@ -85,10 +88,11 @@ reading Vault; cached secrets can still be read.
 | `timeout` | 30 seconds | one attempt: getting the token, or one request and its whole response |
 | `retry_count` | 3 | retries of a transient failure, 3-10 |
 | `retry_delay` | 200 ms | the first wait, doubling up to 10 seconds, plus 0-100 ms |
-| `ssl_context` | `None` | TLS settings for https; `None` for `ssl.create_default_context()` |
+| `ssl_context` | `None` | TLS settings for https; `None` for `ssl.create_default_context()`; not with `tls` |
+| `tls` | `None` | `VaultTlsOptions`: PEM or PKCS#12 trust and client keys, a server name; not with `ssl_context` |
 
 Unlike the Java module, there is no HTTP client option: `http.client` never follows redirects, so
-there is nothing to refuse, and `ssl_context` covers what a supplied client is for there.
+there is nothing to refuse, and `tls` or `ssl_context` covers what a supplied client is for there.
 
 Requires Python 3.12 or later. See the
 [repository README](https://github.com/runsecure/hkdfguard-python#readme) for the full package list,

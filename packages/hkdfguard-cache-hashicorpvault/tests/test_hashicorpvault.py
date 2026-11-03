@@ -27,6 +27,7 @@ from hkdfguard.cache.hashicorpvault import (
     StaticVaultToken,
     VaultKvVersion,
     VaultRequestError,
+    VaultTlsOptions,
     VaultTokenProvider,
 )
 from hkdfguard.cryptoprovider.aesgcm256 import AesGcmCryptoProvider
@@ -1225,6 +1226,35 @@ def test_an_ssl_context_given_is_the_one_every_https_request_uses(vault: FakeVau
         cache.decrypt("item", bytearray(16))
 
     assert wrapped == ["127.0.0.1"] * (1 + Options.MIN_RETRY_COUNT)
+
+
+def test_tls_options_say_how_every_https_request_connects(vault: FakeVault, create: Create, monkeypatch: pytest.MonkeyPatch) -> None:
+    names: list[str | None] = []
+    real = ssl.SSLContext.wrap_socket
+
+    def recording(self: ssl.SSLContext, *args: Any, **kwargs: Any) -> ssl.SSLSocket:
+        names.append(kwargs.get("server_hostname"))
+        assert self.minimum_version is ssl.TLSVersion.TLSv1_2
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(ssl.SSLContext, "wrap_socket", recording)
+    # The fake speaks plain http, so the handshake fails - after verifying against the server name.
+    cache = create(address=f"https://127.0.0.1:{vault.port}/", tls=VaultTlsOptions(server_name="vault.internal"))
+
+    with pytest.raises(OSError):
+        cache.decrypt("item", bytearray(16))
+
+    assert names == ["vault.internal"] * (1 + Options.MIN_RETRY_COUNT)
+
+
+def test_tls_options_are_read_when_the_cache_is_created_and_refused_beside_an_ssl_context(make_ring: Callable[..., DefaultKeyRing]) -> None:
+    with pytest.raises(ValueError, match="Could not read"):
+        new_cache(make_ring, options=Options(tls=VaultTlsOptions(server_certificate_file="missing-ca.pem")))
+    with pytest.raises(ValueError, match="can't be given together"):
+        new_cache(make_ring, options=Options(ssl_context=ssl.create_default_context(), tls=VaultTlsOptions()))
+    with pytest.raises(TypeError, match="tls must be VaultTlsOptions"):
+        new_cache(make_ring, options=Options(tls="tls"))  # type: ignore[arg-type]
+    assert Options().tls is None
 
 
 def test_a_refused_vault_certificate_is_not_retried(vault: FakeVault, create: Create) -> None:

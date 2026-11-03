@@ -1,11 +1,14 @@
 [project]
-name = "hkdfguard-hashicorpvault-common"
+name = "hkdfguard-integration-hashicorpvault"
 version = "0.9.1"
-description = "What every HkdfGuard integration with HashiCorp Vault shares: the address, path and token checks, the retry limits and backoff, and the error Vault's refusals are reported as."
+description = "A HashiCorp Vault client - a port of vault-client-go, its typed API generated from Vault's OpenAPI spec - holding tokens only protected by the key ring; and what every HkdfGuard Vault integration shares: the address, path and token checks, TLS, the retry limits and backoff, the token sources, and the errors Vault's refusals are reported as."
 license = "MPL-2.0"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "hkdfguard-abstractions",
+    "cryptography>=45",
+]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Topic :: Security :: Cryptography",
@@ -22,7 +25,7 @@ build-backend = "hatchling.build"
 # hkdfguard is a namespace package shared by every hkdfguard-* distribution, and so is
 # hkdfguard.hashicorpvault: only this distribution's own subpackage is packed.
 [tool.hatch.build.targets.wheel]
-only-include = ["src/hkdfguard/hashicorpvault/common"]
+only-include = ["src/hkdfguard/integration/hashicorpvault"]
 sources = ["src"]
 
 [tool.hatch.build]

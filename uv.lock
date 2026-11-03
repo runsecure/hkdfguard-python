@@ -18,7 +18,7 @@ members = [
     "hkdfguard-cryptoprovider-aesgcm256",
     "hkdfguard-dataencryptionkey",
     "hkdfguard-diagnostics",
-    "hkdfguard-hashicorpvault-common",
+    "hkdfguard-integration-hashicorpvault",
     "hkdfguard-keywrapping-awskms",
     "hkdfguard-keywrapping-azurekeyvault",
     "hkdfguard-keywrapping-googlekms",
@@ -728,7 +728,7 @@ dependencies = [
     { name = "hkdfguard-abstractions" },
     { name = "hkdfguard-cache" },
     { name = "hkdfguard-diagnostics" },
-    { name = "hkdfguard-hashicorpvault-common" },
+    { name = "hkdfguard-integration-hashicorpvault" },
 ]
 
 [package.metadata]
@@ -736,7 +736,7 @@ requires-dist = [
     { name = "hkdfguard-abstractions", editable = "packages/hkdfguard-abstractions" },
     { name = "hkdfguard-cache", editable = "packages/hkdfguard-cache" },
     { name = "hkdfguard-diagnostics", editable = "packages/hkdfguard-diagnostics" },
-    { name = "hkdfguard-hashicorpvault-common", editable = "packages/hkdfguard-hashicorpvault-common" },
+    { name = "hkdfguard-integration-hashicorpvault", editable = "packages/hkdfguard-integration-hashicorpvault" },
 ]
 
 [[package]]
@@ -777,9 +777,19 @@ dependencies = [
 requires-dist = [{ name = "opentelemetry-api", specifier = ">=1.45" }]
 
 [[package]]
-name = "hkdfguard-hashicorpvault-common"
+name = "hkdfguard-integration-hashicorpvault"
 version = "0.9.1"
-source = { editable = "packages/hkdfguard-hashicorpvault-common" }
+source = { editable = "packages/hkdfguard-integration-hashicorpvault" }
+dependencies = [
+    { name = "cryptography" },
+    { name = "hkdfguard-abstractions" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "cryptography", specifier = ">=45" },
+    { name = "hkdfguard-abstractions", editable = "packages/hkdfguard-abstractions" },
+]
 
 [[package]]
 name = "hkdfguard-keywrapping-awskms"
@@ -838,14 +848,14 @@ version = "0.9.1"
 source = { editable = "packages/hkdfguard-keywrapping-hashicorpvault" }
 dependencies = [
     { name = "hkdfguard-abstractions" },
-    { name = "hkdfguard-hashicorpvault-common" },
+    { name = "hkdfguard-integration-hashicorpvault" },
     { name = "hkdfguard-securefile" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "hkdfguard-abstractions", editable = "packages/hkdfguard-abstractions" },
-    { name = "hkdfguard-hashicorpvault-common", editable = "packages/hkdfguard-hashicorpvault-common" },
+    { name = "hkdfguard-integration-hashicorpvault", editable = "packages/hkdfguard-integration-hashicorpvault" },
     { name = "hkdfguard-securefile", editable = "packages/hkdfguard-securefile" },
 ]
 
@@ -904,7 +914,7 @@ dependencies = [
     { name = "hkdfguard-cryptoprovider-aesgcm256" },
     { name = "hkdfguard-dataencryptionkey" },
     { name = "hkdfguard-diagnostics" },
-    { name = "hkdfguard-hashicorpvault-common" },
+    { name = "hkdfguard-integration-hashicorpvault" },
     { name = "hkdfguard-keywrapping-awskms" },
     { name = "hkdfguard-keywrapping-azurekeyvault" },
     { name = "hkdfguard-keywrapping-googlekms" },
@@ -937,7 +947,7 @@ requires-dist = [
     { name = "hkdfguard-cryptoprovider-aesgcm256", editable = "packages/hkdfguard-cryptoprovider-aesgcm256" },
     { name = "hkdfguard-dataencryptionkey", editable = "packages/hkdfguard-dataencryptionkey" },
     { name = "hkdfguard-diagnostics", editable = "packages/hkdfguard-diagnostics" },
-    { name = "hkdfguard-hashicorpvault-common", editable = "packages/hkdfguard-hashicorpvault-common" },
+    { name = "hkdfguard-integration-hashicorpvault", editable = "packages/hkdfguard-integration-hashicorpvault" },
     { name = "hkdfguard-keywrapping-awskms", editable = "packages/hkdfguard-keywrapping-awskms" },
     { name = "hkdfguard-keywrapping-azurekeyvault", editable = "packages/hkdfguard-keywrapping-azurekeyvault" },
     { name = "hkdfguard-keywrapping-googlekms", editable = "packages/hkdfguard-keywrapping-googlekms" },

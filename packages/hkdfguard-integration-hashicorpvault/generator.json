@@ -1,0 +1,16 @@
+{
+  "description": "The operations hkdfguard-integration-hashicorpvault generates from openapi.json: logging in and managing tokens, the KV and cubbyhole secrets engines, the transit engine (HkdfGuard's KMS), and a few system endpoints. Each entry is a regular expression matched against an operation's name in PascalCase, as .NET names it (KvV2Read for kv_v2_read), and must match at least one. Anything else stays reachable through VaultClient's generic read, write, list and delete. Regenerate after changing this: uv run python scripts/generate-vault-client.py (from hkdfguard-python)",
+  "include": [
+    "^[A-Za-z]+Login$",
+    "^RadiusLoginWithUsername$",
+    "^JwtOidc(RequestAuthorizationUrl|Callback|CallbackFormPost)$",
+    "^OktaVerify$",
+    "^Token(Create|CreateOrphan|CreateAgainstRole|LookUp|LookUpAccessor|LookUpSelf|Renew|RenewAccessor|RenewSelf|Revoke|RevokeAccessor|RevokeOrphan|RevokeSelf)$",
+    "^KvV1",
+    "^KvV2",
+    "^Cubbyhole",
+    "^Transit",
+    "^(ReadHealthStatus|SealStatus|LeaderStatus|MountsListSecretsEngines)$",
+    "^(Wrap|Unwrap|Rewrap|ReadWrappingProperties)$"
+  ]
+}

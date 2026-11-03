@@ -13,7 +13,7 @@ dependencies = [
     "hkdfguard-keywrapping-awskms",
     "hkdfguard-keywrapping-azurekeyvault",
     "hkdfguard-keywrapping-googlekms",
-    "hkdfguard-hashicorpvault-common",
+    "hkdfguard-integration-hashicorpvault",
     "hkdfguard-keywrapping-hashicorpvault",
     "hkdfguard-dataencryptionkey",
     "hkdfguard-cache",
@@ -52,7 +52,7 @@ hkdfguard-securefile = { workspace = true }
 hkdfguard-keywrapping-awskms = { workspace = true }
 hkdfguard-keywrapping-azurekeyvault = { workspace = true }
 hkdfguard-keywrapping-googlekms = { workspace = true }
-hkdfguard-hashicorpvault-common = { workspace = true }
+hkdfguard-integration-hashicorpvault = { workspace = true }
 hkdfguard-keywrapping-hashicorpvault = { workspace = true }
 hkdfguard-dataencryptionkey = { workspace = true }
 hkdfguard-cache = { workspace = true }
@@ -65,8 +65,9 @@ hkdfguard-cache-hashicorpvault = { workspace = true }
 [tool.pytest.ini_options]
 testpaths = ["packages"]
 addopts = ["--import-mode=importlib", "-ra"]
-# hkdfguard_test_support.py, beside the native tests: what the native integration tests in every package share.
-pythonpath = ["packages/hkdfguard-keywrapping-v1/tests"]
+# hkdfguard_test_support.py, beside the native tests: what the native integration tests in every package share; and
+# vault_client_test_support.py, what hkdfguard-integration-hashicorpvault's tests share.
+pythonpath = ["packages/hkdfguard-keywrapping-v1/tests", "packages/hkdfguard-integration-hashicorpvault/tests"]
 markers = ["native: calls the real native KMS library (skipped unless one is installed and provisioned)"]
 
 [tool.ruff]
@@ -97,7 +98,7 @@ mypy_path = [
     "packages/hkdfguard-keywrapping-awskms/src",
     "packages/hkdfguard-keywrapping-azurekeyvault/src",
     "packages/hkdfguard-keywrapping-googlekms/src",
-    "packages/hkdfguard-hashicorpvault-common/src",
+    "packages/hkdfguard-integration-hashicorpvault/src",
     "packages/hkdfguard-keywrapping-hashicorpvault/src",
     "packages/hkdfguard-dataencryptionkey/src",
     "packages/hkdfguard-cache/src",
@@ -108,6 +109,7 @@ mypy_path = [
     "packages/hkdfguard-cache-googlesecretmanager/src",
     "packages/hkdfguard-cache-hashicorpvault/src",
     "packages/hkdfguard-keywrapping-v1/tests",  # hkdfguard_test_support.py
+    "packages/hkdfguard-integration-hashicorpvault/tests",  # vault_client_test_support.py
 ]
 namespace_packages = true
 explicit_package_bases = true

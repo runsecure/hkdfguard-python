@@ -7,7 +7,7 @@ from dataclasses import dataclass, replace
 from datetime import timedelta
 
 import pytest
-from hkdfguard.hashicorpvault.common import (
+from hkdfguard.integration.hashicorpvault import (
     MAX_RETRY_COUNT,
     MAX_RETRY_DELAY,
     MIN_RETRY_COUNT,

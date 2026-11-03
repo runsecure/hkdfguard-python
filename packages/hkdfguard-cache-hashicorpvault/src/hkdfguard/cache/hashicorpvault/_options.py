@@ -8,7 +8,7 @@ from datetime import timedelta
 from enum import Enum
 from typing import ClassVar
 
-from hkdfguard.hashicorpvault.common import MAX_RETRY_COUNT, MAX_RETRY_DELAY, MIN_RETRY_COUNT
+from hkdfguard.integration.hashicorpvault import MAX_RETRY_COUNT, MAX_RETRY_DELAY, MIN_RETRY_COUNT, VaultTlsOptions
 
 
 class VaultKvVersion(Enum):
@@ -71,4 +71,11 @@ class HashiCorpVaultSecretCacheOptions:
     """The TLS settings of every https request, e.g. a context trusting a private CA
     (``ssl.create_default_context(cafile=...)``) or presenting a client certificate. ``None`` (the
     default) for ``ssl.create_default_context()``: the system's trust store, with certificate and host
-    name verification. Unused for an http address."""
+    name verification. Unused for an http address. Not with :attr:`tls`."""
+
+    tls: VaultTlsOptions | None = None
+    """The TLS settings of every https request as the other ports and Vault's own variables give
+    them: a CA bundle or PKCS#12 trust store, a client certificate and key from PEM or a PKCS#12 key
+    store whose password is protected by the key ring, a server name. Read once, by the cache's
+    constructor. ``None`` (the default) for :attr:`ssl_context`'s default. Not with
+    :attr:`ssl_context`."""
