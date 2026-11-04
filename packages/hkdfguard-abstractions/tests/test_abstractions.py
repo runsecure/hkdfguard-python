@@ -72,7 +72,8 @@ def test_encode_strict_refuses_an_unpaired_surrogate() -> None:
             Utf8.encode_strict(text)
 
 
-@pytest.mark.parametrize("text", ["", "ascii", "héllo", "€", "秘密", "😀", chr(0x7F) + chr(0x80) + chr(0x7FF) + chr(0x800) + chr(0xFFFF) + chr(0x10000) + chr(0x10FFFF)])
+@pytest.mark.parametrize("text", ["", "ascii", "héllo", "€", "秘密", "😀",
+                                  chr(0x7F) + chr(0x80) + chr(0x7FF) + chr(0x800) + chr(0xFFFF) + chr(0x10000) + chr(0x10FFFF)])
 def test_is_valid_accepts_well_formed_utf8_in_any_buffer(text: str) -> None:
     encoded = text.encode()
     assert Utf8.is_valid(encoded)

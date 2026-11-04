@@ -19,7 +19,7 @@ Each distribution installs one subpackage of the `hkdfguard` namespace package.
 | Distribution                          | Import                                  | .NET assembly                        | Contents |
 |---------------------------------------|-----------------------------------------|--------------------------------------|----------|
 | `hkdfguard-diagnostics`               | `hkdfguard.diagnostics`                 | HkdfGuard.Diagnostics                | `HkdfGuardTelemetry`, `CacheMetrics`, span/attribute/event/metric names, `HkdfGuardLog` |
-| `hkdfguard-abstractions`              | `hkdfguard.abstractions`                | HkdfGuard.Abstractions               | `CryptoProvider`, `KeyWrapper`, `KeyRing`, `DataProtector`, ... ; `ProtectedCacheBase`, `ServiceNames`, `ProtectedConfigurationPurpose`, the exception types; `JsonReader`, the strict JSON reader secrets are parsed with |
+| `hkdfguard-abstractions`              | `hkdfguard.abstractions`                | HkdfGuard.Abstractions               | `CryptoProvider`, `KeyWrapper`, `KeyRing`, `DataProtector`, `PipelineDataProtector`, `SecretPipelineWriter`, ... ; `ProtectedCacheBase`, `ServiceNames`, `ProtectedConfigurationPurpose`, the exception types; `JsonReader`, the strict JSON reader secrets are parsed with |
 | `hkdfguard-cryptoprovider-aesgcm256`  | `hkdfguard.cryptoprovider.aesgcm256`    | HkdfGuard.CryptoProvider.AesGcm256   | `AesGcmCryptoProvider`, `AesGcmCryptoProviderFactory`, `AesGcmPipelineDataProtector` |
 | `hkdfguard-keywrapping-v1`            | `hkdfguard.keywrapping.v1`              | HkdfGuard.KeyWrapping.V1             | `NativeHkdfKeyWrapperV1` over the native KMS library |
 | `hkdfguard-securefile`                | `hkdfguard.securefile`                  | HkdfGuard.SecureFile                 | `TrustedKeyFile`, `KeyFileTrust`: the native library's key-file location and content checks, in Python; `TrustedFile`, `FileTooLargeError`: the same location checks for any file of a bounded size |
@@ -29,11 +29,16 @@ Each distribution installs one subpackage of the `hkdfguard` namespace package.
 | `hkdfguard-integration-hashicorpvault` | `hkdfguard.integration.hashicorpvault` | HkdfGuard.Integration.HashiCorpVault | The Vault client library, and what every Vault integration shares: `VaultTlsOptions` (PEM or PKCS#12 trust and client keys, store passwords protected by the key ring), the token sources, the address, path and token checks, the retries, and `VaultRequestError` |
 | `hkdfguard-keywrapping-hashicorpvault` | `hkdfguard.keywrapping.hashicorpvault` | HkdfGuard.KeyWrapping.HashiCorpVault | `HashiCorpVaultTransitKeyWrapper` over one key in a HashiCorp Vault transit secrets engine, through the standard library's HTTP client |
 | `hkdfguard-dataencryptionkey`         | `hkdfguard.dataencryptionkey`           | HkdfGuard.DataEncryptionKey          | `KeyRing`, `KeyRingBuilder`, `DataEncryptionKey`, `DefaultFormatProvider` |
-| `hkdfguard-cache`                     | `hkdfguard.cache`                       | HkdfGuard.Cache                      | `ProtectedCache`, `ProtectedCacheCollection`; `FilePerSecretCache` over a trusted folder of one already encrypted file per secret; `RemoteSecretCache`, `SecretValueSink`, `SecretJsonBody` for caches over a secret store |
+| `hkdfguard-cache`                     | `hkdfguard.cache`                       | HkdfGuard.Cache                      | `ProtectedCache`, `ProtectedCacheCollection`; `FilePerSecretCache` over a trusted folder of one already encrypted file per secret; `RemoteSecretCache`, `SecretValueSink`, `SecretJsonBody` (and the `SecretValueReceiver` it hands values to) for caches - and pipeline writers - over a secret store |
 | `hkdfguard-cache-awssecretsmanager`   | `hkdfguard.cache.awssecretsmanager`     | HkdfGuard.Cache.AwsSecretsManager    | `AwsSecretsManagerSecretCache` over AWS Secrets Manager, through a botocore client |
 | `hkdfguard-cache-azurekeyvault`       | `hkdfguard.cache.azurekeyvault`         | HkdfGuard.Cache.AzureKeyVault        | `AzureKeyVaultSecretCache` over Azure Key Vault secrets |
 | `hkdfguard-cache-googlesecretmanager` | `hkdfguard.cache.googlesecretmanager`   | HkdfGuard.Cache.GoogleSecretManager  | `GoogleSecretManagerSecretCache` over Google Cloud Secret Manager, through a gRPC Secret Manager client |
 | `hkdfguard-cache-hashicorpvault`      | `hkdfguard.cache.hashicorpvault`        | HkdfGuard.Cache.HashiCorpVault       | `HashiCorpVaultSecretCache` over HashiCorp Vault's KV secrets engine, through the standard library's HTTP client |
+| `hkdfguard-pipeline`                  | `hkdfguard.pipeline`                    | HkdfGuard.Pipeline                   | `SecretPipelineWriter`, the shared base of the store writers: takes a fixed list of names (`name` or `name#key`) and a `PipelineDataProtector`, reads each secret once however many of its keys are listed, encrypts every value at once bound to its file name (`/` and `#` become `__`), keeps only the ciphertext, and writes one file per secret, the layout `FilePerSecretCache` reads; no key ring |
+| `hkdfguard-pipeline-awssecretsmanager` | `hkdfguard.pipeline.awssecretsmanager` | HkdfGuard.Pipeline.AwsSecretsManager | `AwsSecretsManagerSecretPipelineWriter` over AWS Secrets Manager, through a botocore client of its own or yours; a `SecretBinary` is refused |
+| `hkdfguard-pipeline-azurekeyvault`    | `hkdfguard.pipeline.azurekeyvault`      | HkdfGuard.Pipeline.AzureKeyVault     | `AzureKeyVaultSecretPipelineWriter` over one Azure Key Vault, through a `SecretClient` of its own |
+| `hkdfguard-pipeline-googlesecretmanager` | `hkdfguard.pipeline.googlesecretmanager` | HkdfGuard.Pipeline.GoogleSecretManager | `GoogleSecretManagerSecretPipelineWriter` over one Google Cloud project's Secret Manager, through a gRPC client's channel; each payload checked against its CRC32C and the secret it names |
+| `hkdfguard-pipeline-hashicorpvault`   | `hkdfguard.pipeline.hashicorpvault`     | HkdfGuard.Pipeline.HashiCorpVault    | `HashiCorpVaultSecretPipelineWriter` and `HashiCorpVaultPipelineOptions` over a HashiCorp Vault KV engine, version 1 or 2, with the token from a `VaultTokenSource`, through the standard library's HTTP client |
 | `hkdfguard-options`                   | `hkdfguard.options`                     | HkdfGuard.Options                    | `HkdfGuardOptions`, `KeyFileOptions`, `OptionsValidationError` |
 | `hkdfguard-integration-configurationresolver` | `hkdfguard.integration.configurationresolver` | HkdfGuard.Integration.ConfigurationResolver | `ProtectedCacheValueProvider` and `ResolvingProtectedCacheCollection`, which resolve `${name}` templates from the caches; and the parts of ConfigurationResolver they use: `DefaultToken`, `ConfigurationItemReader`, `ConfigurationItemResolver`, `ConfigurationResolverBuilder`, `ValueProviderBase`, `CompositeValueProvider`, `ConfigurationKeyError` |
 
@@ -132,12 +137,14 @@ silently fall back to a default.
 
 ## Differences from .NET, by design
 
-- **Synchronous API, except cache reads.** Every .NET `...Async` method is a blocking call
-  (`build()`, `create(...)`, `wrap(...)`); there is no `CancellationToken`. Background key refresh
-  and ephemeral key rotation run on daemon threads. The one exception is the read surface of a
-  cache: `ProtectedReadOnlyCache` has `decrypt_async` and `find_max_decrypted_length_async`
+- **Synchronous API, except cache reads and pipeline pulls.** Every .NET `...Async` method is a
+  blocking call (`build()`, `create(...)`, `wrap(...)`); there is no `CancellationToken`. Background
+  key refresh and ephemeral key rotation run on daemon threads. The exceptions are the read surface
+  of a cache: `ProtectedReadOnlyCache` has `decrypt_async` and `find_max_decrypted_length_async`
   coroutines (asyncio), which a cache over a secret store uses so a miss doesn't block the event
-  loop. Cancelling the awaiting task takes the place of the `CancellationToken`.
+  loop; and a secret pipeline writer's pull, which is both `pull_secrets()` (blocking) and
+  `pull_secrets_async()` (.NET's `PullSecretsAsync`). Cancelling the awaiting task takes the place of
+  the `CancellationToken`.
 - **Disposal** is `close()`, and every disposable type is a context manager. `KeyRing.close()`
   never waits for a rotation blocked in the KMS: a key that rotation creates after the ring closed
   is closed instead of added.
@@ -649,7 +656,7 @@ written = secrets.decrypt("Db-Password", result)  # 0 if there's no such file; o
 
 Each file must be encrypted for its own name, with the purpose
 `ProtectedConfigurationPurpose.for_key(name)`. That is what `AesGcmPipelineDataProtector.encrypt(value,
-name)` writes for the secret identifier `name`, and what
+name)` writes for the secret identifier `name` (a `SecretPipelineWriter` from `hkdfguard-pipeline` writes such a folder from a secret store), and what
 `key_ring.create_protector(ProtectedConfigurationPurpose.for_key(name)).encrypt(value)` writes. A file
 copied under another name fails with an `AuthenticationTagMismatchError` when it is loaded, and isn't
 cached, so a corrected file is read on the next lookup.
@@ -707,6 +714,47 @@ written = caches.decrypt("prod/app-config#api-key", result)  # or: await caches.
 
 Each package's README covers its names, options and errors.
 
+## Writing secrets from a store in a pipeline
+
+The four `hkdfguard-pipeline-*` distributions are the other end of `FilePerSecretCache`: a
+provisioning pipeline, running before a durable KEK exists, pulls a fixed list of secrets from a
+secret store, encrypts each at once with an `AesGcmPipelineDataProtector` - one in-memory key, no key
+ring - and writes one encrypted file per secret. The protector's key is then handed to the native
+platform's wrap process and registered on the application's key ring at the protector's version, so
+`FilePerSecretCache` decrypts the files at runtime. They never depend on the runtime caches.
+
+```python
+from hkdfguard.cryptoprovider.aesgcm256 import AesGcmPipelineDataProtector
+from hkdfguard.dataencryptionkey import DefaultFormatProvider
+from hkdfguard.pipeline.awssecretsmanager import AwsSecretsManagerSecretPipelineWriter
+
+with (AesGcmPipelineDataProtector(DefaultFormatProvider(), 3) as protector,
+      AwsSecretsManagerSecretPipelineWriter(protector, ["prod/app#username", "prod/app#password", "prod/api-key"]) as writer):
+    writer.pull_secrets()                                    # or: await writer.pull_secrets_async()
+    writer.write_protected_secret_files("/etc/myapp/secrets")  # prod__app__username, prod__app__password, prod__api-key
+    # Then hand protector.get_key_as_base64() to the wrap tool (on standard input), and register the key at version 3.
+```
+
+A name is the store's name for a secret, optionally followed by `#` and a key of the JSON object it
+holds; each secret is read once however many of its keys are listed. Its file name is the name with
+every `/` and `#` replaced by `__`, and the value is encrypted bound to that file name, the name
+`FilePerSecretCache` decrypts it under. A name the store can't hold, or whose file name
+`FilePerSecretCache` couldn't read, is refused when the writer is made. A pull reads every secret,
+then reports every missing one at once with `KeyNotFoundError`, keeping the rest; any other failure
+keeps nothing. A value that isn't UTF-8 text is refused, since the protector encrypts text. As in
+the caches, each value is taken out of the store's response before the SDK can parse it, and reaches
+`PipelineDataProtector.encrypt` as UTF-8 bytes in a bytearray that is zeroed - never as a `str`.
+
+| Store | Distribution | Reads with |
+|---|---|---|
+| AWS Secrets Manager | `hkdfguard-pipeline-awssecretsmanager` | `GetSecretValue`, through a botocore client of its own or yours, with a `before-parse` handler |
+| Azure Key Vault | `hkdfguard-pipeline-azurekeyvault` | Get Secret, through a `SecretClient` of its own with a per-retry pipeline policy |
+| Google Cloud Secret Manager | `hkdfguard-pipeline-googlesecretmanager` | `AccessSecretVersion` on the client's gRPC channel, with the writer's own response deserializer |
+| HashiCorp Vault | `hkdfguard-pipeline-hashicorpvault` | GET on the KV path (version 1 or 2), with the token from a `VaultTokenSource` |
+
+`hkdfguard-pipeline`'s README shows how to add another store; each store's README covers its
+names, options and errors.
+
 ## Resolving configuration templates from the caches
 
 `hkdfguard-integration-configurationresolver` fills the `${name}` items in a template, such as a
@@ -748,7 +796,7 @@ uv build --all-packages --build-constraints build-constraints.txt --require-hash
 
 `.github/workflows/ci.yml` tests every push and pull request on Linux, Windows and macOS with Python
 3.12 to 3.14, lints, and builds and checks the packages. `.github/workflows/release.yml` publishes all
-eighteen distributions together as a GitHub Release, with Sigstore-signed build provenance and no stored
+twenty-three distributions together as a GitHub Release, with Sigstore-signed build provenance and no stored
 token. Nothing is published to PyPI yet.
 
 To release: set the same version in every `packages/*/pyproject.toml`, merge to `main`, then push a tag

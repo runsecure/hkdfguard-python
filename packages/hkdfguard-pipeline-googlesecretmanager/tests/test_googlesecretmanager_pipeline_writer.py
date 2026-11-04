@@ -98,7 +98,8 @@ class FakeSecretManager:
                                                payload=SecretPayload(data=value, data_crc32c=crc32c(value)))
         if self.tamper is not None:
             response = self.tamper(response)
-        return AccessSecretVersionResponse.serialize(response)
+        serialized: bytes = AccessSecretVersionResponse.serialize(response)
+        return serialized
 
 
 # --- The contract, and what only this writer does -------------------------------------------------

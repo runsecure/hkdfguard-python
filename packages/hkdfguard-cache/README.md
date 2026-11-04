@@ -70,6 +70,12 @@ unescapes the value into another, hands it to the cache, and returns the body wi
 for the SDK to parse. Every bytearray that held the value is zeroed. Out of reach, as everywhere in
 Python: a body the HTTP stack already holds as `bytes`, and the stack's own buffers.
 
+`SecretJsonBody` hands values to any `SecretValueReceiver` - a cache's `SecretValueSink`, or a
+pipeline writer's receiver (`hkdfguard-pipeline`), which encrypts them for files instead.
+`SecretJsonBody.capture_json_keys` finds the keys of a value already taken out of its response, as a
+sink's `set_bytes_with_json_keys` does: each member of exactly one JSON object, unescaped into a
+bytearray of its own that is zeroed once handed over.
+
 Another store needs only a subclass:
 
 ```python

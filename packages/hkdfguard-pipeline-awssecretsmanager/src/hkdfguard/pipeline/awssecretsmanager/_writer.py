@@ -123,8 +123,9 @@ class AwsSecretsManagerSecretPipelineWriter(SecretPipelineWriter):
 
     def close(self) -> None:
         """Closes the writer's own client; a client the caller gave is left open. Safe to call more than once."""
-        if self._owns_client:
-            self._client.close()  # type: ignore[attr-defined]
+        close = getattr(self._client, "close", None) if self._owns_client else None
+        if callable(close):
+            close()
 
     def _read_secret(self, name: str, requests: Sequence[SecretRequest], values: MutableMapping[str, str]) -> None:
         """:raises botocore.exceptions.ClientError: any AWS failure but ResourceNotFoundException

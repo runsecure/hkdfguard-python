@@ -194,7 +194,7 @@ class TestAzureKeyVaultSecretPipelineWriter(SecretPipelineWriterContract):
         return self.vault.gets
 
     def create(self, protector: PipelineDataProtector, secret_names: Sequence[str], options: dict[str, Any] | None = None) -> AzureKeyVaultSecretPipelineWriter:
-        return AzureKeyVaultSecretPipelineWriter(VAULT, Credential(), protector, secret_names,  # type: ignore[arg-type]
+        return AzureKeyVaultSecretPipelineWriter(VAULT, Credential(), protector, secret_names,
                                                  client_options=options if options is not None else self.vault.client_options())
 
     def test_secret_client_sees_only_the_body_with_the_value_blanked_and_the_body_is_streamed(self) -> None:
@@ -223,7 +223,7 @@ class TestAzureKeyVaultSecretPipelineWriter(SecretPipelineWriterContract):
         options = self.vault.client_options()
         before = dict(options)
         with self.create(self.protector, ["Item"], options):
-            other = SecretClient(VAULT, Credential(), **options)  # type: ignore[arg-type]
+            other = SecretClient(VAULT, Credential(), **options)
             assert other.get_secret("Item").value == "s3cret"
         assert options == before
 
@@ -273,7 +273,7 @@ class TestAzureKeyVaultSecretPipelineWriter(SecretPipelineWriterContract):
             with pytest.raises(ValueError, match=refused):
                 self.create(self.protector, ["Item"], self.vault.client_options(**{refused: object()}))
 
-        with AzureKeyVaultSecretPipelineWriter(VAULT, Credential(), self.protector, ["Item"]):  # type: ignore[arg-type]
+        with AzureKeyVaultSecretPipelineWriter(VAULT, Credential(), self.protector, ["Item"]):
             pass
 
     def test_the_applications_per_retry_policies_see_only_the_redacted_body(self) -> None:
@@ -292,4 +292,5 @@ class TestAzureKeyVaultSecretPipelineWriter(SecretPipelineWriterContract):
 
     def test_a_request_with_something_else_under_the_capture_option_is_refused(self) -> None:
         with self.create(self.protector, ["Item"]) as writer, pytest.raises(TypeError, match="must be a Capture"):
-            writer._client.get_secret("Item", **{CAPTURE_OPTION: object()})
+            options: dict[str, Any] = {CAPTURE_OPTION: object()}
+            writer._client.get_secret("Item", **options)

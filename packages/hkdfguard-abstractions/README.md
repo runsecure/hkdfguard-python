@@ -21,6 +21,12 @@ block the event loop. `ProtectedCacheBase` falls back to `_try_populate_async` o
 which calls `_try_populate` unless it is overridden too. Cancel a lookup by cancelling the task
 awaiting it.
 
+`PipelineDataProtector.encrypt` takes the plaintext as a `str` or as its UTF-8 bytes in a buffer,
+which is checked to be UTF-8 where it lies (`Utf8.is_valid`) and never decoded into a `str`.
+`SecretPipelineWriter` is the end of a provisioning pipeline - `pull_secrets` (or
+`pull_secrets_async`), then `write_protected_secret_files` - implemented over each secret store by
+the `hkdfguard-pipeline-*` distributions.
+
 Requires Python 3.12 or later. See the
 [repository README](https://github.com/runsecure/hkdfguard-python#readme) for the full package list,
 an example, configuration, the differences from the .NET library, and the security notes.

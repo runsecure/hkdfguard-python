@@ -250,7 +250,12 @@ class TestAwsSecretsManagerSecretPipelineWriter(SecretPipelineWriterContract):
             own_client: Any = own.client
             assert own_client is not self.client
             original: Callable[[], None] = own_client.close
-            monkeypatch.setattr(own_client, "close", lambda: (closed.append(True), original())[0])
+
+            def close() -> None:
+                closed.append(True)
+                original()
+
+            monkeypatch.setattr(own_client, "close", close)
         assert closed == [True]
 
     def test_without_a_client_or_a_region_the_sdks_refusal_propagates(self, monkeypatch: pytest.MonkeyPatch) -> None:
