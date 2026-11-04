@@ -35,6 +35,7 @@ Each distribution installs one subpackage of the `hkdfguard` namespace package.
 | `hkdfguard-cache-googlesecretmanager` | `hkdfguard.cache.googlesecretmanager`   | HkdfGuard.Cache.GoogleSecretManager  | `GoogleSecretManagerSecretCache` over Google Cloud Secret Manager, through a gRPC Secret Manager client |
 | `hkdfguard-cache-hashicorpvault`      | `hkdfguard.cache.hashicorpvault`        | HkdfGuard.Cache.HashiCorpVault       | `HashiCorpVaultSecretCache` over HashiCorp Vault's KV secrets engine, through the standard library's HTTP client |
 | `hkdfguard-options`                   | `hkdfguard.options`                     | HkdfGuard.Options                    | `HkdfGuardOptions`, `KeyFileOptions`, `OptionsValidationError` |
+| `hkdfguard-integration-configurationresolver` | `hkdfguard.integration.configurationresolver` | HkdfGuard.Integration.ConfigurationResolver | `ProtectedCacheValueProvider` and `ResolvingProtectedCacheCollection`, which resolve `${name}` templates from the caches; and the parts of ConfigurationResolver they use: `DefaultToken`, `ConfigurationItemReader`, `ConfigurationItemResolver`, `ConfigurationResolverBuilder`, `ValueProviderBase`, `CompositeValueProvider`, `ConfigurationKeyError` |
 
 Naming: abstract base classes drop the .NET `I` prefix (`ICryptoProvider` -> `CryptoProvider`), and
 concrete classes keep their descriptive .NET names (`AesGcmCryptoProvider`). Where an implementation
@@ -706,6 +707,31 @@ written = caches.decrypt("prod/app-config#api-key", result)  # or: await caches.
 
 Each package's README covers its names, options and errors.
 
+## Resolving configuration templates from the caches
+
+`hkdfguard-integration-configurationresolver` fills the `${name}` items in a template, such as a
+connection string, with secrets from any `ProtectedReadOnlyCache`. It is the port of .NET's
+`HkdfGuard.Integration.ConfigurationResolver`, together with the parts of
+[ConfigurationResolver](https://github.com/runsecure/configurationresolver-dotnet) it uses, in one
+distribution:
+
+```python
+from hkdfguard.integration.configurationresolver import ConfigurationItemReader, ConfigurationResolverBuilder, DefaultToken
+
+token = DefaultToken()  # "${", "}", and "$" escapes: "$${x}" is the text "${x}"
+reader = ConfigurationItemReader(token)
+reader.read_keys(template)  # only the keys of this trusted template may be resolved
+
+resolver = ConfigurationResolverBuilder().with_token(token).with_reader(reader).add_protected_cache(caches).build()
+written = resolver.resolve(template, destination)  # UTF-8 into a bytearray, zeroed if it fails
+```
+
+Each value is decrypted straight into the destination, or into a `bytearray` that is zeroed, and
+never becomes a `str`. `ResolvingProtectedCacheCollection` is a `ProtectedReadOnlyCache` over several
+sources that resolves a value holding items on its first lookup, from those same sources, and keeps
+the result encrypted under the key ring until `invalidate` or `clear`. See
+[Resolve configuration templates from protected caches](docs/how-to/resolve-configuration-templates.md).
+
 ## Building
 
 Uses a [uv](https://docs.astral.sh/uv/) workspace:
@@ -722,7 +748,7 @@ uv build --all-packages --build-constraints build-constraints.txt --require-hash
 
 `.github/workflows/ci.yml` tests every push and pull request on Linux, Windows and macOS with Python
 3.12 to 3.14, lints, and builds and checks the packages. `.github/workflows/release.yml` publishes all
-seventeen distributions together as a GitHub Release, with Sigstore-signed build provenance and no stored
+eighteen distributions together as a GitHub Release, with Sigstore-signed build provenance and no stored
 token. Nothing is published to PyPI yet.
 
 To release: set the same version in every `packages/*/pyproject.toml`, merge to `main`, then push a tag

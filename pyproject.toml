@@ -1,4 +1,4 @@
-# The workspace root: develops and tests the seventeen hkdfguard-* distributions in packages/ together.
+# The workspace root: develops and tests the eighteen hkdfguard-* distributions in packages/ together.
 # It is not itself a published package.
 [project]
 name = "hkdfguard-workspace"
@@ -22,6 +22,7 @@ dependencies = [
     "hkdfguard-cache-azurekeyvault",
     "hkdfguard-cache-googlesecretmanager",
     "hkdfguard-cache-hashicorpvault",
+    "hkdfguard-integration-configurationresolver",
 ]
 
 [dependency-groups]
@@ -61,13 +62,19 @@ hkdfguard-cache-awssecretsmanager = { workspace = true }
 hkdfguard-cache-azurekeyvault = { workspace = true }
 hkdfguard-cache-googlesecretmanager = { workspace = true }
 hkdfguard-cache-hashicorpvault = { workspace = true }
+hkdfguard-integration-configurationresolver = { workspace = true }
 
 [tool.pytest.ini_options]
 testpaths = ["packages"]
 addopts = ["--import-mode=importlib", "-ra"]
 # hkdfguard_test_support.py, beside the native tests: what the native integration tests in every package share; and
-# vault_client_test_support.py, what hkdfguard-integration-hashicorpvault's tests share.
-pythonpath = ["packages/hkdfguard-keywrapping-v1/tests", "packages/hkdfguard-integration-hashicorpvault/tests"]
+# vault_client_test_support.py, what hkdfguard-integration-hashicorpvault's tests share; and
+# configurationresolver_test_support.py, what hkdfguard-integration-configurationresolver's tests share.
+pythonpath = [
+    "packages/hkdfguard-keywrapping-v1/tests",
+    "packages/hkdfguard-integration-hashicorpvault/tests",
+    "packages/hkdfguard-integration-configurationresolver/tests",
+]
 markers = ["native: calls the real native KMS library (skipped unless one is installed and provisioned)"]
 
 [tool.ruff]
@@ -108,8 +115,10 @@ mypy_path = [
     "packages/hkdfguard-cache-azurekeyvault/src",
     "packages/hkdfguard-cache-googlesecretmanager/src",
     "packages/hkdfguard-cache-hashicorpvault/src",
+    "packages/hkdfguard-integration-configurationresolver/src",
     "packages/hkdfguard-keywrapping-v1/tests",  # hkdfguard_test_support.py
     "packages/hkdfguard-integration-hashicorpvault/tests",  # vault_client_test_support.py
+    "packages/hkdfguard-integration-configurationresolver/tests",  # configurationresolver_test_support.py
 ]
 namespace_packages = true
 explicit_package_bases = true

@@ -18,6 +18,7 @@ members = [
     "hkdfguard-cryptoprovider-aesgcm256",
     "hkdfguard-dataencryptionkey",
     "hkdfguard-diagnostics",
+    "hkdfguard-integration-configurationresolver",
     "hkdfguard-integration-hashicorpvault",
     "hkdfguard-keywrapping-awskms",
     "hkdfguard-keywrapping-azurekeyvault",
@@ -779,6 +780,21 @@ dependencies = [
 requires-dist = [{ name = "opentelemetry-api", specifier = ">=1.45" }]
 
 [[package]]
+name = "hkdfguard-integration-configurationresolver"
+version = "0.9.1"
+source = { editable = "packages/hkdfguard-integration-configurationresolver" }
+dependencies = [
+    { name = "hkdfguard-abstractions" },
+    { name = "hkdfguard-diagnostics" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "hkdfguard-abstractions", editable = "packages/hkdfguard-abstractions" },
+    { name = "hkdfguard-diagnostics", editable = "packages/hkdfguard-diagnostics" },
+]
+
+[[package]]
 name = "hkdfguard-integration-hashicorpvault"
 version = "0.9.1"
 source = { editable = "packages/hkdfguard-integration-hashicorpvault" }
@@ -916,6 +932,7 @@ dependencies = [
     { name = "hkdfguard-cryptoprovider-aesgcm256" },
     { name = "hkdfguard-dataencryptionkey" },
     { name = "hkdfguard-diagnostics" },
+    { name = "hkdfguard-integration-configurationresolver" },
     { name = "hkdfguard-integration-hashicorpvault" },
     { name = "hkdfguard-keywrapping-awskms" },
     { name = "hkdfguard-keywrapping-azurekeyvault" },
@@ -949,6 +966,7 @@ requires-dist = [
     { name = "hkdfguard-cryptoprovider-aesgcm256", editable = "packages/hkdfguard-cryptoprovider-aesgcm256" },
     { name = "hkdfguard-dataencryptionkey", editable = "packages/hkdfguard-dataencryptionkey" },
     { name = "hkdfguard-diagnostics", editable = "packages/hkdfguard-diagnostics" },
+    { name = "hkdfguard-integration-configurationresolver", editable = "packages/hkdfguard-integration-configurationresolver" },
     { name = "hkdfguard-integration-hashicorpvault", editable = "packages/hkdfguard-integration-hashicorpvault" },
     { name = "hkdfguard-keywrapping-awskms", editable = "packages/hkdfguard-keywrapping-awskms" },
     { name = "hkdfguard-keywrapping-azurekeyvault", editable = "packages/hkdfguard-keywrapping-azurekeyvault" },
