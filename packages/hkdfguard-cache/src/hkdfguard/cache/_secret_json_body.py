@@ -4,17 +4,38 @@ from __future__ import annotations
 
 from collections.abc import Buffer, Sequence
 from dataclasses import dataclass, field
-from typing import Final
+from typing import Final, Protocol, runtime_checkable
 
-from hkdfguard.abstractions import ArrayUtility, JsonReader, JsonToken, MalformedJsonError
+from hkdfguard.abstractions import ArrayUtility, JsonReader, JsonToken, MalformedJsonError, WritableBuffer
 from hkdfguard.cache._body import ResponseBody
 from hkdfguard.cache._errors import InvalidSecretDataError
-from hkdfguard.cache._remote_secret_cache import SecretValueSink
-from hkdfguard.cache._secret_json_keys import set_keys
+from hkdfguard.cache._secret_json_keys import set_keys, try_set_keys
 
 _BASE64: Final = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 _BASE64_VALUES: Final = {c: i for i, c in enumerate(_BASE64)}
 _PAD: Final = ord("=")
+
+
+@runtime_checkable
+class SecretValueReceiver(Protocol):
+    """What :class:`SecretJsonBody` hands a secret's values to: a
+    :class:`~hkdfguard.cache.SecretValueSink` (a remote cache's fetch), or anything else that takes
+    them as a sink does - a pipeline writer's, which encrypts the values its secret names ask for.
+    Every value is handed over in a bytearray (or a writable ``memoryview`` over one) that the
+    receiver may zero, and that is zeroed once it returns either way; a receiver must never keep it,
+    nor make a ``str`` or ``bytes`` of it."""
+
+    def set_bytes(self, plaintext: WritableBuffer) -> None:
+        """Takes the secret's whole value, as a binary property's decoded bytes."""
+
+    def set_key_bytes(self, key: str, plaintext: WritableBuffer) -> None:
+        """Takes the value of one key the secret holds: a string member's UTF-8 bytes, or a number's,
+        true's or false's JSON text. ``key`` is a member name a key can be (see
+        :meth:`RemoteSecretCache.is_valid_key <hkdfguard.cache.RemoteSecretCache.is_valid_key>`)."""
+
+    def set_bytes_with_json_keys(self, plaintext: WritableBuffer) -> None:
+        """Takes the secret's whole value, as a text property's UTF-8 bytes - which, when they are a
+        JSON object, hold keys too (see :meth:`SecretJsonBody.capture_json_keys`)."""
 
 
 class SecretJsonBody:
@@ -36,7 +57,7 @@ class SecretJsonBody:
     _INITIAL_BUFFER_LENGTH: Final = 16 * 1024
 
     @staticmethod
-    def capture(body: ResponseBody, value: SecretValueSink, text_property: str, base64_property: str | None = None, *,
+    def capture(body: ResponseBody, value: SecretValueReceiver, text_property: str, base64_property: str | None = None, *,
                 object_path: Sequence[str] = ()) -> bytes:
         """Reads ``body`` to its end and hands the value of its ``text_property`` (as UTF-8 bytes,
         with :meth:`SecretValueSink.set_bytes_with_json_keys`, so a JSON object's members are keys
@@ -62,7 +83,7 @@ class SecretJsonBody:
         return SecretJsonBody._read(body, value, object_path, target)
 
     @staticmethod
-    def capture_keys(body: ResponseBody, value: SecretValueSink, object_path: Sequence[str]) -> None:
+    def capture_keys(body: ResponseBody, value: SecretValueReceiver, object_path: Sequence[str]) -> None:
         """Reads ``body`` to its end and hands each member of the object reached through
         ``object_path``'s property names to ``value`` as a key, as
         :meth:`SecretValueSink.set_bytes_with_json_keys` describes - for a store whose secrets are
@@ -79,7 +100,29 @@ class SecretJsonBody:
         SecretJsonBody._read(body, value, object_path, _Target(None, None, value))
 
     @staticmethod
-    def _read(body: ResponseBody, value: SecretValueSink, object_path: Sequence[str], target: _Target) -> bytes:
+    def capture_json_keys(json: Buffer, value: SecretValueReceiver) -> None:
+        """When ``json`` - a secret's whole value, already taken out of its response - is exactly one
+        JSON object, hands each of its members to ``value`` with
+        :meth:`SecretValueReceiver.set_key_bytes`: a string as its UTF-8 bytes, a number, true or
+        false as its JSON text; a member that is null, an object, an array or an empty string, or
+        whose name isn't a key a name can hold, is left out. Anything else - plain text that merely
+        starts like JSON, an array, malformed JSON - hands nothing over: the whole value is checked
+        first, so malformed JSON never hands over part of its members. A string member's bytes are
+        handed over as they are unescaped, not checked to be UTF-8. Read in place, never as a
+        ``str``; every bytearray a member was unescaped into is zeroed once handed over. This is how :meth:`SecretValueSink.set_bytes_with_json_keys
+        <hkdfguard.cache.SecretValueSink.set_bytes_with_json_keys>` finds a secret's keys.
+
+        :raises TypeError: ``json`` isn't a buffer, or ``value`` is ``None``
+        :raises InvalidSecretDataError: the object holds a member name more than once
+        """
+        if value is None:
+            raise TypeError("value must not be None.")
+        if not isinstance(json, Buffer):
+            raise TypeError("json must be a buffer.")
+        try_set_keys(json, value)
+
+    @staticmethod
+    def _read(body: ResponseBody, value: SecretValueReceiver, object_path: Sequence[str], target: _Target) -> bytes:
         # Reads body and walks it for target; returns the body redacted, for a target with a text property.
         if body is None:
             raise TypeError("body must not be None.")
@@ -144,7 +187,7 @@ class _Target:
     # as a key - and what it has found so far.
     text_property: str | None
     base64_property: str | None
-    value: SecretValueSink
+    value: SecretValueReceiver
     secrets: list[tuple[int, int]] = field(default_factory=list)
     keys: set[str] = field(default_factory=set)
     handed_over: bool = False
@@ -191,7 +234,7 @@ def _read_property(reader: JsonReader, target: _Target) -> None:
     target.secrets.append((reader.token_start, reader.bytes_consumed))
 
 
-def _hand_over(reader: JsonReader, is_base64: bool, value: SecretValueSink) -> None:
+def _hand_over(reader: JsonReader, is_base64: bool, value: SecretValueReceiver) -> None:
     # Unescaped, a string is never longer than it is escaped.
     text = bytearray(reader.value_length)
     decoded: bytearray | None = None

@@ -3,7 +3,7 @@ key ring's current key, bound to its name, :class:`ProtectedCacheCollection` rea
 caches in order, :class:`FilePerSecretCache` reads already encrypted secrets from a trusted folder
 holding one file per secret, and :class:`RemoteSecretCache` is the base of the caches over a remote
 secret store, with :class:`SecretJsonBody` to take a secret out of a JSON response body before an
-SDK can turn it into a ``str``."""
+SDK can turn it into a ``str`` and hand it to a :class:`SecretValueReceiver`."""
 
 from pkgutil import extend_path
 
@@ -18,7 +18,7 @@ from hkdfguard.cache._error_response_body import ErrorResponseBody
 from hkdfguard.cache._errors import InvalidSecretDataError
 from hkdfguard.cache._file_per_secret_cache import FilePerSecretCache
 from hkdfguard.cache._remote_secret_cache import RemoteSecretCache, SecretNameMatching, SecretValueSink
-from hkdfguard.cache._secret_json_body import SecretJsonBody
+from hkdfguard.cache._secret_json_body import SecretJsonBody, SecretValueReceiver
 
 __all__ = [
     "ErrorResponseBody",
@@ -31,5 +31,6 @@ __all__ = [
     "ResponseBody",
     "SecretJsonBody",
     "SecretNameMatching",
+    "SecretValueReceiver",
     "SecretValueSink",
 ]

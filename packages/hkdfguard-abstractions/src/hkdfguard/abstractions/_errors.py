@@ -38,4 +38,5 @@ class ObjectClosedError(RuntimeError):
 
 
 class KeyNotFoundError(LookupError):
-    """No key is registered for the requested key ring version."""
+    """No key is registered for the requested key ring version - or, from a
+    :class:`SecretPipelineWriter`'s pull, a secret has no value: .NET's ``KeyNotFoundException``."""

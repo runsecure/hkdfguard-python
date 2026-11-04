@@ -24,6 +24,7 @@ from hkdfguard.abstractions._interfaces import (
     PipelineDataProtector,
     ProtectedCache,
     ProtectedReadOnlyCache,
+    SecretPipelineWriter,
     VersionedKey,
 )
 from hkdfguard.abstractions._json_reader import JsonReader, JsonToken, MalformedJsonError
@@ -64,6 +65,7 @@ __all__ = [
     "ProtectedConfigurationPurpose",
     "ProtectedReadOnlyCache",
     "RefreshFailurePolicy",
+    "SecretPipelineWriter",
     "ServiceNames",
     "Utf8",
     "VersionedKey",

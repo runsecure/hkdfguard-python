@@ -12,12 +12,12 @@ from hkdfguard.cache._errors import InvalidSecretDataError
 from hkdfguard.cache._secret_names import is_valid_key
 
 if TYPE_CHECKING:
-    from hkdfguard.cache._remote_secret_cache import SecretValueSink
+    from hkdfguard.cache._secret_json_body import SecretValueReceiver
 
 _KEY_VALUE_TOKENS = (JsonToken.STRING, JsonToken.NUMBER, JsonToken.TRUE, JsonToken.FALSE)
 
 
-def try_set_keys(json: Buffer, value: SecretValueSink) -> None:
+def try_set_keys(json: Buffer, value: SecretValueReceiver) -> None:
     """When ``json`` is exactly one JSON object, hands each of its members over as a key; anything
     else - plain text that merely starts like JSON included - hands nothing over. The whole value is
     checked first, so malformed JSON never hands over part of its members."""
@@ -29,7 +29,7 @@ def try_set_keys(json: Buffer, value: SecretValueSink) -> None:
     set_keys(reader, value, set())
 
 
-def set_keys(reader: JsonReader, value: SecretValueSink, seen: set[str]) -> None:
+def set_keys(reader: JsonReader, value: SecretValueReceiver, seen: set[str]) -> None:
     """Hands each member of the object ``reader`` is at the start of over as a key, leaving
     ``reader`` at its end. A string is handed over as its UTF-8 bytes; a number, true or false as its
     JSON text; null, an object, an array, an empty string, or a member whose name isn't a key a name
@@ -52,7 +52,7 @@ def set_keys(reader: JsonReader, value: SecretValueSink, seen: set[str]) -> None
             reader.skip()
 
 
-def _set_key(reader: JsonReader, key: str, value: SecretValueSink) -> None:
+def _set_key(reader: JsonReader, key: str, value: SecretValueReceiver) -> None:
     # Unescaped, a string is never longer than it is escaped; anything else is copied as it is.
     buffer = bytearray(reader.value_length)
     try:

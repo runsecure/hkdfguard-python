@@ -1,0 +1,1 @@
+# hkdfguard-pipeline-googlesecretmanager

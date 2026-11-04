@@ -72,6 +72,41 @@ def test_encode_strict_refuses_an_unpaired_surrogate() -> None:
             Utf8.encode_strict(text)
 
 
+@pytest.mark.parametrize("text", ["", "ascii", "héllo", "€", "秘密", "😀", chr(0x7F) + chr(0x80) + chr(0x7FF) + chr(0x800) + chr(0xFFFF) + chr(0x10000) + chr(0x10FFFF)])
+def test_is_valid_accepts_well_formed_utf8_in_any_buffer(text: str) -> None:
+    encoded = text.encode()
+    assert Utf8.is_valid(encoded)
+    assert Utf8.is_valid(bytearray(encoded))
+    assert Utf8.is_valid(memoryview(encoded))
+
+
+@pytest.mark.parametrize("invalid", [
+    [0x80],                    # a continuation byte alone
+    [0xC0, 0x80],              # overlong
+    [0xC1, 0xBF],              # overlong
+    [0xE0, 0x9F, 0xBF],        # overlong
+    [0xED, 0xA0, 0x80],        # a surrogate
+    [0xF0, 0x8F, 0xBF, 0xBF],  # overlong
+    [0xF4, 0x90, 0x80, 0x80],  # past U+10FFFF
+    [0xF5, 0x80, 0x80, 0x80],  # no such lead byte
+    [0xE2, 0x82],              # truncated
+    [0x61, 0xC3],              # truncated at the end
+    [0xE2, 0x28, 0xA1],        # a bad continuation byte
+    [0xF0, 0x9F, 0x98, 0x41],  # a bad last continuation byte
+])
+def test_is_valid_refuses_what_isnt_utf8_as_the_standard_codec_does(invalid: list[int]) -> None:
+    data = bytes(invalid)
+    with pytest.raises(UnicodeDecodeError):
+        data.decode("utf-8")
+    assert not Utf8.is_valid(data)
+
+
+def test_is_valid_reads_a_view_of_a_wider_format_byte_by_byte() -> None:
+    assert Utf8.is_valid(memoryview(bytearray(b"abcd")).cast("H"))
+    with pytest.raises(TypeError):
+        Utf8.is_valid("text")  # type: ignore[arg-type]
+
+
 def test_a_surrogate_pair_held_as_two_code_points_encodes_as_its_character() -> None:
     assert Utf8.encode_strict("😀") == "😀".encode()
 

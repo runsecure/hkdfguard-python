@@ -7,7 +7,7 @@ import re
 import struct
 import threading
 import time
-from collections.abc import Buffer, Iterator
+from collections.abc import Buffer, Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -800,6 +800,74 @@ def test_pipeline_round_trips(plaintext: str) -> None:
 
         result = bytearray(protector.get_max_decrypted_length(formatted))
         assert bytes(result[: protector.decrypt(formatted, ID, result)]) == plaintext.encode()
+
+
+@pytest.mark.parametrize("plaintext", ["hello", "héllo wörld ✓ 🔐", "", "é-秘密-" * 1500])
+@pytest.mark.parametrize("kind", [bytes, bytearray, memoryview])
+def test_pipeline_encrypts_a_utf8_buffer_as_it_does_the_str(plaintext: str, kind: Callable[[bytes], Buffer]) -> None:
+    with pipeline() as protector:
+        formatted = protector.encrypt(kind(plaintext.encode()), ID)
+        assert reveal(protector, formatted, ID) == plaintext
+
+
+def test_pipeline_encrypts_a_buffer_from_a_zeroed_copy_leaving_the_callers_buffer_as_it_was(monkeypatch: pytest.MonkeyPatch) -> None:
+    plaintext = bytearray("pässwörd".encode())
+    seen: list[WritableBuffer] = []
+    original = AesGcmCryptoSession.encrypt
+
+    def spy(session: AesGcmCryptoSession, source: WritableBuffer, result: WritableBuffer, *, aad: Buffer = b"") -> int:
+        seen.append(source)
+        return original(session, source, result, aad=aad)
+
+    monkeypatch.setattr(AesGcmCryptoSession, "encrypt", spy)
+    with pipeline() as protector:
+        formatted = protector.encrypt(memoryview(plaintext), ID)
+
+        assert plaintext == "pässwörd".encode()
+        assert len(seen) == 1
+        assert isinstance(seen[0], bytearray) and seen[0] is not plaintext
+        assert seen[0] == bytearray(len(plaintext))  # the copy encrypted from, zeroed
+        assert reveal(protector, formatted, ID) == "pässwörd"
+
+
+def test_pipeline_encrypts_a_view_of_part_of_a_buffer_and_of_a_wider_format() -> None:
+    with pipeline() as protector:
+        assert reveal(protector, protector.encrypt(memoryview(b"xxsecretxx")[2:8], ID), ID) == "secret"
+        wide = memoryview(bytearray(b"abcd")).cast("H")
+        assert reveal(protector, protector.encrypt(wide, ID), ID) == "abcd"
+
+
+@pytest.mark.parametrize("invalid", [bytes([0xFF]), bytes([0xC0, 0x80]), bytes([0xED, 0xA0, 0x80]), bytes([0xF4, 0x90, 0x80, 0x80]),
+                                     b"ok" + bytes([0xE2, 0x82]), bytes([0x80]), bytes([0xF8, 0x88, 0x80, 0x80, 0x80])])
+def test_pipeline_refuses_a_buffer_that_isnt_utf8_leaving_it_and_the_budget_untouched(invalid: bytes) -> None:
+    budget = EncryptionBudget()
+    with pipeline(_key=bytearray(os.urandom(32)), _budget=budget) as protector:
+        buffer = bytearray(invalid)
+        with pytest.raises(ValueError, match="UTF-8"):
+            protector.encrypt(buffer, ID)
+        assert buffer == invalid
+        assert budget.count == 0
+
+
+def test_pipeline_refuses_a_plaintext_that_is_neither_text_nor_a_buffer() -> None:
+    with pipeline() as protector:
+        for bad in [None, 42, ["a"]]:
+            with pytest.raises(TypeError):
+                protector.encrypt(bad, ID)  # type: ignore[arg-type]
+
+
+def test_pipeline_logs_a_buffers_length_in_characters_as_a_strs(spans: InMemorySpanExporter) -> None:
+    original = HkdfGuardTelemetry.DATA_PROTECTION.sensitive_logging_enabled
+    HkdfGuardTelemetry.DATA_PROTECTION.sensitive_logging_enabled = True
+    try:
+        with pipeline() as protector:
+            protector.encrypt("héllo 🔐".encode(), ID)
+            protector.encrypt("héllo 🔐", ID)
+        lengths = [event.attributes[AttributeNames.PLAINTEXT_LENGTH] for span in finished(spans, SpanNames.DataProtection.PROTECTOR_ENCRYPT)
+                   for event in span.events if event.attributes and AttributeNames.PLAINTEXT_LENGTH in event.attributes]
+        assert lengths == [7, 7]
+    finally:
+        HkdfGuardTelemetry.DATA_PROTECTION.sensitive_logging_enabled = original
 
 
 def test_pipeline_refuses_an_empty_or_invalid_secret_identifier() -> None:

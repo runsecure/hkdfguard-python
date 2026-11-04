@@ -26,6 +26,11 @@ members = [
     "hkdfguard-keywrapping-hashicorpvault",
     "hkdfguard-keywrapping-v1",
     "hkdfguard-options",
+    "hkdfguard-pipeline",
+    "hkdfguard-pipeline-awssecretsmanager",
+    "hkdfguard-pipeline-azurekeyvault",
+    "hkdfguard-pipeline-googlesecretmanager",
+    "hkdfguard-pipeline-hashicorpvault",
     "hkdfguard-securefile",
     "hkdfguard-workspace",
 ]
@@ -908,6 +913,97 @@ requires-dist = [
 ]
 
 [[package]]
+name = "hkdfguard-pipeline"
+version = "0.9.1"
+source = { editable = "packages/hkdfguard-pipeline" }
+dependencies = [
+    { name = "hkdfguard-abstractions" },
+    { name = "hkdfguard-cache" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "hkdfguard-abstractions", editable = "packages/hkdfguard-abstractions" },
+    { name = "hkdfguard-cache", editable = "packages/hkdfguard-cache" },
+]
+
+[[package]]
+name = "hkdfguard-pipeline-awssecretsmanager"
+version = "0.9.1"
+source = { editable = "packages/hkdfguard-pipeline-awssecretsmanager" }
+dependencies = [
+    { name = "botocore" },
+    { name = "hkdfguard-abstractions" },
+    { name = "hkdfguard-cache" },
+    { name = "hkdfguard-pipeline" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "botocore", specifier = ">=1.40" },
+    { name = "hkdfguard-abstractions", editable = "packages/hkdfguard-abstractions" },
+    { name = "hkdfguard-cache", editable = "packages/hkdfguard-cache" },
+    { name = "hkdfguard-pipeline", editable = "packages/hkdfguard-pipeline" },
+]
+
+[[package]]
+name = "hkdfguard-pipeline-azurekeyvault"
+version = "0.9.1"
+source = { editable = "packages/hkdfguard-pipeline-azurekeyvault" }
+dependencies = [
+    { name = "azure-keyvault-secrets" },
+    { name = "hkdfguard-abstractions" },
+    { name = "hkdfguard-cache" },
+    { name = "hkdfguard-pipeline" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "azure-keyvault-secrets", specifier = ">=4.11" },
+    { name = "hkdfguard-abstractions", editable = "packages/hkdfguard-abstractions" },
+    { name = "hkdfguard-cache", editable = "packages/hkdfguard-cache" },
+    { name = "hkdfguard-pipeline", editable = "packages/hkdfguard-pipeline" },
+]
+
+[[package]]
+name = "hkdfguard-pipeline-googlesecretmanager"
+version = "0.9.1"
+source = { editable = "packages/hkdfguard-pipeline-googlesecretmanager" }
+dependencies = [
+    { name = "google-cloud-secret-manager" },
+    { name = "hkdfguard-abstractions" },
+    { name = "hkdfguard-cache" },
+    { name = "hkdfguard-pipeline" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "google-cloud-secret-manager", specifier = ">=2.31" },
+    { name = "hkdfguard-abstractions", editable = "packages/hkdfguard-abstractions" },
+    { name = "hkdfguard-cache", editable = "packages/hkdfguard-cache" },
+    { name = "hkdfguard-pipeline", editable = "packages/hkdfguard-pipeline" },
+]
+
+[[package]]
+name = "hkdfguard-pipeline-hashicorpvault"
+version = "0.9.1"
+source = { editable = "packages/hkdfguard-pipeline-hashicorpvault" }
+dependencies = [
+    { name = "hkdfguard-abstractions" },
+    { name = "hkdfguard-cache" },
+    { name = "hkdfguard-integration-hashicorpvault" },
+    { name = "hkdfguard-pipeline" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "hkdfguard-abstractions", editable = "packages/hkdfguard-abstractions" },
+    { name = "hkdfguard-cache", editable = "packages/hkdfguard-cache" },
+    { name = "hkdfguard-integration-hashicorpvault", editable = "packages/hkdfguard-integration-hashicorpvault" },
+    { name = "hkdfguard-pipeline", editable = "packages/hkdfguard-pipeline" },
+]
+
+[[package]]
 name = "hkdfguard-securefile"
 version = "0.9.1"
 source = { editable = "packages/hkdfguard-securefile" }
@@ -940,6 +1036,11 @@ dependencies = [
     { name = "hkdfguard-keywrapping-hashicorpvault" },
     { name = "hkdfguard-keywrapping-v1" },
     { name = "hkdfguard-options" },
+    { name = "hkdfguard-pipeline" },
+    { name = "hkdfguard-pipeline-awssecretsmanager" },
+    { name = "hkdfguard-pipeline-azurekeyvault" },
+    { name = "hkdfguard-pipeline-googlesecretmanager" },
+    { name = "hkdfguard-pipeline-hashicorpvault" },
     { name = "hkdfguard-securefile" },
 ]
 
@@ -974,6 +1075,11 @@ requires-dist = [
     { name = "hkdfguard-keywrapping-hashicorpvault", editable = "packages/hkdfguard-keywrapping-hashicorpvault" },
     { name = "hkdfguard-keywrapping-v1", editable = "packages/hkdfguard-keywrapping-v1" },
     { name = "hkdfguard-options", editable = "packages/hkdfguard-options" },
+    { name = "hkdfguard-pipeline", editable = "packages/hkdfguard-pipeline" },
+    { name = "hkdfguard-pipeline-awssecretsmanager", editable = "packages/hkdfguard-pipeline-awssecretsmanager" },
+    { name = "hkdfguard-pipeline-azurekeyvault", editable = "packages/hkdfguard-pipeline-azurekeyvault" },
+    { name = "hkdfguard-pipeline-googlesecretmanager", editable = "packages/hkdfguard-pipeline-googlesecretmanager" },
+    { name = "hkdfguard-pipeline-hashicorpvault", editable = "packages/hkdfguard-pipeline-hashicorpvault" },
     { name = "hkdfguard-securefile", editable = "packages/hkdfguard-securefile" },
 ]
 

@@ -1,0 +1,33 @@
+[project]
+name = "hkdfguard-pipeline"
+version = "0.9.1"
+description = "The shared base of the secret pipeline writers: pull a fixed list of secrets, encrypt each at once with a pipeline data protector bound to its file name, and write one encrypted file per secret, the layout FilePerSecretCache reads."
+license = "MPL-2.0"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "hkdfguard-abstractions",
+    "hkdfguard-cache",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Security :: Cryptography",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Repository = "https://github.com/runsecure/hkdfguard-python"
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+# hkdfguard is a namespace package shared by every hkdfguard-* distribution: only this
+# distribution's own subpackage is packed.
+[tool.hatch.build.targets.wheel]
+only-include = ["src/hkdfguard/pipeline"]
+sources = ["src"]
+
+[tool.hatch.build]
+# Editable installs put src/ (the namespace root) on the path, not src/hkdfguard.
+dev-mode-dirs = ["src"]

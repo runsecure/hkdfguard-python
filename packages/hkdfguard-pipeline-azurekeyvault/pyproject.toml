@@ -1,0 +1,35 @@
+[project]
+name = "hkdfguard-pipeline-azurekeyvault"
+version = "0.9.1"
+description = "The end of a provisioning pipeline over Azure Key Vault secrets: pulls a fixed list of secrets, taking each out of the response before the SDK can make it a str, encrypts it at once with a pipeline data protector and writes one encrypted file per secret."
+license = "MPL-2.0"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "hkdfguard-abstractions",
+    "hkdfguard-cache",
+    "hkdfguard-pipeline",
+    "azure-keyvault-secrets>=4.11",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Security :: Cryptography",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Repository = "https://github.com/runsecure/hkdfguard-python"
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+# hkdfguard is a namespace package shared by every hkdfguard-* distribution, and hkdfguard.pipeline
+# extends its path to the store subpackages: only this distribution's own subpackage is packed.
+[tool.hatch.build.targets.wheel]
+only-include = ["src/hkdfguard/pipeline/azurekeyvault"]
+sources = ["src"]
+
+[tool.hatch.build]
+# Editable installs put src/ (the namespace root) on the path, not src/hkdfguard.
+dev-mode-dirs = ["src"]
