@@ -26,6 +26,7 @@ members = [
     "hkdfguard-keywrapping-hashicorpvault",
     "hkdfguard-keywrapping-v1",
     "hkdfguard-options",
+    "hkdfguard-options-certificate",
     "hkdfguard-pipeline",
     "hkdfguard-pipeline-awssecretsmanager",
     "hkdfguard-pipeline-azurekeyvault",
@@ -913,6 +914,23 @@ requires-dist = [
 ]
 
 [[package]]
+name = "hkdfguard-options-certificate"
+version = "0.9.1"
+source = { editable = "packages/hkdfguard-options-certificate" }
+dependencies = [
+    { name = "cryptography" },
+    { name = "hkdfguard-abstractions" },
+    { name = "hkdfguard-options" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "cryptography", specifier = ">=47" },
+    { name = "hkdfguard-abstractions", editable = "packages/hkdfguard-abstractions" },
+    { name = "hkdfguard-options", editable = "packages/hkdfguard-options" },
+]
+
+[[package]]
 name = "hkdfguard-pipeline"
 version = "0.9.1"
 source = { editable = "packages/hkdfguard-pipeline" }
@@ -1036,6 +1054,7 @@ dependencies = [
     { name = "hkdfguard-keywrapping-hashicorpvault" },
     { name = "hkdfguard-keywrapping-v1" },
     { name = "hkdfguard-options" },
+    { name = "hkdfguard-options-certificate" },
     { name = "hkdfguard-pipeline" },
     { name = "hkdfguard-pipeline-awssecretsmanager" },
     { name = "hkdfguard-pipeline-azurekeyvault" },
@@ -1075,6 +1094,7 @@ requires-dist = [
     { name = "hkdfguard-keywrapping-hashicorpvault", editable = "packages/hkdfguard-keywrapping-hashicorpvault" },
     { name = "hkdfguard-keywrapping-v1", editable = "packages/hkdfguard-keywrapping-v1" },
     { name = "hkdfguard-options", editable = "packages/hkdfguard-options" },
+    { name = "hkdfguard-options-certificate", editable = "packages/hkdfguard-options-certificate" },
     { name = "hkdfguard-pipeline", editable = "packages/hkdfguard-pipeline" },
     { name = "hkdfguard-pipeline-awssecretsmanager", editable = "packages/hkdfguard-pipeline-awssecretsmanager" },
     { name = "hkdfguard-pipeline-azurekeyvault", editable = "packages/hkdfguard-pipeline-azurekeyvault" },

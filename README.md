@@ -40,6 +40,7 @@ Each distribution installs one subpackage of the `hkdfguard` namespace package.
 | `hkdfguard-pipeline-googlesecretmanager` | `hkdfguard.pipeline.googlesecretmanager` | HkdfGuard.Pipeline.GoogleSecretManager | `GoogleSecretManagerSecretPipelineWriter` over one Google Cloud project's Secret Manager, through a gRPC client's channel; each payload checked against its CRC32C and the secret it names |
 | `hkdfguard-pipeline-hashicorpvault`   | `hkdfguard.pipeline.hashicorpvault`     | HkdfGuard.Pipeline.HashiCorpVault    | `HashiCorpVaultSecretPipelineWriter` and `HashiCorpVaultPipelineOptions` over a HashiCorp Vault KV engine, version 1 or 2, with the token from a `VaultTokenSource`, through the standard library's HTTP client |
 | `hkdfguard-options`                   | `hkdfguard.options`                     | HkdfGuard.Options                    | `HkdfGuardOptions`, `KeyFileOptions`, `OptionsValidationError` |
+| `hkdfguard-options-certificate`       | `hkdfguard.options.certificate`         | HkdfGuard.Options.Certificate        | `CertificateOptions` (one of a Windows store, a macOS keychain, a Linux OpenSSL provider, or a password-protected PKCS#12 or PEM file, with .NET's configuration keys), `CertificateOptionsValidator`, `CertificateOptionsLoader` and the `LoadedCertificate` it opens: a store's key is never exported - `sign`/`decrypt` call CNG or the keychain - and File and Linux sources give an `ssl.SSLContext` |
 | `hkdfguard-integration-configurationresolver` | `hkdfguard.integration.configurationresolver` | HkdfGuard.Integration.ConfigurationResolver | `ProtectedCacheValueProvider` and `ResolvingProtectedCacheCollection`, which resolve `${name}` templates from the caches; and the parts of ConfigurationResolver they use: `DefaultToken`, `ConfigurationItemReader`, `ConfigurationItemResolver`, `ConfigurationResolverBuilder`, `ValueProviderBase`, `CompositeValueProvider`, `ConfigurationKeyError` |
 
 Naming: abstract base classes drop the .NET `I` prefix (`ICryptoProvider` -> `CryptoProvider`), and
@@ -677,6 +678,33 @@ later is found. Names are matched exactly. A file over 64 KiB raises `FileTooLar
 worker thread, so the event loop isn't blocked. A cached value isn't refreshed: a changed file is
 picked up by a new cache instance.
 
+## Opening a certificate from a store, a provider or a file
+
+`hkdfguard-options-certificate` ports .NET's `HkdfGuard.Options.Certificate`: `CertificateOptions`
+(read with `from_mapping` from the same `appsettings.json` section) names one certificate in the
+Windows store, a macOS keychain, an OpenSSL 3 provider on Linux, or a PKCS#12 or PEM file whose
+password is a secret in a `ProtectedReadOnlyCache`; `CertificateOptionsLoader.load` validates it and
+opens it, choosing among a store's certificates with the subject named the one valid now that
+expires last:
+
+```python
+import ssl
+from hkdfguard.options.certificate import CertificateOptions, CertificateOptionsLoader
+
+with CertificateOptionsLoader(secrets).load(CertificateOptions.from_mapping(config["Certificate"])) as certificate:
+    context = certificate.create_ssl_context(ssl.Purpose.CLIENT_AUTH)  # File and Linux sources
+```
+
+A Windows or macOS store's key stays in CNG or the keychain: `sign` and `decrypt` call the store,
+and `create_ssl_context` refuses, since Python's `ssl` takes a key only from a file. A Linux provider's
+key (a TSS2 key file, or a `pkcs11:` URI) is read by `ssl` through the provider's decoder, under a
+Python linked to the system OpenSSL 3. A file's key is decrypted by the package's own PKCS#12 and PBES2
+reader into buffers that are wiped, re-encrypted under a throwaway password, and handed to `ssl`
+through a private temporary file; RC2/RC4 files are refused. The
+[package README](packages/hkdfguard-options-certificate/README.md) lists the differences from .NET, and
+[Open a certificate from a store, a provider or a file](docs/how-to/use-certificate-options.md) sets
+up each source and its opt-in tests.
+
 ## Caching secrets from a secret store
 
 The four `hkdfguard-cache-*` distributions are `ProtectedReadOnlyCache`s over a secret store. Each
@@ -796,7 +824,7 @@ uv build --all-packages --build-constraints build-constraints.txt --require-hash
 
 `.github/workflows/ci.yml` tests every push and pull request on Linux, Windows and macOS with Python
 3.12 to 3.14, lints, and builds and checks the packages. `.github/workflows/release.yml` publishes all
-twenty-three distributions together as a GitHub Release, with Sigstore-signed build provenance and no stored
+twenty-four distributions together as a GitHub Release, with Sigstore-signed build provenance and no stored
 token. Nothing is published to PyPI yet.
 
 To release: set the same version in every `packages/*/pyproject.toml`, merge to `main`, then push a tag
