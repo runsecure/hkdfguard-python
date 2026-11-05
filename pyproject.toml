@@ -1,4 +1,4 @@
-# The workspace root: develops and tests the seventeen hkdfguard-* distributions in packages/ together.
+# The workspace root: develops and tests the twenty-five hkdfguard-* distributions in packages/ together.
 # It is not itself a published package.
 [project]
 name = "hkdfguard-workspace"
@@ -13,15 +13,23 @@ dependencies = [
     "hkdfguard-keywrapping-awskms",
     "hkdfguard-keywrapping-azurekeyvault",
     "hkdfguard-keywrapping-googlekms",
-    "hkdfguard-hashicorpvault-common",
+    "hkdfguard-integration-hashicorpvault",
     "hkdfguard-keywrapping-hashicorpvault",
     "hkdfguard-dataencryptionkey",
     "hkdfguard-cache",
+    "hkdfguard-cache-jsonsecretsfile",
     "hkdfguard-options",
+    "hkdfguard-options-certificate",
     "hkdfguard-cache-awssecretsmanager",
     "hkdfguard-cache-azurekeyvault",
     "hkdfguard-cache-googlesecretmanager",
     "hkdfguard-cache-hashicorpvault",
+    "hkdfguard-pipeline",
+    "hkdfguard-pipeline-awssecretsmanager",
+    "hkdfguard-pipeline-azurekeyvault",
+    "hkdfguard-pipeline-googlesecretmanager",
+    "hkdfguard-pipeline-hashicorpvault",
+    "hkdfguard-integration-configurationresolver",
 ]
 
 [dependency-groups]
@@ -52,21 +60,39 @@ hkdfguard-securefile = { workspace = true }
 hkdfguard-keywrapping-awskms = { workspace = true }
 hkdfguard-keywrapping-azurekeyvault = { workspace = true }
 hkdfguard-keywrapping-googlekms = { workspace = true }
-hkdfguard-hashicorpvault-common = { workspace = true }
+hkdfguard-integration-hashicorpvault = { workspace = true }
 hkdfguard-keywrapping-hashicorpvault = { workspace = true }
 hkdfguard-dataencryptionkey = { workspace = true }
 hkdfguard-cache = { workspace = true }
+hkdfguard-cache-jsonsecretsfile = { workspace = true }
 hkdfguard-options = { workspace = true }
+hkdfguard-options-certificate = { workspace = true }
 hkdfguard-cache-awssecretsmanager = { workspace = true }
 hkdfguard-cache-azurekeyvault = { workspace = true }
 hkdfguard-cache-googlesecretmanager = { workspace = true }
 hkdfguard-cache-hashicorpvault = { workspace = true }
+hkdfguard-pipeline = { workspace = true }
+hkdfguard-pipeline-awssecretsmanager = { workspace = true }
+hkdfguard-pipeline-azurekeyvault = { workspace = true }
+hkdfguard-pipeline-googlesecretmanager = { workspace = true }
+hkdfguard-pipeline-hashicorpvault = { workspace = true }
+hkdfguard-integration-configurationresolver = { workspace = true }
 
 [tool.pytest.ini_options]
 testpaths = ["packages"]
 addopts = ["--import-mode=importlib", "-ra"]
-# hkdfguard_test_support.py, beside the native tests: what the native integration tests in every package share.
-pythonpath = ["packages/hkdfguard-keywrapping-v1/tests"]
+# hkdfguard_test_support.py, beside the native tests: what the native integration tests in every package share; and
+# vault_client_test_support.py, what hkdfguard-integration-hashicorpvault's tests share; and
+# configurationresolver_test_support.py, what hkdfguard-integration-configurationresolver's tests share; and
+# pipeline_test_support.py, the contract every hkdfguard-pipeline-* writer's tests run; and
+# certificate_test_support.py, what hkdfguard-options-certificate's tests share.
+pythonpath = [
+    "packages/hkdfguard-keywrapping-v1/tests",
+    "packages/hkdfguard-integration-hashicorpvault/tests",
+    "packages/hkdfguard-integration-configurationresolver/tests",
+    "packages/hkdfguard-pipeline/tests",
+    "packages/hkdfguard-options-certificate/tests",
+]
 markers = ["native: calls the real native KMS library (skipped unless one is installed and provisioned)"]
 
 [tool.ruff]
@@ -97,17 +123,31 @@ mypy_path = [
     "packages/hkdfguard-keywrapping-awskms/src",
     "packages/hkdfguard-keywrapping-azurekeyvault/src",
     "packages/hkdfguard-keywrapping-googlekms/src",
-    "packages/hkdfguard-hashicorpvault-common/src",
+    "packages/hkdfguard-integration-hashicorpvault/src",
     "packages/hkdfguard-keywrapping-hashicorpvault/src",
     "packages/hkdfguard-dataencryptionkey/src",
     "packages/hkdfguard-cache/src",
     "packages/hkdfguard-options/src",
+    # After hkdfguard-options/src: hkdfguard.options is a regular package that extends its path to this.
+    "packages/hkdfguard-options-certificate/src",
     # After hkdfguard-cache/src: hkdfguard.cache is a regular package that extends its path to these.
+    "packages/hkdfguard-cache-jsonsecretsfile/src",
     "packages/hkdfguard-cache-awssecretsmanager/src",
     "packages/hkdfguard-cache-azurekeyvault/src",
     "packages/hkdfguard-cache-googlesecretmanager/src",
     "packages/hkdfguard-cache-hashicorpvault/src",
+    "packages/hkdfguard-pipeline/src",
+    # After hkdfguard-pipeline/src: hkdfguard.pipeline is a regular package that extends its path to these.
+    "packages/hkdfguard-pipeline-awssecretsmanager/src",
+    "packages/hkdfguard-pipeline-azurekeyvault/src",
+    "packages/hkdfguard-pipeline-googlesecretmanager/src",
+    "packages/hkdfguard-pipeline-hashicorpvault/src",
+    "packages/hkdfguard-integration-configurationresolver/src",
     "packages/hkdfguard-keywrapping-v1/tests",  # hkdfguard_test_support.py
+    "packages/hkdfguard-integration-hashicorpvault/tests",  # vault_client_test_support.py
+    "packages/hkdfguard-integration-configurationresolver/tests",  # configurationresolver_test_support.py
+    "packages/hkdfguard-pipeline/tests",  # pipeline_test_support.py
+    "packages/hkdfguard-options-certificate/tests",  # certificate_test_support.py
 ]
 namespace_packages = true
 explicit_package_bases = true

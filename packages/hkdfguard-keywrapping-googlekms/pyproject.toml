@@ -1,6 +1,6 @@
 [project]
 name = "hkdfguard-keywrapping-googlekms"
-version = "0.9.0"
+version = "0.9.1"
 description = "Wraps DEKs under one symmetric Google Cloud KMS key, reading key files only from where no untrusted account could have replaced them."
 license = "MPL-2.0"
 readme = "README.md"

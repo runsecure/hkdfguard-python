@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 import base64
+import io
 import logging
 import os
 import re
 import struct
+import subprocess
+import sys
 import threading
 import time
-from collections.abc import Buffer, Iterator
+from collections.abc import Buffer, Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 from hkdfguard.abstractions import (
@@ -802,6 +807,74 @@ def test_pipeline_round_trips(plaintext: str) -> None:
         assert bytes(result[: protector.decrypt(formatted, ID, result)]) == plaintext.encode()
 
 
+@pytest.mark.parametrize("plaintext", ["hello", "héllo wörld ✓ 🔐", "", "é-秘密-" * 1500])
+@pytest.mark.parametrize("kind", [bytes, bytearray, memoryview])
+def test_pipeline_encrypts_a_utf8_buffer_as_it_does_the_str(plaintext: str, kind: Callable[[bytes], Buffer]) -> None:
+    with pipeline() as protector:
+        formatted = protector.encrypt(kind(plaintext.encode()), ID)
+        assert reveal(protector, formatted, ID) == plaintext
+
+
+def test_pipeline_encrypts_a_buffer_from_a_zeroed_copy_leaving_the_callers_buffer_as_it_was(monkeypatch: pytest.MonkeyPatch) -> None:
+    plaintext = bytearray("pässwörd".encode())
+    seen: list[WritableBuffer] = []
+    original = AesGcmCryptoSession.encrypt
+
+    def spy(session: AesGcmCryptoSession, source: WritableBuffer, result: WritableBuffer, *, aad: Buffer = b"") -> int:
+        seen.append(source)
+        return original(session, source, result, aad=aad)
+
+    monkeypatch.setattr(AesGcmCryptoSession, "encrypt", spy)
+    with pipeline() as protector:
+        formatted = protector.encrypt(memoryview(plaintext), ID)
+
+        assert plaintext == "pässwörd".encode()
+        assert len(seen) == 1
+        assert isinstance(seen[0], bytearray) and seen[0] is not plaintext
+        assert seen[0] == bytearray(len(plaintext))  # the copy encrypted from, zeroed
+        assert reveal(protector, formatted, ID) == "pässwörd"
+
+
+def test_pipeline_encrypts_a_view_of_part_of_a_buffer_and_of_a_wider_format() -> None:
+    with pipeline() as protector:
+        assert reveal(protector, protector.encrypt(memoryview(b"xxsecretxx")[2:8], ID), ID) == "secret"
+        wide = memoryview(bytearray(b"abcd")).cast("H")
+        assert reveal(protector, protector.encrypt(wide, ID), ID) == "abcd"
+
+
+@pytest.mark.parametrize("invalid", [bytes([0xFF]), bytes([0xC0, 0x80]), bytes([0xED, 0xA0, 0x80]), bytes([0xF4, 0x90, 0x80, 0x80]),
+                                     b"ok" + bytes([0xE2, 0x82]), bytes([0x80]), bytes([0xF8, 0x88, 0x80, 0x80, 0x80])])
+def test_pipeline_refuses_a_buffer_that_isnt_utf8_leaving_it_and_the_budget_untouched(invalid: bytes) -> None:
+    budget = EncryptionBudget()
+    with pipeline(_key=bytearray(os.urandom(32)), _budget=budget) as protector:
+        buffer = bytearray(invalid)
+        with pytest.raises(ValueError, match="UTF-8"):
+            protector.encrypt(buffer, ID)
+        assert buffer == invalid
+        assert budget.count == 0
+
+
+def test_pipeline_refuses_a_plaintext_that_is_neither_text_nor_a_buffer() -> None:
+    with pipeline() as protector:
+        for bad in [None, 42, ["a"]]:
+            with pytest.raises(TypeError):
+                protector.encrypt(bad, ID)  # type: ignore[arg-type]
+
+
+def test_pipeline_logs_a_buffers_length_in_characters_as_a_strs(spans: InMemorySpanExporter) -> None:
+    original = HkdfGuardTelemetry.DATA_PROTECTION.sensitive_logging_enabled
+    HkdfGuardTelemetry.DATA_PROTECTION.sensitive_logging_enabled = True
+    try:
+        with pipeline() as protector:
+            protector.encrypt("héllo 🔐".encode(), ID)
+            protector.encrypt("héllo 🔐", ID)
+        lengths = [event.attributes[AttributeNames.PLAINTEXT_LENGTH] for span in finished(spans, SpanNames.DataProtection.PROTECTOR_ENCRYPT)
+                   for event in span.events if event.attributes and AttributeNames.PLAINTEXT_LENGTH in event.attributes]
+        assert lengths == [7, 7]
+    finally:
+        HkdfGuardTelemetry.DATA_PROTECTION.sensitive_logging_enabled = original
+
+
 def test_pipeline_refuses_an_empty_or_invalid_secret_identifier() -> None:
     with pipeline() as protector:
         formatted = protector.encrypt("hello", ID)
@@ -876,6 +949,141 @@ def test_pipeline_key_as_base64_is_a_read_only_view_of_one_buffer_holding_the_ke
         formatted = protector.encrypt("hello", ID)
         with pipeline(_key=bytearray(base64.b64decode(bytes(first)))) as reader:
             assert reveal(reader, formatted, ID) == "hello"
+
+
+class RecordingStdin:
+    """A process's standard input in memory, as both destinations: records what was written, the
+    buffer it was handed, and whether it was flushed or drained; it can be made to fail or hang."""
+
+    def __init__(self, fail_with: BaseException | None = None, hang: bool = False) -> None:
+        self.data = bytearray()
+        self.buffers: list[bytearray] = []
+        self.flushed = False
+        self.drained = False
+        self.fail_with = fail_with
+        self.hang = hang
+
+    def write(self, data: bytearray, /) -> None:
+        self.buffers.append(data)
+        self.data += data
+
+    def flush(self) -> None:
+        if self.fail_with is not None:
+            raise self.fail_with
+        self.flushed = True
+
+    async def drain(self) -> None:
+        if self.fail_with is not None:
+            raise self.fail_with
+        if self.hang:
+            await asyncio.Event().wait()
+        self.drained = True
+
+
+def test_pipeline_write_dek_writes_the_base64_key_as_ascii_without_a_line_ending_from_a_buffer_it_zeroes() -> None:
+    key = os.urandom(32)
+    with pipeline(_key=bytearray(key)) as protector:
+        stdin = RecordingStdin()
+
+        protector.write_dek(stdin)
+
+        assert bytes(stdin.data) == base64.b64encode(key)
+        assert len(stdin.data) == 44
+        assert stdin.flushed
+        # Handed a bytearray - never a str or bytes - and zeroed once the flush returned; not the
+        # buffer get_key_as_base64 returns, which stays as it was.
+        assert len(stdin.buffers) == 1
+        assert type(stdin.buffers[0]) is bytearray
+        assert stdin.buffers[0] == bytearray(44)
+        assert protector._base64_buffer is None
+        assert bytes(protector.get_key_as_base64()) == base64.b64encode(key)
+
+
+def test_pipeline_write_dek_to_a_file_like_object_leaves_it_open() -> None:
+    key = os.urandom(32)
+    with pipeline(_key=bytearray(key)) as protector, io.BytesIO() as stdin:
+        protector.write_dek(stdin)
+
+        assert not stdin.closed
+        assert stdin.getvalue() == base64.b64encode(key)
+
+
+def test_pipeline_write_dek_async_writes_and_drains_from_a_buffer_it_zeroes() -> None:
+    key = os.urandom(32)
+    with pipeline(_key=bytearray(key)) as protector:
+        stdin = RecordingStdin()
+
+        asyncio.run(protector.write_dek_async(stdin))
+
+        assert bytes(stdin.data) == base64.b64encode(key)
+        assert stdin.drained
+        assert not stdin.flushed
+        assert stdin.buffers[0] == bytearray(44)
+
+
+def test_pipeline_write_dek_reaches_a_real_process_from_popen_and_from_asyncio(tmp_path: Path) -> None:
+    key = os.urandom(32)
+    # Copies its standard input to a file, as the wrap tool's --dek-stdin reads it.
+    copy = ["-I", "-c", "import shutil, sys; shutil.copyfileobj(sys.stdin.buffer, open(sys.argv[1], 'wb'))"]
+    with pipeline(_key=bytearray(key)) as protector:
+        with subprocess.Popen([sys.executable, *copy, str(tmp_path / "popen.dek")], stdin=subprocess.PIPE, bufsize=0) as process:
+            assert process.stdin is not None
+            protector.write_dek(process.stdin)
+            process.stdin.close()
+
+        async def wrap() -> int:
+            process = await asyncio.create_subprocess_exec(sys.executable, *copy, str(tmp_path / "asyncio.dek"), stdin=asyncio.subprocess.PIPE)
+            assert process.stdin is not None
+            await protector.write_dek_async(process.stdin)
+            process.stdin.close()
+            return await process.wait()
+
+        assert asyncio.run(wrap()) == 0
+
+    assert (tmp_path / "popen.dek").read_bytes() == base64.b64encode(key)
+    assert (tmp_path / "asyncio.dek").read_bytes() == base64.b64encode(key)
+
+
+def test_pipeline_write_dek_zeroes_its_buffer_when_the_write_fails_or_is_cancelled() -> None:
+    with pipeline() as protector:
+        failing = RecordingStdin(fail_with=BrokenPipeError("closed"))
+        with pytest.raises(BrokenPipeError):
+            protector.write_dek(failing)
+        with pytest.raises(BrokenPipeError):
+            asyncio.run(protector.write_dek_async(failing))
+        assert all(buffer == bytearray(44) for buffer in failing.buffers)
+
+        hanging = RecordingStdin(hang=True)
+
+        async def cancel() -> None:
+            task = asyncio.ensure_future(protector.write_dek_async(hanging))
+            await asyncio.sleep(0.01)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        asyncio.run(cancel())
+        assert len(hanging.buffers) == 1
+        assert hanging.buffers[0] == bytearray(44)
+        assert not hanging.drained
+
+
+def test_pipeline_write_dek_refuses_no_stream_and_a_closed_protector() -> None:
+    protector = pipeline()
+    with pytest.raises(TypeError):
+        protector.write_dek(None)  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        asyncio.run(protector.write_dek_async(None))  # type: ignore[arg-type]
+
+    protector.close()
+
+    stdin = RecordingStdin()
+    with pytest.raises(ObjectClosedError):
+        protector.write_dek(stdin)
+    with pytest.raises(ObjectClosedError):
+        asyncio.run(protector.write_dek_async(stdin))
+    assert stdin.data == b""
+    assert not stdin.flushed and not stdin.drained
 
 
 @pytest.mark.parametrize("length", range(1, 7))

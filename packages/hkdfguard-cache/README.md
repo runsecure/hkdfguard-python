@@ -14,6 +14,30 @@ pip install hkdfguard-cache
 import hkdfguard.cache
 ```
 
+## Reading secrets from a folder, one file per secret
+
+`FilePerSecretCache` reads secrets from a local folder holding one file per secret, each already
+encrypted and formatted (`enc::v1::...`) for its own name, with the purpose
+`ProtectedConfigurationPurpose.for_key(name)`, as `AesGcmPipelineDataProtector` and a ring's
+`create_protector` write it. Nothing is read up front: the first lookup of a name reads that one file
+through `TrustedFile` (from `hkdfguard-securefile`, so a file or folder an untrusted account could
+have written is refused with `PermissionError`), authenticates its value under the name, and caches
+it still encrypted, exactly as the file holds it; later lookups never touch the disk.
+
+```python
+from hkdfguard.cache import FilePerSecretCache
+from hkdfguard.dataencryptionkey import DefaultFormatProvider
+from hkdfguard.securefile import KeyFileTrust
+
+secrets = FilePerSecretCache("/etc/myapp/secrets", KeyFileTrust(unix_user_ids=[1001]), ring, DefaultFormatProvider())
+```
+
+A name is a file name - 1-255 ASCII letters, digits, `-`, `_` and `.`, not starting with `.` - and
+is matched exactly; any other name, a missing or empty file and a missing folder return 0 and aren't
+remembered. A file copied under another name fails with `AuthenticationTagMismatchError`, a file over
+64 KiB with `FileTooLargeError`, and neither is cached. `decrypt_async` reads a file in a worker
+thread. A changed file is picked up by a new instance.
+
 ## Caching secrets from a secret store
 
 `RemoteSecretCache` is the base of the caches that read secrets from a remote store on demand (the
@@ -45,6 +69,12 @@ before any SDK can parse it: `SecretJsonBody.capture` reads the body into a byte
 unescapes the value into another, hands it to the cache, and returns the body with the value blanked
 for the SDK to parse. Every bytearray that held the value is zeroed. Out of reach, as everywhere in
 Python: a body the HTTP stack already holds as `bytes`, and the stack's own buffers.
+
+`SecretJsonBody` hands values to any `SecretValueReceiver` - a cache's `SecretValueSink`, or a
+pipeline writer's receiver (`hkdfguard-pipeline`), which encrypts them for files instead.
+`SecretJsonBody.capture_json_keys` finds the keys of a value already taken out of its response, as a
+sink's `set_bytes_with_json_keys` does: each member of exactly one JSON object, unescaped into a
+bytearray of its own that is zeroed once handed over.
 
 Another store needs only a subclass:
 

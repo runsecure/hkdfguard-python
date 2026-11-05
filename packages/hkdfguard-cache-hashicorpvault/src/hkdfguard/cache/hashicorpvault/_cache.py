@@ -3,24 +3,23 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
-import http.client
-import itertools
 import logging
-import secrets
-import socket
-import ssl
-import threading
-import time
-from datetime import timedelta
 from types import TracebackType
 from typing import ClassVar, Self
 
-from hkdfguard.abstractions import ArrayUtility, CryptographicError, DataProtector, KeyRing, ObjectClosedError
-from hkdfguard.cache import ErrorResponseBody, RemoteSecretCache, SecretJsonBody, SecretNameMatching, SecretValueSink
+from hkdfguard.abstractions import DataProtector, KeyRing, ObjectClosedError
+from hkdfguard.cache import RemoteSecretCache, SecretJsonBody, SecretNameMatching, SecretValueSink
 from hkdfguard.cache.hashicorpvault._options import HashiCorpVaultSecretCacheOptions, VaultKvVersion
-from hkdfguard.cache.hashicorpvault._token import VaultTokenProvider
-from hkdfguard.hashicorpvault.common import TOKEN_HEADER, VaultRequestError, api_base, check_connection_options, is_valid_path, is_valid_token, retry_delay
+from hkdfguard.integration.hashicorpvault import (
+    VaultRequestError,
+    VaultTokenProvider,
+    api_base,
+    check_connection_options,
+    is_valid_path,
+)
+from hkdfguard.integration.hashicorpvault._errors import MAX_ERROR_BODY_LENGTH, describe_status, read_errors
+from hkdfguard.integration.hashicorpvault._http import Abandon, DeadlineBody, VaultConnector, exchange, put_protected_token, read_body, with_retries
+from hkdfguard.integration.hashicorpvault._token_provider import get_token_within, get_token_within_async
 
 
 class HashiCorpVaultSecretCache(RemoteSecretCache):
@@ -120,13 +119,12 @@ class HashiCorpVaultSecretCache(RemoteSecretCache):
         super().__init__(key_ring, SecretNameMatching.EXACT, logger)
         if options is None:
             options = HashiCorpVaultSecretCacheOptions()
-        self._https, self._host, self._port, v1_path = api_base(address)
+        https, host, port, v1_path = api_base(address)
         _check(options)
 
         self._token_provider = token_provider
         self._token_protector = token_protector
         self._timeout = options.timeout
-        self._timeout_seconds = options.timeout.total_seconds()
         self._retry_count = options.retry_count
         self._retry_delay = options.retry_delay
         self._namespace = options.namespace
@@ -137,7 +135,7 @@ class HashiCorpVaultSecretCache(RemoteSecretCache):
         else:
             self._read_base = f"{v1_path}{options.mount_path}/"
             self._data_path = ("data",)
-        self._ssl_context = (options.ssl_context or ssl.create_default_context()) if self._https else None
+        self._connector = VaultConnector(https, host, port, options.timeout, options.ssl_context, options.tls)
         self._closed = False
 
     @staticmethod
@@ -170,12 +168,12 @@ class HashiCorpVaultSecretCache(RemoteSecretCache):
     def _fetch(self, name: str, value: SecretValueSink) -> None:
         self._ensure_open()
         # Asked for once per fetch; a provider's failure is its own to retry, so isn't retried here.
-        self._read_with_retries(name, self._get_token(), value, _Abandon())
+        self._read_with_retries(name, get_token_within(self._token_provider, self._timeout), value, _abandon())
 
     async def _fetch_async(self, name: str, value: SecretValueSink) -> None:
         self._ensure_open()
-        protected_token = await self._get_token_async()
-        abandon = _Abandon()
+        protected_token = await get_token_within_async(self._token_provider, self._timeout)
+        abandon = _abandon()
         try:
             await asyncio.to_thread(self._read_with_retries, name, protected_token, value, abandon)
         except asyncio.CancelledError:
@@ -187,110 +185,30 @@ class HashiCorpVaultSecretCache(RemoteSecretCache):
         if self._closed:
             raise ObjectClosedError("This HashiCorp Vault secret cache has been closed.")
 
-    def _get_token(self) -> str:
-        # The protected token get_token returns, waited for within the timeout on a thread of its own.
-        done = threading.Event()
-        outcome: list[tuple[str | None, BaseException | None]] = []
+    def _read_with_retries(self, path: str, protected_token: str, value: SecretValueSink, abandon: Abandon) -> None:
+        # A failed attempt has handed nothing to value: the body is read whole before anything is
+        # parsed out of it, and a parse failure isn't transient.
+        with_retries(lambda: self._read(path, protected_token, value, abandon), self._retry_count, self._retry_delay,
+                     stopped=lambda: abandon.abandoned or self._closed, wait=abandon.wait)
 
-        def run() -> None:
-            try:
-                outcome.append((self._token_provider.get_token(), None))
-            except BaseException as error:  # re-raised on the fetching thread
-                outcome.append((None, error))
-            finally:
-                done.set()
+    def _read(self, path: str, protected_token: str, value: SecretValueSink, abandon: Abandon) -> None:
+        # One attempt: one request, with the token protected_token holds - decrypted into a bytearray
+        # zeroed once http.client has copied it - and Vault's whole response, within the attempt's
+        # timeout. A token that isn't protected by the token protector, or isn't a token, raises
+        # RuntimeError.
+        with exchange(self._connector, "GET", self._read_base + path, self._namespace, self._timeout,
+                      headers=lambda connection: put_protected_token(connection, self._token_protector, protected_token),
+                      abandon=abandon, description=f"the read of '{path}'") as (status, body):
+            self._read_response(path, status, body, value)
 
-        threading.Thread(target=run, name="hkdfguard-vault-token", daemon=True).start()
-        if not done.wait(self._timeout_seconds):
-            raise TimeoutError(f"The Vault token provider returned no token within {self._timeout}.")
-        token, error = outcome[0]
-        if error is not None:
-            raise error
-        return _require_token(token)
-
-    async def _get_token_async(self) -> str:
-        # The protected token get_token_async returns, cancelled once the timeout passes.
-        try:
-            async with asyncio.timeout(self._timeout_seconds) as deadline:
-                token = await self._token_provider.get_token_async()
-        except TimeoutError:
-            if not deadline.expired():
-                raise
-            expired = True
-        else:
-            expired = False
-        if expired:
-            raise TimeoutError(f"The Vault token provider returned no token within {self._timeout}.")
-        return _require_token(token)
-
-    def _read_with_retries(self, path: str, protected_token: str, value: SecretValueSink, abandon: _Abandon) -> None:
-        failure: Exception
-        for retry in itertools.count():
-            try:
-                self._read(path, protected_token, value, abandon)
-                return
-            except VaultRequestError as error:
-                if not error.is_transient:
-                    raise
-                failure = error
-            except ssl.SSLCertVerificationError:
-                # Vault's certificate is refused: retrying can't change that, and would only turn a clear
-                # refusal into a wait for the retries to run out.
-                raise
-            except (OSError, http.client.HTTPException) as error:
-                failure = error
-
-            if abandon.abandoned or retry >= self._retry_count or self._closed:
-                raise failure
-
-            # A failed attempt has handed nothing to value: the body is read whole before anything is
-            # parsed out of it, and a parse failure isn't transient.
-            if abandon.wait(retry_delay(self._retry_delay, retry, secrets.randbelow(101)).total_seconds()):
-                raise failure
-
-    def _read(self, path: str, protected_token: str, value: SecretValueSink, abandon: _Abandon) -> None:
-        # One attempt: one request, and Vault's whole response, within the attempt's timeout.
-        deadline = time.monotonic() + self._timeout_seconds
-        connection = (http.client.HTTPSConnection(self._host, self._port, timeout=self._timeout_seconds, context=self._ssl_context)
-                      if self._https else http.client.HTTPConnection(self._host, self._port, timeout=self._timeout_seconds))
-        try:
-            self._send(connection, path, protected_token)
-            sock = connection.sock
-            if sock is None:
-                raise ConnectionError("The connection to Vault was closed before its answer.")
-            abandon.track(sock)
-            _set_remaining(sock, deadline, path, self._timeout)
-            response = connection.getresponse()
-            try:
-                body = _DeadlineBody(response, sock, deadline, abandon, path, self._timeout)
-                self._read_response(path, response.status, body, value)
-            finally:
-                response.close()
-        finally:
-            abandon.track(None)
-            connection.close()
-
-    def _send(self, connection: http.client.HTTPConnection, path: str, protected_token: str) -> None:
-        # Sends the request for path's secret, with the token protected_token holds - decrypted into a
-        # bytearray zeroed once http.client has copied it.
-        token, length = self._decrypt_token(protected_token)
-        try:
-            connection.putrequest("GET", self._read_base + path)
-            connection.putheader("X-Vault-Request", "true")
-            if self._namespace is not None:
-                connection.putheader("X-Vault-Namespace", self._namespace)
-            with memoryview(token) as view, view[:length] as header:
-                connection.putheader(TOKEN_HEADER, header)
-            connection.endheaders()
-        finally:
-            ArrayUtility.zero_memory(token)
-
-    def _read_response(self, path: str, status: int, body: _DeadlineBody, value: SecretValueSink) -> None:
+    def _read_response(self, path: str, status: int, body: DeadlineBody, value: SecretValueSink) -> None:
         if 200 <= status < 300:
             SecretJsonBody.capture_keys(body, value, self._data_path)
             return
 
-        errors = ErrorResponseBody.read_strings(body, "errors")
+        # A refusal holds no secret: read whole, up to the limit, and its errors made str.
+        buffer = bytearray(MAX_ERROR_BODY_LENGTH)
+        errors = read_errors(memoryview(buffer)[:read_body(body, buffer)])
 
         # Nothing at the path: Vault answers 404 with an empty error list - or, for a KV version 2
         # secret whose latest version is deleted, with its metadata and none. A 404 naming an error
@@ -298,131 +216,11 @@ class HashiCorpVaultSecretCache(RemoteSecretCache):
         if status == 404 and errors == []:
             return
 
-        detail = ": " + "; ".join(errors) if errors else ""
-        raise VaultRequestError(f"Vault refused to read '{path}': HTTP {status}{detail}", status)
-
-    def _decrypt_token(self, protected_token: str) -> tuple[bytearray, int]:
-        # The token protected_token holds, decrypted into a bytearray the caller zeroes, and its
-        # length. Refused unless it is protected by the token protector - it parses, its key version
-        # is on the ring, and it authenticates under TOKEN_PURPOSE - and is a token. Raised outside
-        # the protector's exceptions, so nothing is chained: a parser handed an unprotected token
-        # could quote it.
-        token: bytearray | None = None
-        length = -1
-        try:
-            max_length = self._token_protector.get_max_decrypted_length(protected_token)
-            if max_length >= 0:
-                token = bytearray(max_length)
-                length = self._token_protector.decrypt(protected_token, token)
-        except (ValueError, LookupError, CryptographicError):
-            length = -1
-        if token is None or length < 0:
-            ArrayUtility.zero_memory(token)
-            raise _not_protected()
-
-        if not is_valid_token(memoryview(token)[:length]):
-            ArrayUtility.zero_memory(token)
-            raise RuntimeError("The protected Vault token isn't a token: printable ASCII, with no spaces.")
-        return token, length
+        raise VaultRequestError(f"Vault refused to read '{path}': {describe_status(status, errors)}", status)
 
 
-class _Abandon:
-    """Abandons a fetch whose asynchronous lookup was cancelled: shuts down the socket of the
-    request in flight, and stops the waits between retries."""
-
-    def __init__(self) -> None:
-        self._event = threading.Event()
-        self._lock = threading.Lock()
-        self._sock: socket.socket | None = None
-
-    @property
-    def abandoned(self) -> bool:
-        return self._event.is_set()
-
-    def wait(self, seconds: float) -> bool:
-        return self._event.wait(seconds)
-
-    def track(self, sock: socket.socket | None) -> None:
-        # The socket of the request in flight, if any; raises if the fetch was abandoned meanwhile.
-        with self._lock:
-            self._sock = sock
-        if sock is not None and self.abandoned:
-            raise _abandoned()
-
-    def abandon(self) -> None:
-        self._event.set()
-        with self._lock:
-            sock = self._sock
-            if sock is not None:
-                # Already closed, the read it would end fails anyway.
-                with contextlib.suppress(OSError):
-                    sock.shutdown(socket.SHUT_RDWR)
-
-
-class _DeadlineBody:
-    """A response body read within the attempt's deadline: each read waits at most the time left,
-    and a body shorter than its Content-Length is a lost connection, not the end."""
-
-    def __init__(self, response: http.client.HTTPResponse, sock: socket.socket, deadline: float, abandon: _Abandon, path: str,  # noqa: PLR0917 - private
-                 timeout: timedelta) -> None:
-        self._response = response
-        self._sock = sock
-        self._deadline = deadline
-        self._abandon = abandon
-        self._path = path
-        self._timeout = timeout
-        self._expected = response.length
-        self._read = 0
-
-    def readinto(self, buffer: memoryview, /) -> int:
-        if self._response.isclosed():
-            # Read to its end: http.client has closed the socket.
-            return 0
-        _set_remaining(self._sock, self._deadline, self._path, self._timeout)
-        lost = False
-        timed_out = False
-        read = 0
-        try:
-            read = self._response.readinto(buffer)
-        except http.client.IncompleteRead:
-            # Its partial bytes may hold the secret: neither kept nor chained.
-            lost = True
-        except TimeoutError:
-            timed_out = True
-        if self._abandon.abandoned:
-            raise _abandoned()
-        if timed_out:
-            raise _timed_out(self._path, self._timeout)
-        if lost or (read == 0 and len(buffer) > 0 and self._expected is not None and self._read < self._expected):
-            raise ConnectionError(f"The connection was lost during Vault's response to the read of '{self._path}'.")
-        self._read += read
-        return read
-
-
-def _require_token(token: object) -> str:
-    if not isinstance(token, str) or not token:
-        raise RuntimeError("The Vault token provider returned no token.")
-    return token
-
-
-def _set_remaining(sock: socket.socket, deadline: float, path: str, timeout: timedelta) -> None:
-    remaining = deadline - time.monotonic()
-    if remaining <= 0:
-        raise _timed_out(path, timeout)
-    sock.settimeout(remaining)
-
-
-def _timed_out(path: str, timeout: timedelta) -> TimeoutError:
-    return TimeoutError(f"Vault's response to the read of '{path}' took longer than {timeout}.")
-
-
-def _abandoned() -> ConnectionAbortedError:
-    return ConnectionAbortedError("The read from Vault was abandoned: the lookup that started it was cancelled.")
-
-
-def _not_protected() -> RuntimeError:
-    return RuntimeError("The Vault token provider returned a token that isn't protected by the cache's token protector: "
-                        "hand over token_protector.encrypt(token), never the token itself.")
+def _abandon() -> Abandon:
+    return Abandon("The read from Vault was abandoned: the lookup that started it was cancelled.")
 
 
 def _check(options: HashiCorpVaultSecretCacheOptions) -> None:

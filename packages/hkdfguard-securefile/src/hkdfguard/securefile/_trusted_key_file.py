@@ -3,17 +3,12 @@
 from __future__ import annotations
 
 import os
-import platform
-import sys
-from collections.abc import Buffer, Callable
-from pathlib import PureWindowsPath
+from collections.abc import Buffer
 from typing import Final
 
 from hkdfguard.abstractions import ArrayUtility, InvalidKeyFileError, WrappedKeyLimits
-from hkdfguard.securefile import _unix, _win32
 from hkdfguard.securefile._trust import KeyFileTrust
-from hkdfguard.securefile._unix import UnixKeyFileChecks
-from hkdfguard.securefile._windows import DriveType, WindowsKeyFileChecks
+from hkdfguard.securefile._trusted_file import ReadInto, TrustedFile
 
 _WHITESPACE: Final = frozenset(b" \t\r\n\v\f")
 """What .NET trims: space, tab, CR, LF, VT and FF."""
@@ -24,11 +19,12 @@ _ALPHANUMERIC: Final = frozenset(b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHI
 
 class TrustedKeyFile:
     """Reads a key file only after its location passes the platform's checks (WindowsKeyFileChecks,
-    UnixKeyFileChecks): the Python equivalent of the native library's ``hkdfguard_open_file``, for a
-    :meth:`KeyWrapper.read_key_file <hkdfguard.abstractions.KeyWrapper.read_key_file>` with no native
-    library to read through - a network KMS's key wrapper, say. The contents are then held to the same
-    rules: 1 to :attr:`WrappedKeyLimits.MAX_BYTES` bytes, never more than one byte past that read, and
-    not something that looks like an unwrapped key.
+    UnixKeyFileChecks, opened through :class:`TrustedFile`): the Python equivalent of the native
+    library's ``hkdfguard_open_file``, for a :meth:`KeyWrapper.read_key_file
+    <hkdfguard.abstractions.KeyWrapper.read_key_file>` with no native library to read through - a
+    network KMS's key wrapper, say. The contents are then held to the same rules: 1 to
+    :attr:`WrappedKeyLimits.MAX_BYTES` bytes, never more than one byte past that read, and not
+    something that looks like an unwrapped key.
 
     Windows, Linux and Apple silicon Macs are supported, with no native HkdfGuard library installed:
     on Windows the checks are Win32 calls made through ``ctypes``; on Linux and macOS, ``os.lstat`` and
@@ -60,88 +56,13 @@ class TrustedKeyFile:
         :raises ValueError: ``path`` is empty or holds a NUL, or ``trust`` names a principal that can't be trusted
         :raises NotImplementedError: not Windows, Linux or an Apple silicon Mac
         """
-        if path is None:
-            raise TypeError("path must not be None.")
-        text = os.fspath(path)
-        if not isinstance(text, str):
-            raise TypeError("path must be a str or os.PathLike[str].")
-        if not text:
-            raise ValueError("A key file path is required.")
-        if "\0" in text:
-            raise ValueError("A key file path can't contain a NUL character.")
-        if trust is None:
-            raise TypeError("trust must not be None.")
-        if not isinstance(trust, KeyFileTrust):
-            raise TypeError("trust must be a KeyFileTrust.")
-
-        # Dispatches to one platform's wiring; each is exercised by the real-file tests on its own platform.
-        if sys.platform == "win32":
-            return TrustedKeyFile._read_windows(text, trust)
-        if sys.platform.startswith("linux"):
-            return TrustedKeyFile._read_unix(text, trust)
-        if sys.platform == "darwin":
-            # .NET and Java read struct stat at arm64 offsets; os.lstat has no such limit, but the
-            # supported platforms are kept the same in every port.
-            machine = platform.machine()
-            if machine != "arm64":
-                raise NotImplementedError(f"Key files are read on Apple silicon Macs only; this process is {machine}.")
-            return TrustedKeyFile._read_unix(text, trust)
-        raise NotImplementedError("Key files are read on Windows, Linux and macOS only.")
+        text = TrustedFile.require_path(path, "key file")
+        TrustedFile.require_trust(trust)
+        with TrustedFile.open_trusted(text, trust) as opened:
+            return TrustedKeyFile.read_contents(opened.readinto, opened.path)
 
     @staticmethod
-    def _read_windows(path: str, trust: KeyFileTrust) -> bytearray:
-        # Wires the WindowsKeyFileChecks policy to real files; exercised by the Windows-only real-file tests.
-        trusted = WindowsKeyFileChecks.trusted_principals(trust, _win32.canonical_sid, _win32.account_name)
-        # GetFullPathNameW resolves a relative path against the working directory, as .NET's
-        # Path.GetFullPath does, and the short names in it are then expanded.
-        full = _win32.full_path(path)
-        WindowsKeyFileChecks.verify_path_form(full, DriveType.NETWORK if full.startswith("\\\\")
-                                              else DriveType.from_win32(_win32.drive_type(PureWindowsPath(full).anchor)))
-
-        # Read sharing only: refused if another process has it open for writing, and no one can open
-        # it for writing while it's read.
-        with _win32.open_file(full) as file:
-            WindowsKeyFileChecks.verify_final_path(full, file.final_path())
-
-            # The file through its own handle; the folders by path, which the final-path check ties to
-            # the folders it was opened through, and which no untrusted principal can then change.
-            WindowsKeyFileChecks.verify_trusted_only(file.security_descriptor(), full, full, WindowsKeyFileChecks.GUARDED_RIGHTS, trusted,
-                                                     account_name=_win32.account_name)
-            folder = PureWindowsPath(full).parent
-            while True:
-                name = str(folder)
-                security = _win32.security_descriptor_of(name)
-                if folder.parent == folder:
-                    WindowsKeyFileChecks.verify_trusted_only(security, full, name, WindowsKeyFileChecks.GUARDED_ROOT_RIGHTS, trusted,
-                                                             account_name=_win32.account_name)
-                    break
-
-                WindowsKeyFileChecks.verify_not_reparse_point(_win32.file_attributes(name), full, name)
-                WindowsKeyFileChecks.verify_trusted_only(security, full, name, WindowsKeyFileChecks.GUARDED_RIGHTS, trusted,
-                                                         account_name=_win32.account_name)
-                folder = folder.parent
-
-            return TrustedKeyFile.read_contents(file.readinto, full)
-
-    @staticmethod
-    def _read_unix(path: str, trust: KeyFileTrust) -> bytearray:
-        # Wires the UnixKeyFileChecks policy to real files; exercised by the Unix-only real-file tests.
-        # The working directory is already a resolved path; resolve_trusted handles ".." itself.
-        if path.startswith("/"):
-            absolute = path
-        else:
-            working_directory = os.getcwd()
-            absolute = working_directory + path if working_directory.endswith("/") else f"{working_directory}/{path}"
-        resolved = UnixKeyFileChecks.resolve_trusted(absolute, trust, _unix.status_or_none, _unix.read_link)
-
-        # resolved holds no symbolic link, so O_NOFOLLOW changes nothing for a file that passed; it
-        # only makes certain the last component is still not one when it is opened.
-        descriptor = os.open(resolved, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
-        with open(descriptor, "rb", buffering=0) as file:
-            return TrustedKeyFile.read_contents(file.readinto, path)
-
-    @staticmethod
-    def read_contents(readinto: Callable[[memoryview], int | None], path: str) -> bytearray:
+    def read_contents(readinto: ReadInto, path: str) -> bytearray:
         """Reads at most one byte past :attr:`WrappedKeyLimits.MAX_BYTES` through ``readinto`` - so a
         wrong path (a log, a device) can't make startup allocate an unbounded buffer - and refuses an
         empty file, one over the limit, and one that looks like an unwrapped key. Whatever is read is
@@ -156,12 +77,7 @@ class TrustedKeyFile:
         buffer = bytearray(WrappedKeyLimits.MAX_BYTES + 1)
         view = memoryview(buffer)
         try:
-            total = 0
-            while total < len(buffer):
-                read = readinto(view[total:])
-                if not read:
-                    break
-                total += read
+            total = TrustedFile.fill(readinto, buffer)
 
             if total == 0:
                 raise InvalidKeyFileError(f"Key file '{path}' is empty.")

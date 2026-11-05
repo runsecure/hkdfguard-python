@@ -33,10 +33,11 @@ from typing import Any
 
 import pytest
 from hkdfguard.abstractions import KeyWrapper, ProtectedReadOnlyCache, WritableBuffer
-from hkdfguard.cache.hashicorpvault import HashiCorpVaultSecretCache, HashiCorpVaultSecretCacheOptions, StaticVaultToken
+from hkdfguard.cache.hashicorpvault import HashiCorpVaultSecretCache, HashiCorpVaultSecretCacheOptions
 from hkdfguard.cryptoprovider.aesgcm256 import AesGcmCryptoProvider
 from hkdfguard.dataencryptionkey import DataEncryptionKey, DefaultFormatProvider
 from hkdfguard.dataencryptionkey import KeyRing as DefaultKeyRing
+from hkdfguard.integration.hashicorpvault import StaticVaultToken
 
 SECRET_NAME_VARIABLE = "HKDFGUARD_TEST_VAULT_SECRET_NAME"
 ADDRESS_VARIABLE = "HKDFGUARD_TEST_VAULT_ADDR"

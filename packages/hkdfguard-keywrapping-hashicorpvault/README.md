@@ -14,7 +14,8 @@ pip install hkdfguard-keywrapping-hashicorpvault
 ```python
 import os
 
-from hkdfguard.keywrapping.hashicorpvault import HashiCorpVaultTransitKeyWrapper, StaticVaultTokenSource
+from hkdfguard.integration.hashicorpvault import StaticVaultTokenSource
+from hkdfguard.keywrapping.hashicorpvault import HashiCorpVaultTransitKeyWrapper
 
 token = StaticVaultTokenSource(os.environ["VAULT_TOKEN"])  # copied into a bytearray, zeroed on close
 wrapper = HashiCorpVaultTransitKeyWrapper("https://vault.example.com:8200", "myapp-kek", token,
@@ -31,8 +32,16 @@ The token comes from a `VaultTokenSource`, which copies it into a bytearray the 
 the request is sent; the DEKs sent and revealed, and Vault's answers, are held only in bytearrays
 the wrapper zeroes. Options (`HashiCorpVaultTransitKeyWrapperOptions`) set the mount (`transit`), a
 Vault Enterprise namespace, the per-attempt timeout (30 seconds), the retries of transient failures
-(3, backing off from 200 ms) and an `ssl_context` for a private CA. The address must be https, except
+(3, backing off from 200 ms) and the TLS settings - `tls`, a `VaultTlsOptions` taking a CA bundle or a
+PKCS#12 trust store and a client certificate from PEM or a PKCS#12 key store (its password protected
+by the key ring), or an `ssl_context` of your own. The address must be https, except
 on loopback; no redirect is ever followed.
+
+The token sources, `VaultTlsOptions`, `VaultRequestError` and the options' base,
+`VaultConnectionOptions`, are
+[hkdfguard-integration-hashicorpvault](https://pypi.org/project/hkdfguard-integration-hashicorpvault/)'s,
+which makes and reads each request the same way for this wrapper, the Vault secret cache and the
+Vault client.
 
 Requires Python 3.12 or later. See the
 [repository README](https://github.com/runsecure/hkdfguard-python#readme) ("Wrapping under HashiCorp

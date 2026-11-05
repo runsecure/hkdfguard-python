@@ -186,8 +186,8 @@ earlier step, and pass the token to the test step through the job's environment,
 |---|---|---|
 | 5 tests skipped | `HKDFGUARD_TEST_VAULT_SECRET_NAME` isn't set in the pytest process or `vault.test.properties` | Set it in the same command, the file, or the IDE's run configuration |
 | `Failed: Set HKDFGUARD_TEST_VAULT_TOKEN in the environment` | The token isn't in the pytest process's environment | Step 3, in the same shell; it is never read from the file |
-| `VaultRequestError: ... HTTP 403: permission denied` | The token has expired, or its policy doesn't cover the path | Step 3: the policy names `secret/data/hkdfguard/*`; create a new token |
-| `VaultRequestError: ... HTTP 404: no handler for route` | No KV version 2 engine is mounted at `secret` | Use a dev server, or `vault secrets enable -path=secret kv-v2` |
+| `VaultRequestError: ... 403 Forbidden: permission denied` | The token has expired, or its policy doesn't cover the path | Step 3: the policy names `secret/data/hkdfguard/*`; create a new token |
+| `VaultRequestError: ... 404 Not Found: no handler for route` | No KV version 2 engine is mounted at `secret` | Use a dev server, or `vault secrets enable -path=secret kv-v2` |
 | `ConnectionRefusedError` after a few seconds | Nothing listens at the address | `docker ps`; check the host port in `-p` and in `HKDFGUARD_TEST_VAULT_ADDR` |
 | `ValueError: Vault's address ... must be https` | An http address that isn't loopback | Use `127.0.0.1` or `localhost`, or https |
 | `ssl.SSLCertVerificationError` | Vault's certificate isn't trusted, or doesn't name the host | Set `HKDFGUARD_TEST_VAULT_CACERT`; connect by a name the certificate holds |

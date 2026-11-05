@@ -94,6 +94,14 @@ class ProtectedCacheCollection(ProtectedReadOnlyCache):
     values of its own - storing values stays the concern of whichever sources support it (e.g. a
     writable :class:`ProtectedCache` among them). Safe to read while sources are being added.
 
+    A source that raises fails the lookup, even when a later source holds the name: a source that
+    couldn't answer can't say whether it holds the name, and answering from a later source could
+    return a value an earlier one overrides. Order sources so that cannot cost availability: add
+    local sources (a :class:`ProtectedCache`, a :class:`FilePerSecretCache`) before remote ones (a
+    :class:`RemoteSecretCache` such as the Key Vault or Secrets Manager caches). A remote cache
+    doesn't remember a name its store lacks, so a remote source added first makes a network call for
+    every local-only name on every lookup - enough to be throttled, and then to fail every lookup.
+
     decrypt_async and find_max_decrypted_length_async ask each source with its own asynchronous
     member, one after another, so a source that fetches over the network (a
     :class:`RemoteSecretCache`) doesn't block the event loop.

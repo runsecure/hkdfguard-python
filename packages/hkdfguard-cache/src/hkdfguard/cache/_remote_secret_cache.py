@@ -199,7 +199,7 @@ class RemoteSecretCache(ProtectedReadOnlyCache):
             try:
                 await self._fetch_async(secret_name, sink)
                 return self._cache(sink)
-            except asyncio.CancelledError as cancelled:
+            except asyncio.CancelledError as cancelled:  # NOSONAR - re-raised when it is this task's; see above
                 if _being_cancelled():
                     self._fail(sink, span, cancelled)
                     raise

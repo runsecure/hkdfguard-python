@@ -7,7 +7,15 @@ from collections.abc import Buffer, Callable, Iterator
 
 import pytest
 from hkdfguard.abstractions import JsonReader, JsonToken, KeyRing, KeyWrapper, MalformedJsonError, WritableBuffer
-from hkdfguard.cache import ErrorResponseBody, InvalidSecretDataError, RemoteSecretCache, SecretJsonBody, SecretNameMatching, SecretValueSink
+from hkdfguard.cache import (
+    ErrorResponseBody,
+    InvalidSecretDataError,
+    RemoteSecretCache,
+    SecretJsonBody,
+    SecretNameMatching,
+    SecretValueReceiver,
+    SecretValueSink,
+)
 from hkdfguard.cryptoprovider.aesgcm256 import AesGcmCryptoProvider
 from hkdfguard.dataencryptionkey import DataEncryptionKey, DefaultFormatProvider
 from hkdfguard.dataencryptionkey import KeyRing as DefaultKeyRing
@@ -433,6 +441,84 @@ def test_the_arguments_are_checked(ring: DefaultKeyRing) -> None:
 
     cache.on_fetch = fetch
     assert cache.decrypt("item", bytearray(16)) == 0
+
+
+# --- SecretValueReceiver and capture_json_keys -------------------------------------------------
+
+
+class Receiver:
+    """A SecretValueReceiver of a test's own, recording copies of what it is handed - not a sink -
+    and the buffers it was handed them in, to check each is zeroed once handed over."""
+
+    def __init__(self) -> None:
+        self.whole: list[bytes] = []
+        self.with_keys: list[bytes] = []
+        self.keys: dict[str, bytes] = {}
+        self.buffers: list[WritableBuffer] = []
+
+    def set_bytes(self, plaintext: WritableBuffer) -> None:
+        self.buffers.append(plaintext)
+        self.whole.append(bytes(plaintext))
+
+    def set_key_bytes(self, key: str, plaintext: WritableBuffer) -> None:
+        self.buffers.append(plaintext)
+        self.keys[key] = bytes(plaintext)
+
+    def set_bytes_with_json_keys(self, plaintext: WritableBuffer) -> None:
+        self.buffers.append(plaintext)
+        self.with_keys.append(bytes(plaintext))
+
+
+def test_a_sink_and_a_receiver_of_ones_own_are_both_receivers() -> None:
+    assert isinstance(Receiver(), SecretValueReceiver)
+    assert issubclass(SecretValueSink, SecretValueReceiver)
+
+
+def test_capture_hands_any_receiver_the_text_or_the_decoded_binary_value() -> None:
+    text = Receiver()
+    assert SecretJsonBody.capture(utf8('{"SecretString":"s3cr\\"et"}'), text, "SecretString", "SecretBinary") == b'{"SecretString":""}'
+    assert text.with_keys == [b's3cr"et'] and text.whole == [] and text.keys == {}
+
+    binary = Receiver()
+    SecretJsonBody.capture(utf8('{"SecretBinary":"AQID"}'), binary, "SecretString", "SecretBinary")
+    assert binary.whole == [bytes([1, 2, 3])] and binary.with_keys == []
+    assert all(not any(buffer) for buffer in [*text.buffers, *binary.buffers])
+
+
+def test_capture_keys_hands_any_receiver_each_member() -> None:
+    receiver = Receiver()
+    SecretJsonBody.capture_keys(utf8('{"data":{"data":{"user":"app","port":5432,"tls":true,"none":null}}}'), receiver, ["data", "data"])
+    assert receiver.keys == {"user": b"app", "port": b"5432", "tls": b"true"}
+    assert all(not any(buffer) for buffer in receiver.buffers)
+
+
+def test_capture_json_keys_hands_over_each_member_of_one_object_read_in_place() -> None:
+    receiver = Receiver()
+    json = bytearray(utf8('  {"user":"\\u00e4pp","port":5432,"on":false,"empty":"","none":null,"list":[1],"nested":{"a":"b"},"bad key":"x"} \n'))
+    original = bytes(json)
+
+    SecretJsonBody.capture_json_keys(json, receiver)
+
+    assert receiver.keys == {"user": "äpp".encode(), "port": b"5432", "on": b"false", "empty": b""}
+    assert receiver.whole == [] and receiver.with_keys == []
+    assert bytes(json) == original  # read, never written
+    assert all(not any(buffer) for buffer in receiver.buffers)
+
+
+@pytest.mark.parametrize("json", [b"", b"   ", b"not json", b'{"key":"v"} more', b'["key"]', b'"text"', b'{"key":'])
+def test_capture_json_keys_hands_nothing_over_for_anything_but_one_object(json: bytes) -> None:
+    receiver = Receiver()
+    SecretJsonBody.capture_json_keys(json, receiver)
+    assert receiver.keys == {} and receiver.buffers == []
+
+
+def test_capture_json_keys_refuses_a_member_named_twice_and_checks_its_arguments() -> None:
+    with pytest.raises(InvalidSecretDataError, match="more than once"):
+        SecretJsonBody.capture_json_keys(b'{"password":"a","password":"b"}', Receiver())
+    with pytest.raises(TypeError):
+        SecretJsonBody.capture_json_keys(b"{}", None)  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        SecretJsonBody.capture_json_keys("{}", Receiver())  # type: ignore[arg-type]
 
 
 # --- ErrorResponseBody ------------------------------------------------------------------------

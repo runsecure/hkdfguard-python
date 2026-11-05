@@ -15,11 +15,16 @@ import subprocess
 import sys
 import tempfile
 import threading
+import uuid
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
+
+if TYPE_CHECKING:
+    from hkdfguard.securefile import KeyFileTrust
 
 # --- The test service -------------------------------------------------------------------------------
 
@@ -331,3 +336,50 @@ def key_directory(tmp_path: Path) -> Iterator[Path]:
             yield directory
     else:
         yield long_path(tmp_path)
+
+
+# --- Folders TrustedFile and TrustedKeyFile accept ------------------------------------------------------
+
+
+@functools.cache
+def current_user_sid() -> str:
+    """The SID of the account running the tests, as whoami reports it. Windows only."""
+    whoami = os.path.join(os.environ["SYSTEMROOT"], "System32", "whoami.exe")
+    output = subprocess.run([whoami, "/user", "/fo", "csv", "/nh"], capture_output=True, text=True, check=True).stdout.strip()
+    sid = output.rsplit(",", 1)[1].strip('"')  # "DOMAIN\name","S-1-5-21-..."
+    assert sid.startswith("S-1-"), output
+    return sid
+
+
+def current_user_trust() -> KeyFileTrust:
+    """A KeyFileTrust naming the account running the tests - its SID on Windows, its effective uid and
+    gid on Linux and macOS - which owns, and may modify, the folders trusted_directory makes."""
+    from hkdfguard.securefile import KeyFileTrust
+
+    if sys.platform == "win32":
+        return KeyFileTrust(windows_principals=[current_user_sid()])
+    return KeyFileTrust(unix_user_ids=[os.geteuid()], unix_group_ids=[os.getegid()])
+
+
+@contextmanager
+def trusted_directory() -> Iterator[Path]:
+    """A new, empty folder that TrustedFile and TrustedKeyFile accept under current_user_trust (and
+    refuse under KeyFileTrust.ADMINISTRATORS_ONLY, unless the tests run as root), removed afterwards.
+
+    On Windows, a folder under the user's temp folder, named by its long path - Windows may report the
+    temp folder by an 8.3 short name, which trusted files are never read through - and made with
+    os.mkdir's default mode, so it inherits the temp folder's permissions: tempfile.mkdtemp's (and
+    pytest's tmp_path's) 0o700 gives it a protected DACL with an OWNER RIGHTS entry, which the checks
+    refuse like any other principal they don't trust. Elsewhere, private_key_directory (which skips
+    the test when there is no private root)."""
+    if sys.platform != "win32":
+        with private_key_directory() as directory:
+            yield directory
+        return
+
+    directory = long_path(Path(tempfile.gettempdir())) / f"hkdfguard-files-{uuid.uuid4().hex}"
+    directory.mkdir()
+    try:
+        yield directory
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
