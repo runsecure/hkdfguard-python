@@ -103,6 +103,9 @@ class AbstractHkdfGuardKmsLibrary(ABC):
     # Windows-specific (-64..-79), refining ERR_POLICY_INVALID
     ERR_WIN_GROUP_INVALID: Final = -64
 
+    # Linux-specific (-80..-95), refining ERR_POLICY_INVALID
+    ERR_LINUX_GROUP_INVALID: Final = -80
+
     # macOS-specific (-96..-111), each refining ERR_PROVIDER_ERROR
     ERR_MAC_ACCESS_CONTROL_CREATION_FAILED: Final = -96
     ERR_MAC_KEY_GENERATION_FAILED: Final = -97
@@ -143,6 +146,8 @@ class AbstractHkdfGuardKmsLibrary(ABC):
         ERR_FILE_UNTRUSTED: "the key file's path is not trusted: a link or reparse point, a short or network path, or a file or folder another "
                             "account could replace",
         ERR_WIN_GROUP_INVALID: r"an HKLM\Software\Policies\HkdfGuard\KeyUseGroups entry is unresolvable, not a group, not host-local, or over-broad",
+        ERR_LINUX_GROUP_INVALID: "a deployer group (deployer_groups in the policy, or hkdfguard-deployers) doesn't exist, is over-broad, or can't be "
+                                 "looked up; every key-file read fails until it is fixed",
         ERR_MAC_ACCESS_CONTROL_CREATION_FAILED: "the access policy for a new KEK could not be created",
         ERR_MAC_KEY_GENERATION_FAILED: "the Secure Enclave refused to generate a key",
         ERR_MAC_KEYCHAIN_WRITE_FAILED: "the new KEK could not be stored in the keychain",

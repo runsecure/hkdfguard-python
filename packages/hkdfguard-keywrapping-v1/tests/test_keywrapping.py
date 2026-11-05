@@ -267,13 +267,14 @@ SHARED_STATUS_CODES = {
     "ERR_KEK_NOT_FOUND": -17,
     "ERR_KEK_ACCESS_DENIED": -18, "ERR_KEK_INVALID": -19, "ERR_PROCESS_HARDENING_FAILED": -20, "ERR_FILE_NOT_FOUND": -32,
     "ERR_FILE_ACCESS_DENIED": -33, "ERR_FILE_IO": -34, "ERR_FILE_TOO_SHORT": -35, "ERR_FILE_TOO_LONG": -36, "ERR_FILE_PLAINTEXT_KEY": -37,
-    "ERR_FILE_MALFORMED": -38, "ERR_FILE_UNTRUSTED": -39, "ERR_WIN_GROUP_INVALID": -64, "ERR_MAC_ACCESS_CONTROL_CREATION_FAILED": -96,
+    "ERR_FILE_MALFORMED": -38, "ERR_FILE_UNTRUSTED": -39, "ERR_WIN_GROUP_INVALID": -64, "ERR_LINUX_GROUP_INVALID": -80,
+    "ERR_MAC_ACCESS_CONTROL_CREATION_FAILED": -96,
     "ERR_MAC_KEY_GENERATION_FAILED": -97, "ERR_MAC_KEYCHAIN_WRITE_FAILED": -98, "ERR_MAC_KEK_VERIFICATION_FAILED": -99,
     "ERR_MAC_KEYCHAIN_READ_FAILED": -100,
 }
 """Every status code, exactly as every platform's hkdfguard.h defines it."""
 
-RESERVED_STATUS_CODES = [-7, -14, -15, -21, -31, -40, -63, -65, -79, -80, -95, -101, -111, 1]
+RESERVED_STATUS_CODES = [-7, -14, -15, -21, -31, -40, -63, -65, -79, -81, -95, -101, -111, 1]
 
 PLATFORM_LIBRARIES: list[Callable[[], AbstractHkdfGuardKmsLibrary]] = [WindowsHkdfGuardKmsLibrary, LinuxHkdfGuardKmsLibrary, MacOsHkdfGuardKmsLibrary]
 
@@ -337,6 +338,7 @@ def test_macos_adds_its_own_hints() -> None:
     library = MacOsHkdfGuardKmsLibrary()
     assert "keychain" in (library.describe_status(AbstractHkdfGuardKmsLibrary.ERR_KEK_ACCESS_DENIED) or "")
     assert "Secure Enclave" in (library.describe_status(AbstractHkdfGuardKmsLibrary.ERR_PROVIDER_UNAVAILABLE) or "")
+    assert "RequirePostQuantum" in (library.describe_status(AbstractHkdfGuardKmsLibrary.ERR_PAYLOAD_UNSUPPORTED) or "")
     assert library.describe_status(-1) == FakeKmsLibrary().describe_status(-1)
 
 

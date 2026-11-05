@@ -443,6 +443,9 @@ class MacOsHkdfGuardKmsLibrary(NativeKmsLibrary):
         NativeKmsLibrary.ERR_PROVIDER_UNAVAILABLE: "this Mac has no Secure Enclave",
         NativeKmsLibrary.ERR_PAYLOAD_AUTH_FAILED:
             "AES-GCM authentication failed: the payload was altered, or wrapped for another service under this KEK",
+        NativeKmsLibrary.ERR_PAYLOAD_UNSUPPORTED:
+            "the wrapped payload's suite is one this native library doesn't implement, or one this Mac's policy refuses (RequirePostQuantum "
+            "refuses a P-256 payload); check the KEK suite settings in the HkdfGuard policy",
         NativeKmsLibrary.ERR_KEK_NOT_FOUND: "no KEK is provisioned for this service in this keychain mode; run hkdfguard provision",
         NativeKmsLibrary.ERR_KEK_ACCESS_DENIED:
             "the keychain denied access: it is locked, there is no session to prompt in, or this process isn't allowed",
