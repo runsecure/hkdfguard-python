@@ -1,4 +1,4 @@
-# The workspace root: develops and tests the twenty-four hkdfguard-* distributions in packages/ together.
+# The workspace root: develops and tests the twenty-five hkdfguard-* distributions in packages/ together.
 # It is not itself a published package.
 [project]
 name = "hkdfguard-workspace"
@@ -17,6 +17,7 @@ dependencies = [
     "hkdfguard-keywrapping-hashicorpvault",
     "hkdfguard-dataencryptionkey",
     "hkdfguard-cache",
+    "hkdfguard-cache-jsonsecretsfile",
     "hkdfguard-options",
     "hkdfguard-options-certificate",
     "hkdfguard-cache-awssecretsmanager",
@@ -63,6 +64,7 @@ hkdfguard-integration-hashicorpvault = { workspace = true }
 hkdfguard-keywrapping-hashicorpvault = { workspace = true }
 hkdfguard-dataencryptionkey = { workspace = true }
 hkdfguard-cache = { workspace = true }
+hkdfguard-cache-jsonsecretsfile = { workspace = true }
 hkdfguard-options = { workspace = true }
 hkdfguard-options-certificate = { workspace = true }
 hkdfguard-cache-awssecretsmanager = { workspace = true }
@@ -129,6 +131,7 @@ mypy_path = [
     # After hkdfguard-options/src: hkdfguard.options is a regular package that extends its path to this.
     "packages/hkdfguard-options-certificate/src",
     # After hkdfguard-cache/src: hkdfguard.cache is a regular package that extends its path to these.
+    "packages/hkdfguard-cache-jsonsecretsfile/src",
     "packages/hkdfguard-cache-awssecretsmanager/src",
     "packages/hkdfguard-cache-azurekeyvault/src",
     "packages/hkdfguard-cache-googlesecretmanager/src",

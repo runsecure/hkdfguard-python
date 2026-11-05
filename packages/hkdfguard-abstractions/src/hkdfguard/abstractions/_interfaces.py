@@ -12,6 +12,7 @@ from typing import NamedTuple, Self
 
 from hkdfguard.abstractions._buffers import WritableBuffer
 from hkdfguard.abstractions._rules import RefreshFailurePolicy
+from hkdfguard.abstractions._streams import AsyncBinaryDestination, BinaryDestination
 
 
 class _Closable(ABC):
@@ -299,6 +300,33 @@ class PipelineDataProtector(_Closable):
         read-only view of a buffer the protector zeroes on close. Pass it on standard input
         (``--dek-stdin``), never as a command-line argument or environment variable."""
 
+    @abstractmethod
+    def write_dek(self, destination: BinaryDestination) -> None:
+        """Writes the key to ``destination`` exactly as the wrap tool's ``--dek-stdin`` reads it -
+        its base64 form as ASCII, with no line ending - and flushes it. For the wrap tool's standard
+        input, local or remote: the stdin of ``hkdfguard wrap ... --dek-stdin``, or of
+        ``ssh -T host sudo -n hkdfguard wrap ... --dek-stdin``, from :class:`subprocess.Popen`. The
+        bytes are written from a ``bytearray`` zeroed once the write and flush complete, or fail; no
+        ``str`` is ever made of them. ``destination`` is left open: close it afterwards, so the tool
+        sees the end of its input. Blocks until the write and flush return.
+
+        :param destination: where to write the key: a process's standard input
+        :raises TypeError: ``destination`` is ``None``
+        :raises ObjectClosedError: the protector has been closed; nothing is written
+        """
+
+    @abstractmethod
+    async def write_dek_async(self, destination: AsyncBinaryDestination) -> None:
+        """:meth:`write_dek` to an asyncio stream - the stdin of
+        :func:`asyncio.create_subprocess_exec` - drained rather than flushed, without blocking the
+        event loop (.NET's ``WriteDekAsync``). Cancelling the awaiting task stops the drain; the
+        buffer is zeroed all the same.
+
+        :param destination: where to write the key: a process's standard input
+        :raises TypeError: ``destination`` is ``None``
+        :raises ObjectClosedError: the protector has been closed; nothing is written
+        """
+
 
 class SecretPipelineWriter(_Closable):
     """The end of a provisioning pipeline that delivers secrets from a secret store as one encrypted
@@ -306,7 +334,8 @@ class SecretPipelineWriter(_Closable):
     exists. An implementation is given the secrets to pull and a :class:`PipelineDataProtector` when
     it is created; :meth:`pull_secrets` reads each secret and encrypts it at once, bound to its file
     name, keeping only the encrypted value; :meth:`write_protected_secret_files` then writes one
-    file per secret. No key ring is involved: the protector's key is the only one, and it is handed
+    file per secret, or :meth:`write_json_secrets` one JSON file of them all - each also to a
+    process's standard input, as a tar archive of the files or as the JSON. No key ring is involved: the protector's key is the only one, and it is handed
     to the native platform's wrap process once the files are written.
 
     The protector belongs to the caller and is never closed by the writer. Closing the writer (or
@@ -347,6 +376,62 @@ class SecretPipelineWriter(_Closable):
         :param folder_path: the folder to write to, absolute or relative to the working directory
         :raises TypeError: ``folder_path`` is ``None``
         :raises ValueError: ``folder_path`` is empty
+        :raises RuntimeError: no pull has completed
+        """
+
+    @abstractmethod
+    def write_json_secrets(self, file_path: str | os.PathLike[str]) -> None:
+        """Writes every secret in :attr:`protected_secrets` to one JSON file at ``file_path``,
+        creating its folder if it doesn't exist: a single object with a member per secret, its file
+        name mapped to its encrypted, formatted value. A file already there is replaced.
+
+        :param file_path: the file to write, absolute or relative to the working directory
+        :raises TypeError: ``file_path`` is ``None``
+        :raises ValueError: ``file_path`` is empty
+        :raises RuntimeError: no pull has completed
+        """
+
+    @abstractmethod
+    def write_protected_secret_files_to_stream(self, destination: BinaryDestination) -> None:
+        """Writes every secret in :attr:`protected_secrets` to ``destination`` as a tar archive of
+        the files :meth:`write_protected_secret_files` would write - for a remote tar to unpack, e.g.
+        the stdin of ``ssh -T host sudo -n tar -x --no-same-owner -f - -C folder``. ``destination`` is
+        flushed and left open: close it afterwards, so tar sees the end of its input.
+
+        :param destination: where to write the archive: a process's standard input
+        :raises TypeError: ``destination`` is ``None``
+        :raises RuntimeError: no pull has completed
+        """
+
+    @abstractmethod
+    async def write_protected_secret_files_async(self, destination: AsyncBinaryDestination) -> None:
+        """:meth:`write_protected_secret_files_to_stream` to an asyncio stream, drained rather than
+        flushed, without blocking the event loop (.NET's ``WriteProtectedSecretFilesAsync``).
+        Cancelling the awaiting task stops the drain.
+
+        :raises TypeError: ``destination`` is ``None``
+        :raises RuntimeError: no pull has completed
+        """
+
+    @abstractmethod
+    def write_json_secrets_to_stream(self, destination: BinaryDestination) -> None:
+        """Writes every secret in :attr:`protected_secrets` to ``destination`` as the JSON object
+        :meth:`write_json_secrets` would write - for a remote command to store, e.g. the stdin of
+        ``ssh -T host sudo -n tee /etc/app/secrets.json``. ``destination`` is flushed and left open:
+        close it afterwards, so the remote command sees the end of its input.
+
+        :param destination: where to write the JSON: a process's standard input
+        :raises TypeError: ``destination`` is ``None``
+        :raises RuntimeError: no pull has completed
+        """
+
+    @abstractmethod
+    async def write_json_secrets_async(self, destination: AsyncBinaryDestination) -> None:
+        """:meth:`write_json_secrets_to_stream` to an asyncio stream, drained rather than flushed,
+        without blocking the event loop (.NET's ``WriteJsonSecretsAsync``). Cancelling the awaiting
+        task stops the drain.
+
+        :raises TypeError: ``destination`` is ``None``
         :raises RuntimeError: no pull has completed
         """
 

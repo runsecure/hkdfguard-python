@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 import base64
+import io
 import logging
 import os
 import re
 import struct
+import subprocess
+import sys
 import threading
 import time
 from collections.abc import Buffer, Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 from hkdfguard.abstractions import (
@@ -944,6 +949,141 @@ def test_pipeline_key_as_base64_is_a_read_only_view_of_one_buffer_holding_the_ke
         formatted = protector.encrypt("hello", ID)
         with pipeline(_key=bytearray(base64.b64decode(bytes(first)))) as reader:
             assert reveal(reader, formatted, ID) == "hello"
+
+
+class RecordingStdin:
+    """A process's standard input in memory, as both destinations: records what was written, the
+    buffer it was handed, and whether it was flushed or drained; it can be made to fail or hang."""
+
+    def __init__(self, fail_with: BaseException | None = None, hang: bool = False) -> None:
+        self.data = bytearray()
+        self.buffers: list[bytearray] = []
+        self.flushed = False
+        self.drained = False
+        self.fail_with = fail_with
+        self.hang = hang
+
+    def write(self, data: bytearray, /) -> None:
+        self.buffers.append(data)
+        self.data += data
+
+    def flush(self) -> None:
+        if self.fail_with is not None:
+            raise self.fail_with
+        self.flushed = True
+
+    async def drain(self) -> None:
+        if self.fail_with is not None:
+            raise self.fail_with
+        if self.hang:
+            await asyncio.Event().wait()
+        self.drained = True
+
+
+def test_pipeline_write_dek_writes_the_base64_key_as_ascii_without_a_line_ending_from_a_buffer_it_zeroes() -> None:
+    key = os.urandom(32)
+    with pipeline(_key=bytearray(key)) as protector:
+        stdin = RecordingStdin()
+
+        protector.write_dek(stdin)
+
+        assert bytes(stdin.data) == base64.b64encode(key)
+        assert len(stdin.data) == 44
+        assert stdin.flushed
+        # Handed a bytearray - never a str or bytes - and zeroed once the flush returned; not the
+        # buffer get_key_as_base64 returns, which stays as it was.
+        assert len(stdin.buffers) == 1
+        assert type(stdin.buffers[0]) is bytearray
+        assert stdin.buffers[0] == bytearray(44)
+        assert protector._base64_buffer is None
+        assert bytes(protector.get_key_as_base64()) == base64.b64encode(key)
+
+
+def test_pipeline_write_dek_to_a_file_like_object_leaves_it_open() -> None:
+    key = os.urandom(32)
+    with pipeline(_key=bytearray(key)) as protector, io.BytesIO() as stdin:
+        protector.write_dek(stdin)
+
+        assert not stdin.closed
+        assert stdin.getvalue() == base64.b64encode(key)
+
+
+def test_pipeline_write_dek_async_writes_and_drains_from_a_buffer_it_zeroes() -> None:
+    key = os.urandom(32)
+    with pipeline(_key=bytearray(key)) as protector:
+        stdin = RecordingStdin()
+
+        asyncio.run(protector.write_dek_async(stdin))
+
+        assert bytes(stdin.data) == base64.b64encode(key)
+        assert stdin.drained
+        assert not stdin.flushed
+        assert stdin.buffers[0] == bytearray(44)
+
+
+def test_pipeline_write_dek_reaches_a_real_process_from_popen_and_from_asyncio(tmp_path: Path) -> None:
+    key = os.urandom(32)
+    # Copies its standard input to a file, as the wrap tool's --dek-stdin reads it.
+    copy = ["-I", "-c", "import shutil, sys; shutil.copyfileobj(sys.stdin.buffer, open(sys.argv[1], 'wb'))"]
+    with pipeline(_key=bytearray(key)) as protector:
+        with subprocess.Popen([sys.executable, *copy, str(tmp_path / "popen.dek")], stdin=subprocess.PIPE, bufsize=0) as process:
+            assert process.stdin is not None
+            protector.write_dek(process.stdin)
+            process.stdin.close()
+
+        async def wrap() -> int:
+            process = await asyncio.create_subprocess_exec(sys.executable, *copy, str(tmp_path / "asyncio.dek"), stdin=asyncio.subprocess.PIPE)
+            assert process.stdin is not None
+            await protector.write_dek_async(process.stdin)
+            process.stdin.close()
+            return await process.wait()
+
+        assert asyncio.run(wrap()) == 0
+
+    assert (tmp_path / "popen.dek").read_bytes() == base64.b64encode(key)
+    assert (tmp_path / "asyncio.dek").read_bytes() == base64.b64encode(key)
+
+
+def test_pipeline_write_dek_zeroes_its_buffer_when_the_write_fails_or_is_cancelled() -> None:
+    with pipeline() as protector:
+        failing = RecordingStdin(fail_with=BrokenPipeError("closed"))
+        with pytest.raises(BrokenPipeError):
+            protector.write_dek(failing)
+        with pytest.raises(BrokenPipeError):
+            asyncio.run(protector.write_dek_async(failing))
+        assert all(buffer == bytearray(44) for buffer in failing.buffers)
+
+        hanging = RecordingStdin(hang=True)
+
+        async def cancel() -> None:
+            task = asyncio.ensure_future(protector.write_dek_async(hanging))
+            await asyncio.sleep(0.01)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        asyncio.run(cancel())
+        assert len(hanging.buffers) == 1
+        assert hanging.buffers[0] == bytearray(44)
+        assert not hanging.drained
+
+
+def test_pipeline_write_dek_refuses_no_stream_and_a_closed_protector() -> None:
+    protector = pipeline()
+    with pytest.raises(TypeError):
+        protector.write_dek(None)  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        asyncio.run(protector.write_dek_async(None))  # type: ignore[arg-type]
+
+    protector.close()
+
+    stdin = RecordingStdin()
+    with pytest.raises(ObjectClosedError):
+        protector.write_dek(stdin)
+    with pytest.raises(ObjectClosedError):
+        asyncio.run(protector.write_dek_async(stdin))
+    assert stdin.data == b""
+    assert not stdin.flushed and not stdin.drained
 
 
 @pytest.mark.parametrize("length", range(1, 7))

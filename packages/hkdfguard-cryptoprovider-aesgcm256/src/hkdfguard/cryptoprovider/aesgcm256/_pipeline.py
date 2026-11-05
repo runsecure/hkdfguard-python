@@ -8,6 +8,8 @@ from collections.abc import Buffer
 
 from hkdfguard.abstractions import (
     ArrayUtility,
+    AsyncBinaryDestination,
+    BinaryDestination,
     EncryptedFormatProvider,
     KeyNotFoundError,
     KeyTrackingValue,
@@ -124,6 +126,50 @@ class AesGcmPipelineDataProtector(PipelineDataProtector):
                 finally:
                     ArrayUtility.zero_memory(copy)
             return memoryview(self._base64).toreadonly()
+
+    def write_dek(self, destination: BinaryDestination) -> None:
+        """Encoded afresh, straight from a copy of the key into a ``bytearray`` of its own - never
+        through a ``str``, nor the buffer :meth:`get_key_as_base64` returns - which is zeroed once
+        the write and flush return or raise. What ``destination`` buffers is its own (see
+        :class:`~hkdfguard.abstractions.BinaryDestination`).
+
+        :raises TypeError: ``destination`` is ``None``
+        :raises ObjectClosedError: the protector has been closed; nothing is written
+        """
+        if destination is None:
+            raise TypeError("destination must not be None.")
+        ascii_key = self._encode_key()
+        try:
+            destination.write(ascii_key)
+            destination.flush()
+        finally:
+            ArrayUtility.zero_memory(ascii_key)
+
+    async def write_dek_async(self, destination: AsyncBinaryDestination) -> None:
+        """:meth:`write_dek`, drained rather than flushed. The ``bytearray`` is zeroed once the
+        drain completes, fails or is cancelled.
+
+        :raises TypeError: ``destination`` is ``None``
+        :raises ObjectClosedError: the protector has been closed; nothing is written
+        """
+        if destination is None:
+            raise TypeError("destination must not be None.")
+        ascii_key = self._encode_key()
+        try:
+            destination.write(ascii_key)
+            await destination.drain()
+        finally:
+            ArrayUtility.zero_memory(ascii_key)
+
+    def _encode_key(self) -> bytearray:
+        # The key's base64 in a bytearray the caller zeroes; the copy it is encoded from is zeroed here.
+        with self._gate:
+            self._current()
+            copy = bytearray(self._key)
+            try:
+                return _base64_into(copy)
+            finally:
+                ArrayUtility.zero_memory(copy)
 
     def encrypt(self, plaintext: str | Buffer, secret_identifier: str) -> str:
         """A ``str`` is encoded into a bytearray; a buffer's bytes are checked to be well-formed

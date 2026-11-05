@@ -15,6 +15,7 @@ members = [
     "hkdfguard-cache-azurekeyvault",
     "hkdfguard-cache-googlesecretmanager",
     "hkdfguard-cache-hashicorpvault",
+    "hkdfguard-cache-jsonsecretsfile",
     "hkdfguard-cryptoprovider-aesgcm256",
     "hkdfguard-dataencryptionkey",
     "hkdfguard-diagnostics",
@@ -749,6 +750,25 @@ requires-dist = [
 ]
 
 [[package]]
+name = "hkdfguard-cache-jsonsecretsfile"
+version = "0.9.1"
+source = { editable = "packages/hkdfguard-cache-jsonsecretsfile" }
+dependencies = [
+    { name = "hkdfguard-abstractions" },
+    { name = "hkdfguard-cache" },
+    { name = "hkdfguard-diagnostics" },
+    { name = "hkdfguard-securefile" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "hkdfguard-abstractions", editable = "packages/hkdfguard-abstractions" },
+    { name = "hkdfguard-cache", editable = "packages/hkdfguard-cache" },
+    { name = "hkdfguard-diagnostics", editable = "packages/hkdfguard-diagnostics" },
+    { name = "hkdfguard-securefile", editable = "packages/hkdfguard-securefile" },
+]
+
+[[package]]
 name = "hkdfguard-cryptoprovider-aesgcm256"
 version = "0.9.1"
 source = { editable = "packages/hkdfguard-cryptoprovider-aesgcm256" }
@@ -1043,6 +1063,7 @@ dependencies = [
     { name = "hkdfguard-cache-azurekeyvault" },
     { name = "hkdfguard-cache-googlesecretmanager" },
     { name = "hkdfguard-cache-hashicorpvault" },
+    { name = "hkdfguard-cache-jsonsecretsfile" },
     { name = "hkdfguard-cryptoprovider-aesgcm256" },
     { name = "hkdfguard-dataencryptionkey" },
     { name = "hkdfguard-diagnostics" },
@@ -1083,6 +1104,7 @@ requires-dist = [
     { name = "hkdfguard-cache-azurekeyvault", editable = "packages/hkdfguard-cache-azurekeyvault" },
     { name = "hkdfguard-cache-googlesecretmanager", editable = "packages/hkdfguard-cache-googlesecretmanager" },
     { name = "hkdfguard-cache-hashicorpvault", editable = "packages/hkdfguard-cache-hashicorpvault" },
+    { name = "hkdfguard-cache-jsonsecretsfile", editable = "packages/hkdfguard-cache-jsonsecretsfile" },
     { name = "hkdfguard-cryptoprovider-aesgcm256", editable = "packages/hkdfguard-cryptoprovider-aesgcm256" },
     { name = "hkdfguard-dataencryptionkey", editable = "packages/hkdfguard-dataencryptionkey" },
     { name = "hkdfguard-diagnostics", editable = "packages/hkdfguard-diagnostics" },

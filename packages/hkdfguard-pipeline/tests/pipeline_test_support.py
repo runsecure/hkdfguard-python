@@ -5,7 +5,11 @@ scenario."""
 from __future__ import annotations
 
 import asyncio
+import io
+import json
 import os
+import tarfile
+import time
 from collections.abc import Coroutine, Iterator, Sequence
 from pathlib import Path
 from typing import Any, ClassVar
@@ -28,6 +32,34 @@ def run[T](coroutine: Coroutine[Any, Any, T]) -> T:
             return await coroutine
 
     return asyncio.run(bounded())
+
+
+class RecordingStream:
+    """A process's standard input, in memory: a :class:`~hkdfguard.abstractions.BinaryDestination`
+    and an :class:`~hkdfguard.abstractions.AsyncBinaryDestination`, recording what was written, each
+    buffer it was handed, and whether it was flushed or drained."""
+
+    def __init__(self) -> None:
+        self.data = bytearray()
+        self.buffers: list[bytearray] = []
+        self.flushed = False
+        self.drained = False
+
+    def write(self, data: bytearray, /) -> None:
+        self.buffers.append(data)
+        self.data += data
+
+    def flush(self) -> None:
+        self.flushed = True
+
+    async def drain(self) -> None:
+        self.drained = True
+
+
+def _read_entry(tar: tarfile.TarFile, entry: tarfile.TarInfo) -> str:
+    file = tar.extractfile(entry)
+    assert file is not None
+    return file.read().decode("utf-8")
 
 
 def reveal(protector: PipelineDataProtector, encrypted: str, file_name: str) -> str:
@@ -213,7 +245,159 @@ class SecretPipelineWriterContract:
                 writer.write_protected_secret_files("")
         assert not self.folder.exists()
 
-    @pytest.mark.parametrize("secret_name", ["", "bad name", "#key", "db-login#", "db-login#bad key", "db-login#a:b"])
+    def test_through_the_interface_writes_one_json_object_of_file_names_and_values(self) -> None:
+        self.set_keys("db-login", '{"password":"pässwörd"}')
+        self.set_text("api-key", "key")
+        writer: abstractions.SecretPipelineWriter = self.create_writer("db-login#password", "api-key")
+        with writer:
+            writer.pull_secrets()
+            path = self.folder / "nested" / "secrets.json"
+
+            writer.write_json_secrets(str(path))
+
+            contents = path.read_bytes()
+            assert contents[:1] == b"{"
+            document = json.loads(contents.decode("utf-8"))
+            assert list(document) == ["api-key", "db-login__password"]
+            assert document["db-login__password"] == writer.protected_secrets["db-login__password"]
+            assert self.decrypt(document["db-login__password"], "db-login__password") == "pässwörd"
+            assert b"\\u" not in contents
+
+    def test_the_json_is_laid_out_byte_for_byte_as_dotnets_indented_utf8jsonwriter_writes_it(self) -> None:
+        for name in ("b-item", "a-item2", "a-item"):
+            self.set_text(name, f"{name} value")
+        with self.create_writer("b-item", "a-item2", "a-item") as writer:
+            writer.pull_secrets()
+            secrets = writer.protected_secrets
+            path = self.folder / "secrets.json"
+
+            writer.write_json_secrets(path)
+
+            # Ordinal file-name order, two-space indent, ": " and "," between, the platform's line
+            # ending (.NET's Environment.NewLine), none after the closing brace, and no escapes.
+            lines = ["{", *(f'  "{name}": "{secrets[name]}",' for name in ("a-item", "a-item2")), f'  "b-item": "{secrets["b-item"]}"', "}"]
+            assert path.read_bytes() == os.linesep.join(lines).encode("ascii")
+
+    def test_with_nothing_pulled_the_json_is_an_empty_object_and_the_tar_holds_no_files(self) -> None:
+        with self.create_writer("absent") as writer:
+            with pytest.raises(KeyNotFoundError):
+                writer.pull_secrets()
+            stream = RecordingStream()
+
+            writer.write_json_secrets(self.folder / "secrets.json")
+            writer.write_protected_secret_files_to_stream(stream)
+
+            assert (self.folder / "secrets.json").read_bytes() == b"{}"
+            with tarfile.open(fileobj=io.BytesIO(stream.data), mode="r:") as tar:
+                assert tar.getmembers() == []
+
+    def test_write_json_secrets_replaces_the_file_and_needs_a_pull_and_a_path(self) -> None:
+        path = self.folder / "secrets.json"
+        with self.create_writer("item") as writer:
+            with pytest.raises(RuntimeError):
+                writer.write_json_secrets(path)
+            with pytest.raises(TypeError):
+                writer.write_json_secrets(None)  # type: ignore[arg-type]
+            with pytest.raises(ValueError):
+                writer.write_json_secrets("")
+            assert not self.folder.exists()
+
+            self.folder.mkdir()
+            path.write_text('{"stale":"value","padding":"making the old file longer than the new one"}')
+            self.set_text("item", "new")
+            writer.pull_secrets()
+
+            writer.write_json_secrets(path)
+
+        document = json.loads(path.read_bytes())
+        assert list(document) == ["item"]
+        assert self.decrypt(document["item"], "item") == "new"
+
+    def test_through_the_interface_streams_a_tar_of_the_files_write_protected_secret_files_writes(self) -> None:
+        self.set_keys("db-login", '{"password":"pässwörd"}')
+        self.set_text("api-key", "key")
+        writer: abstractions.SecretPipelineWriter = self.create_writer("db-login#password", "api-key")
+        with writer:
+            writer.pull_secrets()
+            stdin = RecordingStream()
+
+            writer.write_protected_secret_files_to_stream(stdin)
+
+            assert stdin.flushed
+            assert not stdin.drained
+            with tarfile.open(fileobj=io.BytesIO(stdin.data), mode="r:") as tar:
+                entries = tar.getmembers()
+                assert [entry.name for entry in entries] == ["api-key", "db-login__password"]
+                assert all(entry.isreg() and entry.mode == 0o644 for entry in entries)
+                assert all(abs(entry.mtime - time.time()) < 300 for entry in entries)
+                # Each a PAX entry, as .NET writes it: an extended header recording the time to the microsecond.
+                assert all("mtime" in entry.pax_headers for entry in entries)
+                values = [_read_entry(tar, entry) for entry in entries]
+                assert values[1] == writer.protected_secrets["db-login__password"]
+                assert self.decrypt(values[1], "db-login__password") == "pässwörd"
+
+                # The same files write_protected_secret_files writes, byte for byte.
+                tar.extractall(self.folder / "unpacked", filter="data")
+            writer.write_protected_secret_files(self.folder / "written")
+
+        for name in ("api-key", "db-login__password"):
+            assert (self.folder / "unpacked" / name).read_bytes() == (self.folder / "written" / name).read_bytes()
+
+    def test_through_the_interface_streams_the_json_object_as_the_file_holds_it(self) -> None:
+        self.set_text("item", "s3cret")
+        writer: abstractions.SecretPipelineWriter = self.create_writer("item")
+        with writer:
+            writer.pull_secrets()
+            stdin = RecordingStream()
+
+            writer.write_json_secrets_to_stream(stdin)
+            writer.write_json_secrets(self.folder / "secrets.json")
+
+        assert stdin.flushed
+        assert bytes(stdin.data) == (self.folder / "secrets.json").read_bytes()
+        assert self.decrypt(json.loads(stdin.data)["item"], "item") == "s3cret"
+
+    def test_the_async_stream_writes_drain_what_the_blocking_ones_flush(self) -> None:
+        self.set_keys("db-login", '{"password":"pässwörd"}')
+        self.set_text("api-key", "key")
+        writer: abstractions.SecretPipelineWriter = self.create_writer("db-login#password", "api-key")
+        with writer:
+            writer.pull_secrets()
+            json_stdin, tar_stdin, blocking = RecordingStream(), RecordingStream(), RecordingStream()
+
+            run(writer.write_json_secrets_async(json_stdin))
+            run(writer.write_protected_secret_files_async(tar_stdin))
+            writer.write_json_secrets_to_stream(blocking)
+
+        assert json_stdin.drained and tar_stdin.drained
+        assert not json_stdin.flushed and not tar_stdin.flushed
+        assert json_stdin.data == blocking.data
+        with tarfile.open(fileobj=io.BytesIO(tar_stdin.data), mode="r:") as tar:
+            assert tar.getnames() == ["api-key", "db-login__password"]
+            assert self.decrypt(_read_entry(tar, tar.getmember("db-login__password")), "db-login__password") == "pässwörd"
+
+    def test_the_stream_writes_need_a_pull_and_a_stream(self) -> None:
+        stdin = RecordingStream()
+        with self.create_writer("item") as writer:
+            with pytest.raises(RuntimeError):
+                writer.write_protected_secret_files_to_stream(stdin)
+            with pytest.raises(RuntimeError):
+                writer.write_json_secrets_to_stream(stdin)
+            with pytest.raises(RuntimeError):
+                run(writer.write_protected_secret_files_async(stdin))
+            with pytest.raises(RuntimeError):
+                run(writer.write_json_secrets_async(stdin))
+            for write in (writer.write_protected_secret_files_to_stream, writer.write_json_secrets_to_stream):
+                with pytest.raises(TypeError):
+                    write(None)  # type: ignore[arg-type]
+            with pytest.raises(TypeError):
+                run(writer.write_protected_secret_files_async(None))  # type: ignore[arg-type]
+            with pytest.raises(TypeError):
+                run(writer.write_json_secrets_async(None))  # type: ignore[arg-type]
+        assert stdin.data == b""
+        assert not stdin.flushed and not stdin.drained
+
+    @pytest.mark.parametrize("secret_name",["", "bad name", "#key", "db-login#", "db-login#bad key", "db-login#a:b"])
     def test_an_invalid_name_is_refused(self, secret_name: str) -> None:
         with pytest.raises(ValueError):
             self.create_writer(secret_name)

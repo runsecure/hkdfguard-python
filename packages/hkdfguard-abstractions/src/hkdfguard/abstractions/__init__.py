@@ -1,6 +1,7 @@
 """The interfaces every HkdfGuard component is written against, the rules every port shares
-(service names, configuration purposes, cache AADs), the protected-cache base class, and the strict
-JSON reader the remote caches and key wrappers parse secrets with."""
+(service names, configuration purposes, cache AADs), the protected-cache base class, the strict
+JSON reader the remote caches and key wrappers parse secrets with, and the destinations a pipeline
+writes a process's standard input through."""
 
 from hkdfguard.abstractions._buffers import ArrayUtility, Utf8, WritableBuffer
 from hkdfguard.abstractions._errors import (
@@ -37,10 +38,13 @@ from hkdfguard.abstractions._rules import (
     WrappedKeyLimits,
     ascii_upper,
 )
+from hkdfguard.abstractions._streams import AsyncBinaryDestination, BinaryDestination
 
 __all__ = [
     "ArrayUtility",
+    "AsyncBinaryDestination",
     "AuthenticationTagMismatchError",
+    "BinaryDestination",
     "CryptoProvider",
     "CryptoProviderFactory",
     "CryptographicError",

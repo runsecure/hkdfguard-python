@@ -3,18 +3,33 @@
 from __future__ import annotations
 
 import asyncio
+import io
+import json
 import os
+import tarfile
+import time
 from abc import abstractmethod
 from collections.abc import Buffer, Callable, Iterator, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from typing import ClassVar, Final
 
 from hkdfguard import abstractions
-from hkdfguard.abstractions import ArrayUtility, KeyNotFoundError, PipelineDataProtector, Utf8, WritableBuffer
+from hkdfguard.abstractions import (
+    ArrayUtility,
+    AsyncBinaryDestination,
+    BinaryDestination,
+    KeyNotFoundError,
+    PipelineDataProtector,
+    Utf8,
+    WritableBuffer,
+)
 from hkdfguard.cache import FilePerSecretCache, InvalidSecretDataError, SecretJsonBody, SecretValueReceiver
 
 _KEY_SEPARATOR: Final = "#"
 _FILE_NAME_SEPARATOR: Final = "__"
+_JSON_INDENT: Final = "  "
+_SECRET_FILE_MODE: Final = 0o644
+"""rw-r--r--: what each file in a tar archive is unpacked as."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,8 +52,12 @@ class SecretPipelineWriter(abstractions.SecretPipelineWriter):
     asyncio-capable client, :meth:`_read_secret_async`), which reads one secret and hands its values
     to :meth:`_protect_secret` - or to a :class:`~hkdfguard.cache.SecretValueReceiver` from
     :meth:`_receiver`, for :class:`~hkdfguard.cache.SecretJsonBody` to take them out of a response
-    body. Everything else - naming, grouping, encrypting, keeping and writing - is here. No key ring
-    is involved: the protector's key is the only one.
+    body. Everything else - naming, grouping, encrypting, keeping and writing - is here: one file per
+    secret (:meth:`write_protected_secret_files`, the folder FilePerSecretCache reads) or one JSON
+    file of them all (:meth:`write_json_secrets`, the file JsonSecretsFileReadOnlyCache reads), and
+    each also to a process's standard input - a tar archive of the files, or the JSON - blocking
+    (``..._to_stream``) or from asyncio (``..._async``). No key ring is involved: the protector's key
+    is the only one.
 
     A secret name is the store's name for a secret, optionally followed by :attr:`KEY_SEPARATOR` and
     a key it holds: ``"prod/app#password"`` is the password key of the secret prod/app. A name
@@ -177,14 +196,116 @@ class SecretPipelineWriter(abstractions.SecretPipelineWriter):
             raise TypeError("folder_path must not be None.")
         if not os.fspath(folder_path):
             raise ValueError("The folder path is empty.")
-        if not self._pulled:
-            raise RuntimeError("No secrets have been pulled: call pull_secrets first.")
+        self._require_pulled()
 
         folder = os.path.abspath(folder_path)
         os.makedirs(folder, exist_ok=True)
         for file_name, value in self._protected_secrets.items():
             with open(os.path.join(folder, file_name), "wb") as file:
                 file.write(value.encode("utf-8"))
+
+    def write_json_secrets(self, file_path: str | os.PathLike[str]) -> None:
+        """Writes every secret in :attr:`protected_secrets` to one JSON file at ``file_path``,
+        creating its folder if it doesn't exist: a single object with a member per secret, its file
+        name mapped to its encrypted, formatted value, in file-name order (ordinal), as UTF-8 without
+        a byte order mark. A file already there is replaced. Each value is bound to its member's name
+        - ``decrypt(value, name)`` - as it is to its file name in :meth:`write_protected_secret_files`;
+        ``JsonSecretsFileReadOnlyCache`` (``hkdfguard-cache-jsonsecretsfile``) reads the file.
+
+        The layout is .NET's ``Utf8JsonWriter``'s, indented, byte for byte: ``{``, then each member on
+        a line of its own indented by two spaces - ``"name": "value"``, separated by commas - then
+        ``}``, with no line ending after it, and the lines ended as the platform ends them
+        (:data:`os.linesep`, as .NET's ``Environment.NewLine``); an empty object is ``{}``. Names and
+        values are written as they are, unescaped but for what JSON requires: a ``+`` in a base64
+        value stays ``+``.
+
+        :param file_path: the file to write, absolute or relative to the working directory
+        :raises TypeError: ``file_path`` is ``None``
+        :raises ValueError: ``file_path`` is empty
+        :raises RuntimeError: no pull has completed
+        :raises OSError: the folder or the file couldn't be written
+        """
+        if file_path is None:
+            raise TypeError("file_path must not be None.")
+        if not os.fspath(file_path):
+            raise ValueError("The file path is empty.")
+        self._require_pulled()
+
+        path = os.path.abspath(file_path)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as file:
+            file.write(self._json_secrets())
+
+    def write_protected_secret_files_to_stream(self, destination: BinaryDestination) -> None:
+        """Writes every secret in :attr:`protected_secrets` to ``destination`` as a tar archive of
+        the files :meth:`write_protected_secret_files` would write - for a remote tar to unpack, e.g.
+        the stdin of ``ssh -T host sudo -n tar -x --no-same-owner -f - -C folder``. The archive is
+        POSIX (:data:`tarfile.PAX_FORMAT`), which GNU tar and bsdtar (macOS, and Windows' tar.exe)
+        both read: one regular file per secret, in file-name order (ordinal), mode 0644 - the values
+        are encrypted, and only who may write them matters to FilePerSecretCache; with
+        ``--no-same-owner`` they belong to whoever unpacks them - modified now. The archive holds
+        only encrypted values, so it is built in memory and written at once. ``destination`` is
+        flushed and left open: close it afterwards, so tar sees the end of its input.
+
+        :param destination: where to write the archive: a process's standard input
+        :raises TypeError: ``destination`` is ``None``
+        :raises RuntimeError: no pull has completed
+        """
+        if destination is None:
+            raise TypeError("destination must not be None.")
+        self._require_pulled()
+
+        destination.write(self._tar_secret_files())
+        destination.flush()
+
+    async def write_protected_secret_files_async(self, destination: AsyncBinaryDestination) -> None:
+        """:meth:`write_protected_secret_files_to_stream` to an asyncio stream, such as the stdin of
+        :func:`asyncio.create_subprocess_exec`, drained rather than flushed, without blocking the
+        event loop. Cancelling the awaiting task stops the drain.
+
+        :param destination: where to write the archive: a process's standard input
+        :raises TypeError: ``destination`` is ``None``
+        :raises RuntimeError: no pull has completed
+        """
+        if destination is None:
+            raise TypeError("destination must not be None.")
+        self._require_pulled()
+
+        destination.write(self._tar_secret_files())
+        await destination.drain()
+
+    def write_json_secrets_to_stream(self, destination: BinaryDestination) -> None:
+        """Writes every secret in :attr:`protected_secrets` to ``destination`` as the JSON object
+        :meth:`write_json_secrets` would write, byte for byte - for a remote command to store, e.g.
+        the stdin of ``ssh -T host sudo -n tee /etc/app/secrets.json``. ``destination`` is flushed
+        and left open: close it afterwards, so the remote command sees the end of its input.
+
+        :param destination: where to write the JSON: a process's standard input
+        :raises TypeError: ``destination`` is ``None``
+        :raises RuntimeError: no pull has completed
+        """
+        if destination is None:
+            raise TypeError("destination must not be None.")
+        self._require_pulled()
+
+        destination.write(self._json_secrets())
+        destination.flush()
+
+    async def write_json_secrets_async(self, destination: AsyncBinaryDestination) -> None:
+        """:meth:`write_json_secrets_to_stream` to an asyncio stream, such as the stdin of
+        :func:`asyncio.create_subprocess_exec`, drained rather than flushed, without blocking the
+        event loop. Cancelling the awaiting task stops the drain.
+
+        :param destination: where to write the JSON: a process's standard input
+        :raises TypeError: ``destination`` is ``None``
+        :raises RuntimeError: no pull has completed
+        """
+        if destination is None:
+            raise TypeError("destination must not be None.")
+        self._require_pulled()
+
+        destination.write(self._json_secrets())
+        await destination.drain()
 
     def close(self) -> None:
         """Releases the writer's connection to the store; the default has none. Safe to call more
@@ -271,6 +392,36 @@ class SecretPipelineWriter(abstractions.SecretPipelineWriter):
             raise InvalidSecretDataError("The secret isn't UTF-8 text: the pipeline protector encrypts text.")
         return self._protector.encrypt(plaintext, file_name)
 
+    def _require_pulled(self) -> None:
+        if not self._pulled:
+            raise RuntimeError("No secrets have been pulled: call pull_secrets first.")
+
+    def _sorted_secrets(self) -> list[tuple[str, str]]:
+        # In file-name order: ordinal, as .NET's StringComparer.Ordinal sorts them (file names are ASCII).
+        return sorted(self._protected_secrets.items())
+
+    def _json_secrets(self) -> bytearray:
+        # Utf8JsonWriter's indented layout, with relaxed escaping (UnsafeRelaxedJsonEscaping).
+        members = [f"{_JSON_INDENT}{_json_string(name)}: {_json_string(value)}" for name, value in self._sorted_secrets()]
+        text = "{" + os.linesep + ("," + os.linesep).join(members) + os.linesep + "}" if members else "{}"
+        return bytearray(text.encode("utf-8"))
+
+    def _tar_secret_files(self) -> bytearray:
+        archive = io.BytesIO()
+        # A float: tarfile then gives each entry a PAX header recording it to the microsecond, as
+        # .NET's PaxTarEntry does, rather than falling back to a plain ustar header.
+        modified = time.time()
+        with tarfile.open(fileobj=archive, mode="w", format=tarfile.PAX_FORMAT) as tar:
+            for file_name, value in self._sorted_secrets():
+                contents = value.encode("utf-8")
+                entry = tarfile.TarInfo(file_name)
+                entry.type = tarfile.REGTYPE
+                entry.size = len(contents)
+                entry.mode = _SECRET_FILE_MODE
+                entry.mtime = modified
+                tar.addfile(entry, io.BytesIO(contents))
+        return bytearray(archive.getbuffer())
+
     def _start_pull(self) -> None:
         self._protected_secrets.clear()
         self._pulled = False
@@ -309,6 +460,12 @@ class SecretPipelineWriter(abstractions.SecretPipelineWriter):
             file_names.add(file_name.lower())
 
             self._requests.setdefault(name, []).append(SecretRequest(secret_name, key, file_name))
+
+
+def _json_string(text: str) -> str:
+    # A JSON string escaping only what JSON requires - '"', backslash and control characters - and
+    # writing anything else as it is, non-ASCII as UTF-8, as .NET's relaxed escaping does.
+    return json.dumps(text, ensure_ascii=False)
 
 
 def _collect(requests: Sequence[SecretRequest], values: Mapping[str, str], pulled: dict[str, str]) -> None:

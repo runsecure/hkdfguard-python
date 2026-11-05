@@ -47,6 +47,17 @@ caches:
   value as UTF-8, with no byte order mark, replacing a file of the same name and leaving every other
   file alone; before a pull it raises `RuntimeError`. Write where the deployment can make the folder
   and files modifiable only by administrators and the principals `FilePerSecretCache` trusts.
+  `write_json_secrets(path)` writes them all as one JSON object instead - each file name mapped to
+  its value, in file-name order, laid out byte for byte as .NET's `WriteJsonSecrets` writes it - the
+  file `JsonSecretsFileReadOnlyCache` (`hkdfguard-cache-jsonsecretsfile`) reads.
+- **Streaming.** Each also goes to a process's standard input, flushed and left open for the caller
+  to close: `write_protected_secret_files_to_stream` as a PAX tar archive of the files (one regular
+  file per secret, mode 0644, for `ssh -T host sudo -n tar -x --no-same-owner -f - -C folder`), and
+  `write_json_secrets_to_stream` as the JSON (for `... tee /etc/app/secrets.json`), to a binary
+  file-like object such as `Popen.stdin`; or `write_protected_secret_files_async` and
+  `write_json_secrets_async` to an asyncio stream such as `asyncio.create_subprocess_exec(...).stdin`,
+  drained rather than flushed. The protector's key goes to the wrap tool the same way, with
+  `PipelineDataProtector.write_dek` or `write_dek_async`.
 
 **A secret never becomes a `str`.** A store's writer takes the value out of the raw response with
 `SecretJsonBody` (from `hkdfguard-cache`), as the runtime caches do, into a bytearray it zeroes; a
@@ -103,7 +114,7 @@ with (AesGcmPipelineDataProtector(DefaultFormatProvider(), 3) as protector,
       InMemorySecretPipelineWriter(store, protector, ["db-login#username", "db-login#password", "api-key"]) as writer):
     writer.pull_secrets()
     writer.write_protected_secret_files("secrets")  # secrets/db-login__username, db-login__password, api-key
-    # Then hand protector.get_key_as_base64() to the wrap tool, and register the key at version 3.
+    # Then hand the key to the wrap tool - protector.write_dek(wrap_process.stdin) - and register it at version 3.
 ```
 
 Requires Python 3.12 or later. See the

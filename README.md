@@ -19,7 +19,7 @@ Each distribution installs one subpackage of the `hkdfguard` namespace package.
 | Distribution                          | Import                                  | .NET assembly                        | Contents |
 |---------------------------------------|-----------------------------------------|--------------------------------------|----------|
 | `hkdfguard-diagnostics`               | `hkdfguard.diagnostics`                 | HkdfGuard.Diagnostics                | `HkdfGuardTelemetry`, `CacheMetrics`, span/attribute/event/metric names, `HkdfGuardLog` |
-| `hkdfguard-abstractions`              | `hkdfguard.abstractions`                | HkdfGuard.Abstractions               | `CryptoProvider`, `KeyWrapper`, `KeyRing`, `DataProtector`, `PipelineDataProtector`, `SecretPipelineWriter`, ... ; `ProtectedCacheBase`, `ServiceNames`, `ProtectedConfigurationPurpose`, the exception types; `JsonReader`, the strict JSON reader secrets are parsed with |
+| `hkdfguard-abstractions`              | `hkdfguard.abstractions`                | HkdfGuard.Abstractions               | `CryptoProvider`, `KeyWrapper`, `KeyRing`, `DataProtector`, `PipelineDataProtector`, `SecretPipelineWriter`, ... ; `BinaryDestination`/`AsyncBinaryDestination`, the process stdin a pipeline writes to; `ProtectedCacheBase`, `ServiceNames`, `ProtectedConfigurationPurpose`, the exception types; `JsonReader`, the strict JSON reader secrets are parsed with |
 | `hkdfguard-cryptoprovider-aesgcm256`  | `hkdfguard.cryptoprovider.aesgcm256`    | HkdfGuard.CryptoProvider.AesGcm256   | `AesGcmCryptoProvider`, `AesGcmCryptoProviderFactory`, `AesGcmPipelineDataProtector` |
 | `hkdfguard-keywrapping-v1`            | `hkdfguard.keywrapping.v1`              | HkdfGuard.KeyWrapping.V1             | `NativeHkdfKeyWrapperV1` over the native KMS library |
 | `hkdfguard-securefile`                | `hkdfguard.securefile`                  | HkdfGuard.SecureFile                 | `TrustedKeyFile`, `KeyFileTrust`: the native library's key-file location and content checks, in Python; `TrustedFile`, `FileTooLargeError`: the same location checks for any file of a bounded size |
@@ -30,11 +30,12 @@ Each distribution installs one subpackage of the `hkdfguard` namespace package.
 | `hkdfguard-keywrapping-hashicorpvault` | `hkdfguard.keywrapping.hashicorpvault` | HkdfGuard.KeyWrapping.HashiCorpVault | `HashiCorpVaultTransitKeyWrapper` over one key in a HashiCorp Vault transit secrets engine, through the standard library's HTTP client |
 | `hkdfguard-dataencryptionkey`         | `hkdfguard.dataencryptionkey`           | HkdfGuard.DataEncryptionKey          | `KeyRing`, `KeyRingBuilder`, `DataEncryptionKey`, `DefaultFormatProvider` |
 | `hkdfguard-cache`                     | `hkdfguard.cache`                       | HkdfGuard.Cache                      | `ProtectedCache`, `ProtectedCacheCollection`; `FilePerSecretCache` over a trusted folder of one already encrypted file per secret; `RemoteSecretCache`, `SecretValueSink`, `SecretJsonBody` (and the `SecretValueReceiver` it hands values to) for caches - and pipeline writers - over a secret store |
+| `hkdfguard-cache-jsonsecretsfile`     | `hkdfguard.cache.jsonsecretsfile`       | HkdfGuard.Cache.JsonSecretsFile      | `JsonSecretsFileReadOnlyCache` over one trusted JSON file holding every secret already encrypted, as `SecretPipelineWriter.write_json_secrets` writes it: the whole file loaded and every value authenticated under its name on the first lookup, any failure refusing the whole file |
 | `hkdfguard-cache-awssecretsmanager`   | `hkdfguard.cache.awssecretsmanager`     | HkdfGuard.Cache.AwsSecretsManager    | `AwsSecretsManagerSecretCache` over AWS Secrets Manager, through a botocore client |
 | `hkdfguard-cache-azurekeyvault`       | `hkdfguard.cache.azurekeyvault`         | HkdfGuard.Cache.AzureKeyVault        | `AzureKeyVaultSecretCache` over Azure Key Vault secrets |
 | `hkdfguard-cache-googlesecretmanager` | `hkdfguard.cache.googlesecretmanager`   | HkdfGuard.Cache.GoogleSecretManager  | `GoogleSecretManagerSecretCache` over Google Cloud Secret Manager, through a gRPC Secret Manager client |
 | `hkdfguard-cache-hashicorpvault`      | `hkdfguard.cache.hashicorpvault`        | HkdfGuard.Cache.HashiCorpVault       | `HashiCorpVaultSecretCache` over HashiCorp Vault's KV secrets engine, through the standard library's HTTP client |
-| `hkdfguard-pipeline`                  | `hkdfguard.pipeline`                    | HkdfGuard.Pipeline                   | `SecretPipelineWriter`, the shared base of the store writers: takes a fixed list of names (`name` or `name#key`) and a `PipelineDataProtector`, reads each secret once however many of its keys are listed, encrypts every value at once bound to its file name (`/` and `#` become `__`), keeps only the ciphertext, and writes one file per secret, the layout `FilePerSecretCache` reads; no key ring |
+| `hkdfguard-pipeline`                  | `hkdfguard.pipeline`                    | HkdfGuard.Pipeline                   | `SecretPipelineWriter`, the shared base of the store writers: takes a fixed list of names (`name` or `name#key`) and a `PipelineDataProtector`, reads each secret once however many of its keys are listed, encrypts every value at once bound to its file name (`/` and `#` become `__`), keeps only the ciphertext, and writes one file per secret, the layout `FilePerSecretCache` reads, or one JSON file of them all, the file `JsonSecretsFileReadOnlyCache` reads - each also to a process's stdin, as a PAX tar archive of the files or as the JSON; no key ring |
 | `hkdfguard-pipeline-awssecretsmanager` | `hkdfguard.pipeline.awssecretsmanager` | HkdfGuard.Pipeline.AwsSecretsManager | `AwsSecretsManagerSecretPipelineWriter` over AWS Secrets Manager, through a botocore client of its own or yours; a `SecretBinary` is refused |
 | `hkdfguard-pipeline-azurekeyvault`    | `hkdfguard.pipeline.azurekeyvault`      | HkdfGuard.Pipeline.AzureKeyVault     | `AzureKeyVaultSecretPipelineWriter` over one Azure Key Vault, through a `SecretClient` of its own |
 | `hkdfguard-pipeline-googlesecretmanager` | `hkdfguard.pipeline.googlesecretmanager` | HkdfGuard.Pipeline.GoogleSecretManager | `GoogleSecretManagerSecretPipelineWriter` over one Google Cloud project's Secret Manager, through a gRPC client's channel; each payload checked against its CRC32C and the secret it names |
@@ -138,14 +139,20 @@ silently fall back to a default.
 
 ## Differences from .NET, by design
 
-- **Synchronous API, except cache reads and pipeline pulls.** Every .NET `...Async` method is a
-  blocking call (`build()`, `create(...)`, `wrap(...)`); there is no `CancellationToken`. Background
-  key refresh and ephemeral key rotation run on daemon threads. The exceptions are the read surface
-  of a cache: `ProtectedReadOnlyCache` has `decrypt_async` and `find_max_decrypted_length_async`
-  coroutines (asyncio), which a cache over a secret store uses so a miss doesn't block the event
-  loop; and a secret pipeline writer's pull, which is both `pull_secrets()` (blocking) and
-  `pull_secrets_async()` (.NET's `PullSecretsAsync`). Cancelling the awaiting task takes the place of
-  the `CancellationToken`.
+- **Synchronous API, except cache reads and pipeline pulls and stream writes.** Every .NET
+  `...Async` method is a blocking call (`build()`, `create(...)`, `wrap(...)`); there is no
+  `CancellationToken`. Background key refresh and ephemeral key rotation run on daemon threads. The
+  exceptions are the read surface of a cache: `ProtectedReadOnlyCache` has `decrypt_async` and
+  `find_max_decrypted_length_async` coroutines (asyncio), which a cache over a secret store uses so a
+  miss doesn't block the event loop; a secret pipeline writer's pull, which is both `pull_secrets()`
+  (blocking) and `pull_secrets_async()` (.NET's `PullSecretsAsync`); and what a pipeline writes to a
+  process's standard input, where .NET's `Stream` is either a binary file-like object written and
+  flushed (`BinaryDestination`: `Popen.stdin`, a file; `write_dek`,
+  `write_protected_secret_files_to_stream`, `write_json_secrets_to_stream`) or an asyncio stream
+  written and drained (`AsyncBinaryDestination`: `asyncio.create_subprocess_exec(...).stdin`;
+  `write_dek_async`, `write_protected_secret_files_async`, `write_json_secrets_async`, .NET's
+  `WriteDekAsync`, `WriteProtectedSecretFilesAsync` and `WriteJsonSecretsAsync`). Cancelling the
+  awaiting task takes the place of the `CancellationToken`.
 - **Disposal** is `close()`, and every disposable type is a context manager. `KeyRing.close()`
   never waits for a rotation blocked in the KMS: a key that rotation creates after the ring closed
   is closed instead of added.
@@ -678,6 +685,14 @@ later is found. Names are matched exactly. A file over 64 KiB raises `FileTooLar
 worker thread, so the event loop isn't blocked. A cached value isn't refreshed: a changed file is
 picked up by a new cache instance.
 
+`JsonSecretsFileReadOnlyCache` (`hkdfguard-cache-jsonsecretsfile`) reads the same secrets from one
+JSON file instead - a single object mapping each name to its encrypted value, as a pipeline's
+`write_json_secrets` writes it. It takes the same `KeyFileTrust`, key ring and format provider, and
+reads the file through `TrustedFile` on the first lookup: every value must authenticate under its
+name, or the whole file is refused and read again next time. Names follow the folder's rule and are
+matched ignoring ASCII case; a file that isn't exactly that object raises `InvalidSecretDataError`,
+and one over 1 MiB (by default) `FileTooLargeError`. See its README.
+
 ## Opening a certificate from a store, a provider or a file
 
 `hkdfguard-options-certificate` ports .NET's `HkdfGuard.Options.Certificate`: `CertificateOptions`
@@ -752,6 +767,8 @@ platform's wrap process and registered on the application's key ring at the prot
 `FilePerSecretCache` decrypts the files at runtime. They never depend on the runtime caches.
 
 ```python
+import subprocess
+
 from hkdfguard.cryptoprovider.aesgcm256 import AesGcmPipelineDataProtector
 from hkdfguard.dataencryptionkey import DefaultFormatProvider
 from hkdfguard.pipeline.awssecretsmanager import AwsSecretsManagerSecretPipelineWriter
@@ -760,8 +777,33 @@ with (AesGcmPipelineDataProtector(DefaultFormatProvider(), 3) as protector,
       AwsSecretsManagerSecretPipelineWriter(protector, ["prod/app#username", "prod/app#password", "prod/api-key"]) as writer):
     writer.pull_secrets()                                    # or: await writer.pull_secrets_async()
     writer.write_protected_secret_files("/etc/myapp/secrets")  # prod__app__username, prod__app__password, prod__api-key
-    # Then hand protector.get_key_as_base64() to the wrap tool (on standard input), and register the key at version 3.
+    # Then hand the key to the wrap tool on standard input, and register the key at version 3.
+    with subprocess.Popen(["hkdfguard", "wrap", ..., "--dek-stdin"], stdin=subprocess.PIPE, bufsize=0) as wrap:
+        protector.write_dek(wrap.stdin)
+        wrap.stdin.close()
 ```
+
+The files can go straight to another host instead, as a tar archive to a remote tar's standard input -
+or all of them as one JSON file, for `JsonSecretsFileReadOnlyCache`, with `write_json_secrets` (a
+path) or `write_json_secrets_to_stream` (to `ssh -T host sudo -n tee /etc/myapp/secrets.json`):
+
+```python
+async def deliver() -> None:
+    ssh = await asyncio.create_subprocess_exec("ssh", "-T", "host", "sudo", "-n", "tar", "-x", "--no-same-owner", "-f", "-",
+                                               "-C", "/etc/myapp/secrets", stdin=asyncio.subprocess.PIPE)
+    await writer.write_protected_secret_files_async(ssh.stdin)  # or write_protected_secret_files_to_stream(popen.stdin)
+    ssh.stdin.close()
+    await ssh.wait()
+```
+
+The archive is PAX, which GNU tar and bsdtar (macOS, Windows' `tar.exe`) both read: one regular file
+per secret in file-name order, mode 0644, owned by whoever unpacks it with `--no-same-owner`. The
+JSON is laid out byte for byte as .NET's `WriteJsonSecrets` writes it (two-space indent, the
+platform's line ending, file-name order, no escaping of `+`), so either port's file is the other's.
+The key goes to the wrap tool the same way, from a `bytearray` zeroed once written - never a `str`:
+`write_dek(popen.stdin)` or `await write_dek_async(process.stdin)`. Open a `Popen` pipe with
+`bufsize=0`, so the key isn't copied into a buffer of Popen's own; an asyncio transport copies what
+it is given until it is sent, which this library can't zero.
 
 A name is the store's name for a secret, optionally followed by `#` and a key of the JSON object it
 holds; each secret is read once however many of its keys are listed. Its file name is the name with
@@ -824,7 +866,7 @@ uv build --all-packages --build-constraints build-constraints.txt --require-hash
 
 `.github/workflows/ci.yml` tests every push and pull request on Linux, Windows and macOS with Python
 3.12 to 3.14, lints, and builds and checks the packages. `.github/workflows/release.yml` publishes all
-twenty-four distributions together as a GitHub Release, with Sigstore-signed build provenance and no stored
+twenty-five distributions together as a GitHub Release, with Sigstore-signed build provenance and no stored
 token. Nothing is published to PyPI yet.
 
 To release: set the same version in every `packages/*/pyproject.toml`, merge to `main`, then push a tag

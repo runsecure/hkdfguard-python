@@ -3,17 +3,29 @@ names, its own arguments, the receiver it hands SecretJsonBody."""
 
 from __future__ import annotations
 
+import asyncio
+import base64
+import io
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tarfile
 from collections.abc import Buffer, Iterator, MutableMapping, Sequence
+from pathlib import Path
 from typing import ClassVar
 
 import pytest
 from hkdfguard import abstractions
-from hkdfguard.abstractions import KeyNotFoundError, PipelineDataProtector
-from hkdfguard.cache import InvalidSecretDataError, SecretJsonBody, SecretValueReceiver
-from hkdfguard.cryptoprovider.aesgcm256 import AesGcmPipelineDataProtector
-from hkdfguard.dataencryptionkey import DefaultFormatProvider
+from hkdfguard.abstractions import KeyNotFoundError, KeyWrapper, PipelineDataProtector, WritableBuffer
+from hkdfguard.cache import FilePerSecretCache, InvalidSecretDataError, SecretJsonBody, SecretValueReceiver
+from hkdfguard.cryptoprovider.aesgcm256 import AesGcmCryptoProvider, AesGcmPipelineDataProtector
+from hkdfguard.dataencryptionkey import DataEncryptionKey, DefaultFormatProvider
+from hkdfguard.dataencryptionkey import KeyRing as DefaultKeyRing
 from hkdfguard.pipeline import SecretPipelineWriter, SecretRequest
-from pipeline_test_support import SecretPipelineWriterContract, reveal
+from hkdfguard_test_support import current_user_trust, trusted_directory
+from pipeline_test_support import KEY_VERSION, RecordingStream, SecretPipelineWriterContract, reveal, run
 
 
 class FakeStore:
@@ -177,6 +189,121 @@ class TestSecretPipelineWriter(SecretPipelineWriterContract):
         with Stray(self.protector, ["item"], self.store) as writer, pytest.raises(KeyNotFoundError):
             writer.pull_secrets()
         assert len(writer.protected_secrets) == 0
+
+    def test_the_json_and_the_tar_list_file_names_in_ordinal_order_capitals_first(self) -> None:
+        for name in ("b", "B-2", "a", "A-1", "prod/x"):
+            self.store.set(name, name)
+        with FakeWriter(self.protector, ["b", "B-2", "a", "A-1", "prod/x"], self.store) as writer:
+            writer.pull_secrets()
+            stream = RecordingStream()
+
+            writer.write_json_secrets_to_stream(stream)
+            writer.write_protected_secret_files_to_stream(tar_stream := RecordingStream())
+
+        assert list(json.loads(stream.data)) == ["A-1", "B-2", "a", "b", "prod__x"]
+        with tarfile.open(fileobj=io.BytesIO(tar_stream.data), mode="r:") as tar:
+            assert tar.getnames() == ["A-1", "B-2", "a", "b", "prod__x"]
+
+    def test_a_real_tar_unpacks_the_stream_from_popen_into_the_folder_file_per_secret_cache_reads(self) -> None:
+        tar = system_tar()
+        self.store.set("db-login", '{"password":"pässwörd"}')
+        self.store.set("api-key", "key")
+        with FakeWriter(self.protector, ["db-login#password", "api-key"], self.store) as writer, trusted_directory() as folder:
+            writer.pull_secrets()
+            # Unbuffered, as for the key: nothing is copied into a buffer of Popen's own.
+            with subprocess.Popen([tar, "-x", "--no-same-owner", "-f", "-", "-C", str(folder)], stdin=subprocess.PIPE, bufsize=0) as process:
+                assert process.stdin is not None
+                writer.write_protected_secret_files_to_stream(process.stdin)
+                process.stdin.close()
+            assert process.returncode == 0
+
+            assert sorted(os.listdir(folder)) == ["api-key", "db-login__password"]
+            self.assert_cache_reads(folder, {"api-key": "key", "db-login__password": "pässwörd"})
+
+    def test_a_real_tar_unpacks_the_stream_from_asyncio_into_the_folder_file_per_secret_cache_reads(self) -> None:
+        tar = system_tar()
+        self.store.set("db-login", '{"password":"pässwörd"}')
+        with FakeWriter(self.protector, ["db-login#password"], self.store) as writer, trusted_directory() as folder:
+            writer.pull_secrets()
+
+            async def unpack() -> int:
+                process = await asyncio.create_subprocess_exec(tar, "-x", "--no-same-owner", "-f", "-", "-C", str(folder), stdin=asyncio.subprocess.PIPE)
+                assert process.stdin is not None
+                await writer.write_protected_secret_files_async(process.stdin)
+                process.stdin.close()
+                await process.stdin.wait_closed()
+                return await process.wait()
+
+            assert run(unpack()) == 0
+            self.assert_cache_reads(folder, {"db-login__password": "pässwörd"})
+
+    def test_the_json_reaches_a_real_process_from_popen_and_from_asyncio_as_the_file_holds_it(self, tmp_path: Path) -> None:
+        self.store.set("item", "s3cret")
+        # Copies its standard input to a file, as tee would.
+        copy = ["-I", "-c", "import shutil, sys; shutil.copyfileobj(sys.stdin.buffer, open(sys.argv[1], 'wb'))"]
+        with FakeWriter(self.protector, ["item"], self.store) as writer:
+            writer.pull_secrets()
+            writer.write_json_secrets(tmp_path / "expected.json")
+
+            with subprocess.Popen([sys.executable, *copy, str(tmp_path / "popen.json")], stdin=subprocess.PIPE) as process:
+                assert process.stdin is not None
+                writer.write_json_secrets_to_stream(process.stdin)
+                process.stdin.close()
+
+            async def tee() -> int:
+                process = await asyncio.create_subprocess_exec(sys.executable, *copy, str(tmp_path / "asyncio.json"), stdin=asyncio.subprocess.PIPE)
+                assert process.stdin is not None
+                await writer.write_json_secrets_async(process.stdin)
+                process.stdin.close()
+                return await process.wait()
+
+            assert run(tee()) == 0
+
+        expected = (tmp_path / "expected.json").read_bytes()
+        assert (tmp_path / "popen.json").read_bytes() == expected
+        assert (tmp_path / "asyncio.json").read_bytes() == expected
+
+    def assert_cache_reads(self, folder: Path, expected: dict[str, str]) -> None:
+        """FilePerSecretCache over ``folder``, with a ring holding the protector's key as it will once wrapped and registered."""
+        key = bytearray(base64.b64decode(bytes(self.protector.get_key_as_base64())))
+        with DefaultKeyRing(DefaultFormatProvider()) as ring:
+            ring.add(KEY_VERSION, DataEncryptionKey(AesGcmCryptoProvider.create(FixedKeyWrapper(key), b"wrapped", 60)))
+            cache = FilePerSecretCache(folder, current_user_trust(), ring, DefaultFormatProvider())
+            for name, value in expected.items():
+                result = bytearray(64)
+                assert result[:cache.decrypt(name, result)].decode() == value
+
+
+def system_tar() -> str:
+    """The operating system's own tar - bsdtar on Windows (System32\\tar.exe) and macOS, usually GNU tar on Linux; skips the test without one."""
+    if sys.platform == "win32":
+        system32 = os.path.join(os.environ.get("SYSTEMROOT", r"C:\Windows"), "System32", "tar.exe")
+        path = system32 if os.path.isfile(system32) else None
+    else:
+        path = shutil.which("tar")
+    if path is None:
+        pytest.skip("No tar to unpack with.")
+    return path
+
+
+class FixedKeyWrapper(KeyWrapper):
+    """Reveals one fixed key: the pipeline's, as the wrap tool would have wrapped it."""
+
+    def __init__(self, key: bytearray) -> None:
+        self.key = key
+
+    def wrap(self, plaintext: Buffer, result: WritableBuffer) -> int:
+        raise NotImplementedError
+
+    def unwrap(self, wrapped: Buffer, result: WritableBuffer) -> int:
+        memoryview(result).cast("B")[:32] = self.key
+        return 32
+
+    def generate_and_wrap(self, result: WritableBuffer) -> int:
+        raise NotImplementedError
+
+    def read_key_file(self, path: str | os.PathLike[str]) -> bytearray:
+        raise NotImplementedError
 
 
 class TestReceiver:
