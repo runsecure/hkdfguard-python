@@ -64,7 +64,7 @@ type _CipherFactory = Callable[[bytearray], BlockCipherAlgorithm]
 
 
 def _triple_des(key: bytearray) -> BlockCipherAlgorithm:
-    return TripleDES(key)  # type: ignore[arg-type]  # it takes any buffer, as AES does
+    return TripleDES(key)  # type: ignore[arg-type]  # NOSONAR - decrypt only, for Windows' 3DES PKCS#12 export; it takes any buffer, as AES does
 
 
 def _aes(key: bytearray) -> BlockCipherAlgorithm:
@@ -298,7 +298,7 @@ def _cbc_decrypt(cipher: BlockCipherAlgorithm, iv: bytes | bytearray, ciphertext
     block = cipher.block_size // 8
     if len(ciphertext) == 0 or len(ciphertext) % block or len(iv) != block:
         raise InvalidCertificateFileError("The encrypted data isn't whole cipher blocks.")
-    decryptor = Cipher(cipher, modes.CBC(bytes(iv))).decryptor()
+    decryptor = Cipher(cipher, modes.CBC(bytes(iv))).decryptor()  # NOSONAR - PBES2 is CBC by definition (RFC 8018)
     out = bytearray(len(ciphertext) + block - 1)
     try:
         written = decryptor.update_into(ciphertext, out)
@@ -330,7 +330,7 @@ def encrypt_pkcs8(private_key_info: bytearray, password: bytearray, iterations: 
         padded[:len(private_key_info)] = private_key_info
         pad = len(padded) - len(private_key_info)
         padded[len(private_key_info):] = bytes([pad]) * pad
-        encryptor = Cipher(algorithms.AES(key), modes.CBC(iv)).encryptor()
+        encryptor = Cipher(algorithms.AES(key), modes.CBC(iv)).encryptor()  # NOSONAR - PBES2, the only encrypted PKCS#8 OpenSSL loads
         written = encryptor.update_into(padded, ciphertext)
         encryptor.finalize()
         encrypted = bytes(ciphertext[:written])

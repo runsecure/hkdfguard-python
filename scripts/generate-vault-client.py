@@ -61,7 +61,7 @@ _RESERVED_PARAMETER_NAMES: Final = frozenset({"self", "options", "request", "req
 # Names a model has already, so a property can't take them.
 _RESERVED_FIELD_NAMES: Final = frozenset({"write_json", "from_json"})
 # vault-client-go's .openapi-generator-ignore: model_*2_request.go, ..., model_enterprise_stub*.
-_EXCLUDED_SCHEMA: Final = re.compile(r"^EnterpriseStub|[234](Request|Response)$")
+_EXCLUDED_SCHEMA: Final = re.compile(r"(?:^EnterpriseStub)|(?:[234](?:Request|Response)$)")
 _PLACEHOLDER: Final = re.compile(r"([^{]*)\{([^}]*)\}")
 _NON_ALPHANUMERIC: Final = re.compile(r"[^A-Za-z0-9]+")
 _CAMEL_BOUNDARY: Final = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")

@@ -160,13 +160,13 @@ class VaultTlsOptions:
         self._check_types()
         roots = None if self.insecure_skip_verify else self._server_certificates()
         if roots is None:
-            context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+            context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)  # NOSONAR - verifies unless insecure_skip_verify
         else:
-            context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH, cadata="".join(_pem(c) for c in roots))
+            context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH, cadata="".join(_pem(c) for c in roots))  # NOSONAR - verifies
         context.minimum_version = ssl.TLSVersion.TLSv1_2
         if self.insecure_skip_verify:
             context.check_hostname = False
-            context.verify_mode = ssl.CERT_NONE
+            context.verify_mode = ssl.CERT_NONE  # NOSONAR - VAULT_SKIP_VERIFY, an explicit opt-in for development
 
         client = self._client_key()
         if client is not None:
