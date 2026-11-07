@@ -166,9 +166,16 @@ class ReplicationStateCache:
         self._lock = threading.Lock()
 
     def record(self, headers: object) -> None:
-        """Merges the state ``headers`` carry, if any, into those seen."""
+        """Merges the state ``headers`` carry, if any, into those seen. A value that isn't a
+        replication state is dropped: it would be sent back with every later request."""
         state = _header(headers, INDEX_HEADER)
         if not state:
+            return
+        try:
+            # Strict base64 of v1:cluster:local:replicated:hmac - no whitespace, so no folded line or
+            # stray header text is ever kept and echoed.
+            VaultReplicationState.parse(state)
+        except ValueError:
             return
         with self._lock:
             self._states = tuple(VaultReplication.merge_replication_states(self._states, state))

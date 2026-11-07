@@ -190,6 +190,37 @@ class TestSecretPipelineWriter(SecretPipelineWriterContract):
             writer.pull_secrets()
         assert len(writer.protected_secrets) == 0
 
+    def test_a_write_that_fails_part_way_leaves_the_old_file_whole_and_nothing_else(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Each file is written beside its target and renamed over it, so a failure - a full disk, a
+        # crash - leaves either the old file or the new one, never half of one, and no stray file.
+        self.store.set("item", "new value")
+        (tmp_path / "item").write_bytes(b"enc::v1::old")
+        (tmp_path / "secrets.json").write_bytes(b"{}")
+        with FakeWriter(self.protector, ["item"], self.store) as writer:
+            writer.pull_secrets()
+
+            def fail(_: int) -> None:
+                raise OSError("No space left on device")
+
+            monkeypatch.setattr(os, "fsync", fail)  # the writer flushes each file to disk through it
+            with pytest.raises(OSError, match="No space"):
+                writer.write_protected_secret_files(tmp_path)
+            with pytest.raises(OSError, match="No space"):
+                writer.write_json_secrets(tmp_path / "secrets.json")
+            assert sorted(path.name for path in tmp_path.iterdir()) == ["item", "secrets.json"]
+            assert (tmp_path / "item").read_bytes() == b"enc::v1::old"
+            assert (tmp_path / "secrets.json").read_bytes() == b"{}"
+
+            monkeypatch.undo()
+            writer.write_protected_secret_files(tmp_path)
+            writer.write_json_secrets(tmp_path / "secrets.json")
+        assert sorted(path.name for path in tmp_path.iterdir()) == ["item", "secrets.json"]
+        assert (tmp_path / "item").read_bytes().startswith(b"enc::v")
+        assert (tmp_path / "item").read_bytes() != b"enc::v1::old"
+        if sys.platform != "win32":
+            # rw-r--r-- less the umask: never writable by group or others, as FilePerSecretCache requires.
+            assert (tmp_path / "item").stat().st_mode & 0o022 == 0
+
     def test_the_json_and_the_tar_list_file_names_in_ordinal_order_capitals_first(self) -> None:
         for name in ("b", "B-2", "a", "A-1", "prod/x"):
             self.store.set(name, name)

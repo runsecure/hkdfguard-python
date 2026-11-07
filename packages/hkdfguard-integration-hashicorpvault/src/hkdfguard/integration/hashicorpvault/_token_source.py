@@ -117,9 +117,12 @@ def copy_token_within(source: VaultTokenSource, destination: bytearray, timeout:
             raise
         return length if isinstance(length, int) and not isinstance(length, bool) else -1
 
-    length = run_within(copy, timeout, thread_name="hkdfguard-vault-token", timeout_message=f"The Vault token source returned no token within {timeout}.",
-                        abandoned=lambda _: ArrayUtility.zero_memory(scratch))
     try:
+        # Inside the try, so a source that times out - and may never return - leaves nothing it had
+        # written so far: zeroed here at once, and again by abandoned if it ever does return.
+        length = run_within(copy, timeout, thread_name="hkdfguard-vault-token",
+                            timeout_message=f"The Vault token source returned no token within {timeout}.",
+                            abandoned=lambda _: ArrayUtility.zero_memory(scratch))
         if 0 < length <= len(scratch):
             destination[:length] = memoryview(scratch)[:length]
         return length

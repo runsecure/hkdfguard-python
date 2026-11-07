@@ -65,6 +65,17 @@ def test_record_and_require_carry_a_state_from_a_response_to_a_request(vault: Fa
     assert vault.requests[1].header("X-Vault-Index") == raw
 
 
+def test_the_cache_keeps_only_what_is_a_replication_state() -> None:
+    # Whatever it keeps goes back to Vault with every later request: a folded line, stray text or a
+    # value that isn't base64 of v1:cluster:local:replicated:hmac is dropped instead.
+    cache = ReplicationStateCache()
+    for bad in ("not base64!", state("c", 1, 1) + "\r\n X-Injected: 1", base64.b64encode(b"v2:c:1:1:00").decode(), "a" * 40):
+        cache.record({"X-Vault-Index": bad})
+        assert cache.snapshot() == ()
+    cache.record({"X-Vault-Index": state("c", 1, 1)})
+    assert cache.snapshot() == (state("c", 1, 1),)
+
+
 def test_the_cache_ignores_responses_without_a_state_and_copies_are_independent() -> None:
     cache = ReplicationStateCache()
     cache.record({})
