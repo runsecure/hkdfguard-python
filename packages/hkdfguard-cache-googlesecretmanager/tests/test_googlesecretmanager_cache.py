@@ -471,11 +471,13 @@ def test_a_binary_secret_is_cached_as_its_bytes(google: FakeSecretManager, cache
     assert result[:written] == bytes([0, 1, 254, 255])
 
 
-def test_a_payload_without_a_checksum_is_accepted(google: FakeSecretManager, cache: GoogleSecretManagerSecretCache) -> None:
+def test_a_payload_without_a_checksum_is_refused(google: FakeSecretManager, cache: GoogleSecretManagerSecretCache) -> None:
+    # Secret Manager always sends one: data without it can't be told from data corrupted in transit.
     google.set("item", "value")
     google.tamper = lambda r: AccessSecretVersionResponse(name=r.name, payload=SecretPayload(data=r.payload.data))
 
-    assert decrypt_string(cache, "item") == "value"
+    with pytest.raises(CryptographicError, match="or has none"):
+        cache.decrypt("item", bytearray(16))
 
 
 def test_a_payload_that_does_not_match_its_checksum_is_refused_and_zeroed(google: FakeSecretManager, cache: GoogleSecretManagerSecretCache,

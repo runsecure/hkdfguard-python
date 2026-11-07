@@ -33,7 +33,9 @@ and underscores; enums by name, ignoring case, or by .NET's number; an unknown k
 password never appears in configuration: `PasswordSecretName` names a secret in a
 `ProtectedReadOnlyCache` (a `FilePerSecretCache`, a remote secret cache), which the loader decrypts
 into a `bytearray` and zeroes as soon as the key is read. An unprotected key file is refused unless
-`AllowUnprotectedPrivateKey` is set, for development.
+`AllowUnprotectedPrivateKey` is set, for development. With `PasswordSecretName` set, a PKCS#12 file
+must be protected by that password: one without an integrity MAC (`openssl pkcs12 -nomac`), or holding
+its key outside encrypted contents (`-keypbe NONE`), is refused rather than loaded unchecked.
 
 A store certificate is found by its subject distinguished name, compared whole and decoded, ignoring
 case - `"CN=api"` never matches `"CN=api.example.com"`. Of the certificates with that subject, the one

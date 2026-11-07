@@ -520,6 +520,95 @@ def test_through_a_botocore_client_an_unreachable_endpoint_is_a_cryptographic_er
     assert isinstance(error.value.__cause__, EndpointConnectionError)
 
 
+class _RawBody:
+    """What botocore's AWSResponse reads a body from."""
+
+    def __init__(self, body: bytes) -> None:
+        self._body = body
+
+    def stream(self, **_: Any) -> Iterator[bytes]:
+        yield self._body
+
+
+def answering(client: Any, operation: str, status: int, body: bytes) -> None:
+    """Has every ``operation`` call on ``client`` answered with ``body`` as if it had come over HTTP:
+    from ``before-send``, so botocore runs every later step - ``before-parse``, the parser and its
+    DEBUG log of the body - exactly as for a real response."""
+    from botocore.awsrequest import AWSResponse
+
+    def send(request: Any, **_: Any) -> AWSResponse:
+        return AWSResponse(request.url, status, {"x-amzn-requestid": "test", "content-type": "application/x-amz-json-1.1"}, _RawBody(body))
+
+    client.meta.events.register(f"before-send.kms.{operation}", send)
+
+
+def decrypt_body(dek: bytes) -> bytes:
+    import base64
+
+    return (b'{"KeyId":"' + KEY_ARN.encode() + b'","Plaintext":"' + base64.b64encode(dek) + b'","EncryptionAlgorithm":"SYMMETRIC_DEFAULT"}')
+
+
+def test_through_a_botocore_client_the_revealed_key_never_reaches_botocores_log(caplog: pytest.LogCaptureFixture) -> None:
+    import base64
+
+    client = botocore_client()
+    dek = os.urandom(32)
+    answering(client, "Decrypt", 200, decrypt_body(dek))
+    wrapper = AwsKmsKeyWrapper(client, KEY_ARN)
+
+    revealed = bytearray(32)
+    with caplog.at_level("DEBUG", logger="botocore"):
+        assert wrapper.unwrap(b"c" * 184, revealed) == 32
+
+    assert revealed == dek
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert "Response body" in logged  # botocore did log the body it parsed ...
+    assert base64.b64encode(dek).decode() not in logged  # ... with the key taken out of it
+    assert repr(base64.b64encode(dek))[2:-1] not in logged
+
+
+def test_through_a_botocore_client_the_applications_own_decrypt_is_left_alone() -> None:
+    client = botocore_client()
+    dek = os.urandom(32)
+    answering(client, "Decrypt", 200, decrypt_body(dek))
+    AwsKmsKeyWrapper(client, KEY_ARN)  # registers the capture on the client
+
+    assert client.decrypt(CiphertextBlob=b"c" * 184)["Plaintext"] == dek
+
+
+def test_through_a_botocore_client_two_wrappers_register_the_capture_once() -> None:
+    client = botocore_client()
+    dek = os.urandom(32)
+    answering(client, "Decrypt", 200, decrypt_body(dek))
+    AwsKmsKeyWrapper(client, KEY_ARN)
+    wrapper = AwsKmsKeyWrapper(client, KEY_ARN)
+
+    revealed = bytearray(32)
+    assert wrapper.unwrap(b"c" * 184, revealed) == 32
+    assert revealed == dek
+
+
+@pytest.mark.parametrize(("body", "message"), [
+    (b'["Plaintext"]', "isn't a JSON object"),
+    (b'{"Plaintext":"AAAA","Plaintext":"AAAA"}', "more than one Plaintext"),
+    (b'{"Plaintext":12}', "isn't a string"),
+    (b'{"Plaintext":"not base64!"}', "isn't base64"),
+    (b'{"Plaintext":"AAAA"', "isn't valid JSON"),
+    (b'{"KeyId":"k"}', "returned no plaintext"),
+    (b'{"Plaintext":""}', "returned no plaintext"),
+])
+def test_through_a_botocore_client_a_decrypt_body_that_cant_be_read_is_refused_and_result_zeroed(body: bytes, message: str) -> None:
+    client = botocore_client()
+    answering(client, "Decrypt", 200, body)
+    result = bytearray(b"\xaa" * 32)
+
+    with pytest.raises(CryptographicError, match=message) as error:
+        AwsKmsKeyWrapper(client, KEY_ARN).unwrap(b"c" * 184, result)
+
+    assert error.value.__cause__ is None
+    assert ArrayUtility.is_null_or_empty(result)
+
+
 # --- With the rest of HkdfGuard ---------------------------------------------------------------------
 
 

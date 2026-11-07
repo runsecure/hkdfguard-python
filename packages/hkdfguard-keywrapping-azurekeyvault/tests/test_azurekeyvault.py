@@ -265,9 +265,12 @@ def test_the_constructor_refuses_missing_or_invalid_arguments(vault: FakeKeyVaul
         AzureKeyVaultKeyWrapper(WRAPPING_KEY_ID, SIGNING_KEY_ID, credential, key_file_trust="S-1-5-18")  # type: ignore[arg-type]
     with pytest.raises(TypeError):
         AzureKeyVaultKeyWrapper(WRAPPING_KEY_ID, SIGNING_KEY_ID, credential, client_options=[("retry_total", 0)])  # type: ignore[arg-type]
-    for option in ("key", "credential"):
-        with pytest.raises(ValueError, match="must not name key or credential"):
-            AzureKeyVaultKeyWrapper(WRAPPING_KEY_ID, SIGNING_KEY_ID, credential, client_options={option: "x"})
+    for option in ("key", "credential", "logging_enable", "logging_policy", "http_logging_policy", "raw_request_hook", "raw_response_hook",
+                   "custom_hook_policy", "per_call_policies", "per_retry_policies", "authentication_policy", "policies", "generated_client"):
+        with pytest.raises(ValueError, match=f"must not name {option}"):
+            AzureKeyVaultKeyWrapper(WRAPPING_KEY_ID, SIGNING_KEY_ID, credential, client_options={option: True})
+    # Saying what is already the default is allowed.
+    AzureKeyVaultKeyWrapper(WRAPPING_KEY_ID, SIGNING_KEY_ID, credential, client_options={"logging_enable": False})
     with pytest.raises(ValueError, match="at most 65535"):
         wrapper_over(vault, "x" * 65_536)
     # .NET encodes a lone surrogate as U+FFFD, Java as '?': refused, so no port signs a context another can't.

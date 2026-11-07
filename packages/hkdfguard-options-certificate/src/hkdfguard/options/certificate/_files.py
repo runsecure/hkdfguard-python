@@ -99,7 +99,7 @@ def parse_certificates(data: bytearray, path: str) -> list[x509.Certificate]:
     if b"-----BEGIN" not in data:
         try:
             return [x509.load_der_x509_certificate(bytes(data))]
-        except ValueError as error:
+        except (ValueError, x509.InvalidVersion) as error:  # InvalidVersion isn't a ValueError
             raise InvalidCertificateFileError(f"'{path}' isn't a PEM or DER certificate: {error}") from None
     certificates = []
     for block in pem_blocks(data):
@@ -107,7 +107,7 @@ def parse_certificates(data: bytearray, path: str) -> list[x509.Certificate]:
             continue
         try:
             certificates.append(x509.load_der_x509_certificate(bytes(decode_body(block))))
-        except ValueError as error:
+        except (ValueError, x509.InvalidVersion) as error:
             raise InvalidCertificateFileError(f"A certificate in '{path}' isn't one: {error}") from None
     if not certificates:
         raise InvalidCertificateFileError(f"'{path}' holds no CERTIFICATE.")

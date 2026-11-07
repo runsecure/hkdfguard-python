@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
@@ -81,6 +82,22 @@ def test_a_date_time_is_read_as_go_writes_it_and_without_an_offset_is_utc() -> N
     assert empty is None
     with pytest.raises(VaultJsonError):
         JsonValue.of("yesterday").read_datetime()
+
+
+def test_a_number_with_a_huge_exponent_is_refused_without_being_expanded(protector: DataProtector) -> None:
+    # 12 bytes that int(Decimal(...)) would expand into ten million digits, pinning a CPU for minutes:
+    # what a hostile server could put in every response's lease_duration.
+    started = time.monotonic()
+    value = JsonValue.parse('{"lease_duration":1E+10000000,"neg":-1e+5000,"edge":9e4299,"over":1e4300}')
+    for name in ("lease_duration", "neg", "over"):
+        with pytest.raises(VaultJsonError):
+            value.member(name).read_int()
+    assert value.member("edge").read_int() == 9 * 10**4299  # 4300 digits: as many as int(str) reads
+    assert value.read_object() == {"lease_duration": Decimal("1E+10000000"), "neg": Decimal("-1e+5000"), "edge": 9 * 10**4299,
+                                   "over": Decimal("1e4300")}
+    with pytest.raises(VaultJsonError):
+        read_response(memoryview(b'{"lease_duration":1E+10000000,"data":{}}'), protector, JsonValue.read_json_dict)
+    assert time.monotonic() - started < 5
 
 
 def test_read_object_is_plain_python() -> None:

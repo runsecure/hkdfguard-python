@@ -5,6 +5,7 @@ keys afterwards."""
 
 from __future__ import annotations
 
+import hashlib
 import os
 import secrets
 import ssl
@@ -12,6 +13,7 @@ import subprocess
 import sys
 from collections.abc import Iterator
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 from cryptography.hazmat.primitives import hashes
@@ -141,6 +143,32 @@ def test_a_non_exportable_ecdsa_key_signs_in_der_through_cng(ecdsa_certificate: 
         assert isinstance(public, ec.EllipticCurvePublicKey)
         for algorithm in (hashes.SHA256(), hashes.SHA384()):
             public.verify(loaded.sign(b"to sign", algorithm), b"to sign", ec.ECDSA(algorithm))
+
+
+def test_a_certificate_with_an_unknown_version_in_the_store_doesnt_stop_another_loading(rsa_certificate: str, tmp_path: Path) -> None:
+    # Anyone running as the user can add a certificate to CurrentUser\My. One claiming X.509 version 9
+    # makes cryptography raise InvalidVersion - not a ValueError - and is passed over like any other
+    # certificate that can't be read, rather than failing every load from the store.
+    from hkdfguard.options.certificate import _windows_store
+    from test_certificate_pkcs12 import version_9
+
+    with CertificateOptionsLoader().load(_current_user_options(rsa_certificate, require_private_key=False)) as loaded:
+        bad = version_9(loaded.certificate)
+    path = tmp_path / "bad.cer"
+    path.write_bytes(bad)
+    thumbprint = hashlib.sha1(bad).hexdigest().upper()  # the store's own name for it
+    _powershell(f"certutil -user -f -addstore My '{path}' | Out-Null; if ($LASTEXITCODE) {{ throw 'certutil failed' }}")
+    try:
+        read = _windows_store.read_store(StoreLocation.CURRENT_USER, StoreName.MY)
+        try:
+            assert not any(c.der == bad for c in read)  # passed over, not raised
+        finally:
+            for certificate in read:
+                certificate.close()
+        with CertificateOptionsLoader().load(_current_user_options(rsa_certificate)) as loaded:
+            assert loaded.has_private_key
+    finally:
+        _powershell(f"Remove-Item -Path Cert:\\CurrentUser\\My\\{thumbprint} -ErrorAction Stop")
 
 
 def test_the_certificate_alone_loads_without_opening_its_key(rsa_certificate: str) -> None:

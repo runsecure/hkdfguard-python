@@ -13,7 +13,7 @@ from typing import Self
 
 from hkdfguard.abstractions import ArrayUtility, CryptographicError, DataProtector, JsonReader, JsonToken, MalformedJsonError
 from hkdfguard.integration.hashicorpvault._connection import is_valid_token
-from hkdfguard.integration.hashicorpvault._errors import VaultJsonError, VaultResponseError, describe_status, read_errors
+from hkdfguard.integration.hashicorpvault._errors import MAX_ERROR_BODY_LENGTH, VaultJsonError, VaultResponseError, describe_status, read_errors
 from hkdfguard.integration.hashicorpvault._json import JsonValue
 from hkdfguard.integration.hashicorpvault._token_provider import StaticVaultToken
 
@@ -228,7 +228,8 @@ def response_error(status: int, body: memoryview, method: str, url: str) -> Vaul
     errors = read_errors(body)
     if errors:
         return VaultResponseError(describe_status(status, errors, ", "), status, errors, None, method, url)
-    raw = bytes(body) if len(body) else None
+    # Only as much of a body that isn't Vault's errors as any refusal could need: a proxy's page, say.
+    raw = bytes(body[:MAX_ERROR_BODY_LENGTH]) if len(body) else None
     message = describe_status(status, None) if raw is None else f"{describe_status(status, None)}: {raw.decode('utf-8', 'replace')}"
     return VaultResponseError(message, status, [], raw, method, url)
 

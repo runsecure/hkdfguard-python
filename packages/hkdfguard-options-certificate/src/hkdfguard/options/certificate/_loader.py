@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from typing import Protocol
 
 from cryptography import x509
+from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat
 from hkdfguard.abstractions import ArrayUtility, ProtectedReadOnlyCache
 from hkdfguard.options.certificate import _files, _pbe, _pkcs12
 from hkdfguard.options.certificate._dn import DistinguishedName, describe
@@ -28,6 +29,7 @@ from hkdfguard.options.certificate._loaded import (
     OsKeySource,
     PlainKeyFileSource,
     ProviderKeySource,
+    _KeySource,
 )
 from hkdfguard.options.certificate._openssl_provider import pkcs11_uri_pem
 from hkdfguard.options.certificate._options import (
@@ -299,32 +301,40 @@ class CertificateOptionsLoader:
         key_data = _files.read_file(file.key_path)
         try:
             if password is None:
-                public_key = _files.plain_pem_key(key_data, file.key_path).public_key()
-                ordered = _files.leaf_first(certificates, public_key)
-                if ordered is None:
-                    raise InvalidCertificateFileError(f"No certificate in '{file.path}' is the key's.")
-                return LoadedCertificate(ordered, PlainKeyFileSource(file.key_path))
-            private_key_info = _files.decrypt_pem_key(key_data, password, file.key_path)
+                # Read once and held encrypted, as a protected key is. The PKCS#8 cryptography writes is
+                # an immutable bytes no one can zero; an unprotected key file is for development only.
+                key = _files.plain_pem_key(key_data, file.key_path)
+                private_key_info = bytearray(key.private_bytes(Encoding.DER, PrivateFormat.PKCS8, NoEncryption()))
+                source: Callable[[bytearray], _KeySource] = PlainKeyFileSource
+            else:
+                private_key_info = _files.decrypt_pem_key(key_data, password, file.key_path)
+                source = EncryptedKeySource
         finally:
             ArrayUtility.zero_memory(key_data)
         try:
-            return _with_key(certificates, private_key_info, f"No certificate in '{file.path}' is the key's.")
+            return _with_key(certificates, private_key_info, f"No certificate in '{file.path}' is the key's.", source)
         finally:
             ArrayUtility.zero_memory(private_key_info)
 
 
-def _with_key(certificates: list[x509.Certificate], private_key_info: bytearray, mismatch: str) -> LoadedCertificate:
+def _with_key(certificates: list[x509.Certificate], private_key_info: bytearray, mismatch: str,
+              source: Callable[[bytearray], _KeySource] = EncryptedKeySource) -> LoadedCertificate:
     """The certificates, the key's first, with the key re-encrypted under a throwaway password."""
     public_key = _files.private_key_of(private_key_info).public_key()
     ordered = _files.leaf_first(certificates, public_key)
     if ordered is None:
         raise InvalidCertificateFileError(mismatch)
-    return LoadedCertificate(ordered, EncryptedKeySource(private_key_info))
+    return LoadedCertificate(ordered, source(private_key_info))
 
 
 def _from_pkcs12(path: str, password: bytearray | None) -> LoadedCertificate:
     data = _files.read_file(path)
-    contents = _pkcs12.decode(data, password)
+    try:
+        contents = _pkcs12.decode(data, password)
+    except BaseException:
+        # The whole file: a key in the clear, if it holds one.
+        _pbe.wipe(data)
+        raise
     try:
         if not contents.certificates:
             raise InvalidCertificateFileError(f"The PKCS#12 file '{path}' holds no certificate.")

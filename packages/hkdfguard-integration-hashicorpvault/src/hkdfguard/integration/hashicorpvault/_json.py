@@ -60,15 +60,23 @@ class SecureBuffer:
             self._buffer[self._length:self._length + len(view)] = view
             self._length += len(view)
 
-    def read_from(self, readinto: Callable[[memoryview], int]) -> None:
-        """Reads with ``readinto`` (a stream's) until it returns 0."""
+    def read_from(self, readinto: Callable[[memoryview], int], limit: int | None = None) -> None:
+        """Reads with ``readinto`` (a stream's) until it returns 0.
+
+        :param limit: the most bytes the stream may hold; ``None`` for no limit
+        :raises VaultJsonError: the stream holds more than ``limit`` bytes (no more than one byte past
+            it is read)
+        """
         while True:
-            self._reserve(8192)
-            with memoryview(self._buffer) as whole, whole[self._length:] as free:
+            want = 8192 if limit is None else min(8192, limit + 1 - self._length)
+            self._reserve(want)
+            with memoryview(self._buffer) as whole, whole[self._length:self._length + want] as free:
                 read = readinto(free)
             if not read:
                 return
             self._length += read
+            if limit is not None and self._length > limit:
+                raise VaultJsonError(f"Vault's response is larger than {limit} bytes, the most this client reads.")
 
     def close(self) -> None:
         ArrayUtility.zero_memory(self._buffer)
@@ -396,7 +404,8 @@ class JsonValue:
                 return self._bool
             case JsonKind.NUMBER:
                 decimal = Decimal(self._text or "")
-                return int(decimal) if decimal == decimal.to_integral_value() else decimal
+                integer = _integral(decimal)
+                return decimal if integer is None else integer
             case JsonKind.OBJECT:
                 return self.read_object_dict()
             case _:
@@ -471,12 +480,26 @@ def _parse_int(number: str | None) -> int:
     except ValueError:
         pass
     try:
-        decimal = Decimal(text)
-        if decimal.is_finite() and decimal == decimal.to_integral_value():
-            return int(decimal)
+        integer = _integral(Decimal(text))
+        if integer is not None:
+            return integer
     except InvalidOperation:
         pass
     raise VaultJsonError("Expected an integer; the value isn't one.")
+
+
+_MAX_INTEGER_DIGITS: Final = 4300
+"""The most digits a number read as an integer may have: CPython's own limit on ``int(str)``, which
+reads the plain form. A number's exponent is checked before it is expanded, so "1E+10000000" - 12 bytes
+- can't make ``int`` build ten million digits."""
+
+
+def _integral(decimal: Decimal) -> int | None:
+    # decimal as an int, or None if it isn't a whole number of at most _MAX_INTEGER_DIGITS digits.
+    # adjusted() is the exponent of its leading digit, read without expanding it.
+    if not decimal.is_finite() or decimal.adjusted() >= _MAX_INTEGER_DIGITS or decimal != decimal.to_integral_value():
+        return None
+    return int(decimal)
 
 
 class VaultModel(ABC):

@@ -30,6 +30,10 @@ from hkdfguard.options.certificate._errors import InvalidCertificateFileError, U
 MAX_ITERATIONS: Final = 1_000_000
 MAX_TOTAL_ITERATIONS: Final = 4_000_000
 
+WRONG_PASSWORD: Final = "The password doesn't decrypt the file's key or contents."  # noqa: S105 - a message, not a password
+"""What every decryption that fails says - bad padding and a plaintext that isn't a key alike - so a
+caller can't tell which happened."""
+
 PBES2: Final = "1.2.840.113549.1.5.13"
 PBKDF2: Final = "1.2.840.113549.1.5.12"
 PBMAC1: Final = "1.2.840.113549.1.5.14"
@@ -89,10 +93,15 @@ class IterationBudget:
     def __init__(self) -> None:
         self.spent = 0
 
-    def spend(self, iterations: int) -> None:
-        if iterations < 1 or iterations > MAX_ITERATIONS or self.spent + iterations > MAX_TOTAL_ITERATIONS:
+    def spend(self, iterations: int, blocks: int = 1) -> None:
+        """Charges one derivation of ``iterations`` iterations producing ``blocks`` hash blocks - each
+        block is a full run of the iterations, so a derivation costs their product.
+
+        :raises InvalidCertificateFileError: the count is out of range, or the file has spent its budget
+        """
+        if iterations < 1 or iterations > MAX_ITERATIONS or self.spent + iterations * blocks > MAX_TOTAL_ITERATIONS:
             raise InvalidCertificateFileError("An iteration count in the file is out of range.")
-        self.spent += iterations
+        self.spent += iterations * blocks
 
 
 def wipe(*buffers: bytearray | None) -> None:
@@ -226,10 +235,13 @@ def decrypt(algorithm: Element, password: bytearray | None, ciphertext: bytearra
                 key, iv, cipher = _pbes2_key(parameters, password, budget)
             elif name in (_PBE_SHA_3DES, _PBE_SHA_2DES):
                 salt, iterations = _pkcs12_pbe_parameters(parameters)
-                budget.spend(iterations)
+                key_length = 24 if name == _PBE_SHA_3DES else 16
+                # Two derivations - the key, then the IV - each one SHA-1 run of the iterations per
+                # 20 bytes it makes: three runs for a 3DES key and its IV, two for two-key 3DES.
+                budget.spend(iterations, -(-key_length // 20) + 1)
                 bmp = bmp_password(password)
                 try:
-                    key = pkcs12_kdf("sha1", bmp, salt, iterations, PKCS12_KEY_ID, 24 if name == _PBE_SHA_3DES else 16)
+                    key = pkcs12_kdf("sha1", bmp, salt, iterations, PKCS12_KEY_ID, key_length)
                     iv = pkcs12_kdf("sha1", bmp, salt, iterations, PKCS12_IV_ID, 8)
                 finally:
                     wipe(bmp)
@@ -303,10 +315,14 @@ def _cbc_decrypt(cipher: BlockCipherAlgorithm, iv: bytes | bytearray, ciphertext
     try:
         written = decryptor.update_into(ciphertext, out)
         decryptor.finalize()
-        # PKCS#7 padding, checked whole.
-        padding = out[written - 1] if written else 0
-        if not 1 <= padding <= block or written < padding or any(out[k] != padding for k in range(written - padding, written)):
-            raise WrongPasswordError("The password doesn't decrypt the file's key or contents.")
+        # PKCS#7 padding, checked whole: every byte of the last block is visited and the result decided
+        # once, so where the padding goes wrong doesn't change what is done.
+        padding = out[written - 1]
+        bad = 0 if 1 <= padding <= block else 1
+        for k in range(block):
+            bad |= (block - k <= padding) * (out[written - block + k] ^ padding)
+        if bad:
+            raise WrongPasswordError(WRONG_PASSWORD)
         plaintext = bytearray(written - padding)
         plaintext[:] = memoryview(out)[:written - padding]
         return plaintext

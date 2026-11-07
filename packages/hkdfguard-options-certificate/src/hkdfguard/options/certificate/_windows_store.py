@@ -137,7 +137,7 @@ def read_store(location: StoreLocation, name: StoreName) -> list[WindowsCertific
                     # A store holds what others put there - a negative serial number, say: not this loader's to warn about.
                     warnings.simplefilter("ignore", CryptographyDeprecationWarning)
                     certificate = x509.load_der_x509_certificate(der)
-            except ValueError:
+            except (ValueError, x509.InvalidVersion):  # InvalidVersion isn't a ValueError
                 continue  # a certificate that can't be parsed can't be the one named
             duplicate = crypt32.CertDuplicateCertificateContext(ctypes.cast(context, c_void_p))
             has_key = any(_has_property(crypt32, duplicate, prop)

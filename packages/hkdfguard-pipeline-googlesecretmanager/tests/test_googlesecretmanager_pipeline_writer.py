@@ -212,7 +212,7 @@ class TestGoogleSecretManagerSecretPipelineWriter(SecretPipelineWriterContract):
         with self.create(self.protector, ["item"]) as writer, pytest.raises(CryptographicError, match="answered a request for secret 'item'"):
             writer.pull_secrets()
 
-    def test_a_response_without_a_payload_holds_nothing_and_one_without_a_checksum_is_accepted(self) -> None:
+    def test_a_response_without_a_payload_holds_nothing_and_one_without_a_checksum_is_refused(self) -> None:
         self.google.set("none", "x")
         self.google.set("unchecked", "s3cret")
 
@@ -222,11 +222,11 @@ class TestGoogleSecretManagerSecretPipelineWriter(SecretPipelineWriterContract):
             return AccessSecretVersionResponse(name=response.name, payload=SecretPayload(data=response.payload.data))
 
         self.google.tamper = tamper
-        with self.create(self.protector, ["none", "unchecked"]) as writer:
+        with self.create(self.protector, ["none"]) as writer:
             with pytest.raises(KeyNotFoundError, match="none"):
                 writer.pull_secrets()
-
-            assert self.decrypt(writer.protected_secrets["unchecked"], "unchecked") == "s3cret"
+        with self.create(self.protector, ["unchecked"]) as writer, pytest.raises(CryptographicError, match="or has none"):
+            writer.pull_secrets()
 
     def test_create_makes_its_own_client_and_close_closes_it(self) -> None:
         with GoogleSecretManagerSecretPipelineWriter.create(PROJECT_ID, self.protector, ["item"], credentials=AnonymousCredentials(),  # type: ignore[no-untyped-call]

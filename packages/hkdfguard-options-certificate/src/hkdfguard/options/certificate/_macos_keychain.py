@@ -185,7 +185,7 @@ def read_store(location: StoreLocation, name: StoreName) -> list[KeychainCertifi
                         with warnings.catch_warnings():  # a keychain holds what others put there
                             warnings.simplefilter("ignore", CryptographyDeprecationWarning)
                             certificate = x509.load_der_x509_certificate(der) if der else None
-                    except ValueError:
+                    except (ValueError, x509.InvalidVersion):  # InvalidVersion isn't a ValueError
                         certificate = None
                     if certificate is None or (not identities and any(c.der == der for c in found)):
                         cf.release(item)

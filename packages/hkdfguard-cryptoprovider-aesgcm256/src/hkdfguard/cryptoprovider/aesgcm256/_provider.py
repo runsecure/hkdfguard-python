@@ -307,13 +307,17 @@ class AesGcmCryptoProvider(CryptoProvider):
             reveal = _Reveal(self._key_wrapper, self._wrapped, self._budget, self._logger)
             with self._gate:
                 self._waiting = reveal
+                # close marks the provider closed under this lock, then wakes whatever reveal is
+                # waiting: one registered after that would never be woken, so it isn't waited for.
+                closing = self._closed
             try:
-                reveal.wake.wait(self._refresh_timeout)
+                if not closing:
+                    reveal.wake.wait(self._refresh_timeout)
             finally:
                 with self._gate:
                     self._waiting = None
 
-            if self._stop.is_set():
+            if closing or self._stop.is_set():
                 # Shutdown: whatever the in-flight refresh did or will do is not a failure.
                 reveal.abandon()
                 return

@@ -24,7 +24,7 @@ from urllib.parse import urljoin, urlsplit
 from hkdfguard.abstractions import ArrayUtility, DataProtector
 from hkdfguard.integration.hashicorpvault._connection import is_loopback, parse_address
 from hkdfguard.integration.hashicorpvault._duration import format_go_duration
-from hkdfguard.integration.hashicorpvault._errors import VaultRedirectError, VaultRequestError, reason_phrase
+from hkdfguard.integration.hashicorpvault._errors import VaultJsonError, VaultRedirectError, VaultRequestError, reason_phrase
 from hkdfguard.integration.hashicorpvault._generated import VaultApis
 from hkdfguard.integration.hashicorpvault._http import (
     NAMESPACE_HEADER,
@@ -152,6 +152,14 @@ class _Sent:
     sock: socket.socket
 
 
+_SINGLE_USE_PATHS: Final = frozenset({"/v1/sys/wrapping/unwrap", "/v1/sys/wrapping/rewrap"})
+"""Requests that use up the token they are made with: retrying one Vault acted on finds it gone."""
+
+_NOT_TAKEN_UP: Final = frozenset({412, 429})
+"""Answers meaning Vault turned a request away before acting on it: a replication state it hadn't
+reached yet, and a rate limit."""
+
+
 class VaultClient(VaultApis):
     """A HashiCorp Vault client: a port of vault-client-go. The generic :meth:`read`, :meth:`write`,
     :meth:`list` and :meth:`delete` reach any path; the methods generated from Vault's OpenAPI spec
@@ -188,6 +196,12 @@ class VaultClient(VaultApis):
     """The purpose to create the token protector with - ``key_ring.create_protector(TOKEN_PURPOSE)`` -
     so a token protected for the client can't be decrypted as anything else, nor anything else as it."""
 
+    MAX_RESPONSE_LENGTH: ClassVar[int] = 32 * 1024 * 1024
+    """The largest response body read, in bytes - Vault's own default limit on a request
+    (max_request_size) - so a server or proxy answering without end can't exhaust memory. A larger
+    response fails with :class:`VaultJsonError`, having read no more than one byte past it;
+    :meth:`read_raw` streams a body without this limit."""
+
     def __init__(self, token_protector: DataProtector, options: VaultClientOptions | None = None, logger: logging.Logger | None = None) -> None:
         """:param token_protector: protects and decrypts tokens: a protector on the key ring,
             ``key_ring.create_protector(TOKEN_PURPOSE)``. Every token the client is given must be
@@ -216,12 +230,23 @@ class VaultClient(VaultApis):
         if ns and not is_valid_namespace(ns):
             raise ValueError(f"The namespace '{ns}' contains non-printable characters.")
         check_tls_options(options.ssl_context, options.tls)
+        if isinstance(options.redirect_hosts, str) or not all(isinstance(h, str) and h.strip() for h in options.redirect_hosts):
+            raise TypeError("redirect_hosts must be a sequence of host names.")
+        self._redirect_hosts = frozenset(h.strip().strip("[]").lower() for h in options.redirect_hosts) | {self._host.strip("[]").lower()}
         # The TLS settings read once, here: a certificate that can't be read fails the constructor.
         self._connector = VaultConnector(self._https, self._host, self._port, options.request_timeout, options.ssl_context, options.tls)
 
         self._options = options
         self._token_protector = token_protector
         self._logger = logger if logger is not None else _DEFAULT_LOGGER
+        # Set by VAULT_SKIP_VERIFY as readily as in code, so it is said every time a client is made: a
+        # stray variable in production would otherwise send every token to whoever answers.
+        unverified = (options.tls is not None and options.tls.insecure_skip_verify) or (
+            options.ssl_context is not None and options.ssl_context.verify_mode == ssl.CERT_NONE)
+        if self._https and unverified:
+            self._logger.warning("Vault's certificate isn't verified (insecure_skip_verify, VAULT_SKIP_VERIFY, or a context with CERT_NONE): "
+                                 "anyone between this process and %s can read every token and secret. Use this only in development.",
+                                 options.address, extra={"event_id": 3})
         self._closed = [False]
         self._owner = True
         retry = options.retry
@@ -572,8 +597,11 @@ class VaultClient(VaultApis):
             try:
                 lost = f"The connection was lost during Vault's response to {sent.request.method} {_without_query(sent.request.url)}."
                 body_stream = DeadlineBody(sent.response, sent.sock, deadline, _DeadlineExceededError, lost_message=lost, abandon=abandon)
-                with SecureBuffer(sent.response.length or 0) as content:
-                    content.read_from(body_stream.readinto)
+                length = sent.response.length
+                if length is not None and length > self.MAX_RESPONSE_LENGTH:
+                    raise VaultJsonError(f"Vault's response is {length} bytes, more than the {self.MAX_RESPONSE_LENGTH} this client reads.")
+                with SecureBuffer(length or 0) as content:
+                    content.read_from(body_stream.readinto, self.MAX_RESPONSE_LENGTH)
                     # sys/health answers 429, 472, 473, 501 and 503 with the health status itself.
                     status = sent.response.status
                     with content.view() as view:
@@ -641,10 +669,14 @@ class VaultClient(VaultApis):
         request = sent.request
         header = sent.response.headers.get("Location")
         location = None
+        parts = None
+        port = None
         if header:
             with contextlib.suppress(ValueError):
                 location = urljoin(request.url, header)
-        parts = urlsplit(location) if location else None
+                candidate = urlsplit(location)
+                port = candidate.port  # raises ValueError for one out of range, leaving parts None
+                parts = candidate
         if parts is None or not parts.hostname:
             raise VaultRedirectError(status, "could not read the redirect location", None, request.method, request.url)
         if not self._options.follow_redirects:
@@ -657,13 +689,20 @@ class VaultClient(VaultApis):
             raise VaultRedirectError(status, "the redirect would cause a protocol downgrade", location, request.method, request.url)
         if scheme != "https" and not (scheme == "http" and (is_loopback(parts.hostname) or self._options.allow_unencrypted_http)):
             raise VaultRedirectError(status, "the redirect would send the token over unencrypted http", location, request.method, request.url)
+        if parts.hostname.lower() not in self._redirect_hosts:
+            raise VaultRedirectError(status, "the redirect would carry the token to another host; list it in redirect_hosts to allow it",
+                                     location, request.method, request.url)
 
         path = parts.path or "/"
-        return _Target(scheme == "https", parts.hostname, parts.port, path + (f"?{parts.query}" if parts.query else ""))
+        return _Target(scheme == "https", parts.hostname, port, path + (f"?{parts.query}" if parts.query else ""))
 
     def _send_with_retries(self, method: str, target: _Target, path: str, body: memoryview | None, modifiers: _Modifiers,  # noqa: PLR0917 - private
                            states: tuple[str, ...], protected_token: str | None, deadline: float, abandon: Abandon) -> _Sent:
         # One request, sent until it succeeds, fails in a way not worth retrying, or runs out of retries.
+        # A request that uses up its token (unwrap, rewrap) is retried only when Vault can't have
+        # acted on it: it never left this process, or Vault answered that it didn't take it up. Any
+        # other retry would find the token already used, and the wrapped secret lost.
+        single_use = path in _SINGLE_USE_PATHS
         retry = self._options.retry
         attempt = 0
         while True:
@@ -673,8 +712,9 @@ class VaultClient(VaultApis):
 
             sent: _Sent | None = None
             failure: BaseException | None = None
+            on_the_wire = [False]
             try:
-                sent = self._send_once(target, request, body, protected_token, deadline, abandon)
+                sent = self._send_once(target, request, body, protected_token, deadline, abandon, on_the_wire)
             except _DeadlineExceededError:
                 raise
             except (OSError, http.client.HTTPException) as error:
@@ -682,11 +722,12 @@ class VaultClient(VaultApis):
                     raise _abandoned() from None
                 if _remaining(deadline) <= 0:
                     raise _DeadlineExceededError from None
-                if attempt >= retry.retry_max or not self._check_retry(0, error):
+                if attempt >= retry.retry_max or not self._check_retry(0, error) or (single_use and on_the_wire[0]):
                     raise
                 failure = error
 
-            if sent is not None and (attempt >= retry.retry_max or not self._check_retry(sent.response.status, None)):
+            if sent is not None and (attempt >= retry.retry_max or not self._check_retry(sent.response.status, None)
+                                     or (single_use and sent.response.status not in _NOT_TAKEN_UP)):
                 return sent
 
             status = 0 if sent is None else sent.response.status
@@ -708,7 +749,7 @@ class VaultClient(VaultApis):
             attempt += 1
 
     def _send_once(self, target: _Target, request: VaultRequest, body: memoryview | None, protected_token: str | None,  # noqa: PLR0917 - private
-                   deadline: float, abandon: Abandon) -> _Sent:
+                   deadline: float, abandon: Abandon, on_the_wire: builtins.list[bool] | None = None) -> _Sent:
         # One attempt: a connection of its own, the request with the token, if any, in its header -
         # decrypted into a bytearray zeroed once http.client has copied it.
         remaining = _remaining(deadline)
@@ -736,6 +777,9 @@ class VaultClient(VaultApis):
                 finally:
                     ArrayUtility.zero_memory(token)
             set_remaining(sock, deadline, _DeadlineExceededError)
+            # From here Vault may have the whole request, whatever happens to its answer.
+            if on_the_wire is not None:
+                on_the_wire[0] = True
             connection.endheaders(body)
             response = connection.getresponse()
         except TimeoutError:

@@ -8,6 +8,7 @@ from typing import Any, Final, Protocol
 
 from botocore.exceptions import BotoCoreError, ClientError
 from hkdfguard.abstractions import ArrayUtility, CryptographicError, KeyWrapper, WrappedKeyLimits, WritableBuffer
+from hkdfguard.keywrapping.awskms import _capture
 from hkdfguard.securefile import KeyFileTrust, TrustedKeyFile
 
 
@@ -46,14 +47,24 @@ class AwsKmsKeyWrapper(KeyWrapper):
     another key; this stops one wrapped under this key by anyone who may call kms:Encrypt, which would
     otherwise choose the DEK new data is encrypted under.
 
+    **The revealed key never reaches botocore's parser or its log.** On a botocore client the wrapper
+    registers one handler on the client's event system (``before-parse.kms.Decrypt``, ahead of every
+    handler registered before it) that, for this wrapper's own Decrypt calls only, decodes
+    ``Plaintext`` straight out of the response body into a ``bytearray`` and hands the parser the body
+    with it replaced by ``""`` - so botocore's DEBUG log of the response body, and every later handler,
+    sees no key. The application's own calls on the client are left alone. A client botocore never
+    sends a request through (a ``Stubber``, a fake) makes no response body to log; its parsed
+    ``Plaintext`` is used as it is.
+
     Plaintext key bytes this class owns are zeroed once used: its ``bytearray`` copy of the key sent to
-    Encrypt, zeroed once the call has returned (botocore serializes the request inside the call), and
-    the caller's ``result`` buffer whenever an unwrap fails. Two kinds of copy are beyond its reach and
-    live until collected: botocore base64-encodes the key sent to Encrypt into the JSON request body,
-    and decodes Decrypt's response from JSON base64 text into an immutable ``bytes`` - the
-    ``Plaintext`` it returns, which this class copies into ``result`` but which, being immutable, no
-    one can zero. Process hardening (``hkdfguard-keywrapping-v1``'s ``NativeProcessHardening``) is
-    what keeps such copies out of reach of a debugger or a crash dump.
+    Encrypt, zeroed once the call has returned (botocore serializes the request inside the call), the
+    key decoded from a Decrypt response once it is copied into ``result``, and ``result`` whenever an
+    unwrap fails. Beyond its reach, and live until collected: the base64 text botocore writes the key
+    sent to Encrypt into the JSON request body as, the raw Decrypt response body botocore read (an
+    immutable ``bytes``), and botocore's history recorder's copy of it, which is kept only while a
+    history handler is installed (``aws configure set cli_history enabled`` in the CLI; never by this
+    library). Process hardening (``hkdfguard-keywrapping-v1``'s ``NativeProcessHardening``) is what
+    keeps such copies out of reach of a debugger or a crash dump.
 
     The client is the application's: it creates it (credentials, region, retries), keeps it for as
     long as anything uses this wrapper - a key ring's background refresh included - and closes it.
@@ -76,7 +87,10 @@ class AwsKmsKeyWrapper(KeyWrapper):
         :param key_id: the symmetric KMS key that wraps every DEK: a key ARN (preferred), key ID, alias
             name (``"alias/..."``) or alias ARN
         :param encryption_context: bound into every wrapped DEK and required again to reveal it. Copied
-            at construction; ``None`` or empty binds none.
+            at construction; ``None`` or empty binds none. Set one, naming the application and purpose:
+            without it, any ciphertext made under this key - by anyone allowed kms:Encrypt on it, for
+            any purpose - is accepted as a DEK, and a key file made for one application works for
+            every other that shares the key.
         :param key_file_trust: who besides the operating system's administrators may have written a key
             file :meth:`read_key_file` reads; ``None`` trusts administrators only
             (:attr:`KeyFileTrust.ADMINISTRATORS_ONLY`)
@@ -99,6 +113,13 @@ class AwsKmsKeyWrapper(KeyWrapper):
         self._key_id = key_id
         self._key_file_trust = key_file_trust if key_file_trust is not None else KeyFileTrust.ADMINISTRATORS_ONLY
         self._encryption_context = self._copy_context(encryption_context)
+
+        # On a botocore client, take every Decrypt's key out of the body before botocore parses and
+        # logs it - ahead of every handler already registered, so none of them sees it either.
+        events = getattr(getattr(client, "meta", None), "events", None)
+        register_first = getattr(events, "register_first", None)
+        if callable(register_first):
+            register_first(_capture.EVENT_NAME, _capture.redact_response, unique_id=_capture.HANDLER_ID)
 
     @staticmethod
     def _copy_context(encryption_context: Mapping[str, str] | None) -> dict[str, str] | None:
@@ -167,13 +188,19 @@ class AwsKmsKeyWrapper(KeyWrapper):
                     raise CryptographicError(f"A wrapped DEK is 1-{WrappedKeyLimits.MAX_BYTES} bytes; got {len(source)}.")
                 ciphertext = bytes(source)
 
-            response = self._call(lambda: self._client.decrypt(**self._request(KeyId=self._key_id, CiphertextBlob=ciphertext,
-                                                                               EncryptionAlgorithm="SYMMETRIC_DEFAULT")), "unwrap")
-            # Immutable bytes from botocore: copied into result, but it can't be zeroed (see the class comment).
-            revealed = response.get("Plaintext")
-            if revealed is None:
-                raise CryptographicError(f"AWS KMS unwrap for key '{self._key_id}' returned no plaintext.")
-            return self._copy_revealed(revealed, result)
+            capture = _capture.PlaintextCapture()
+            try:
+                with _capture.active(capture):
+                    response = self._call(lambda: self._client.decrypt(**self._request(KeyId=self._key_id, CiphertextBlob=ciphertext,
+                                                                                       EncryptionAlgorithm="SYMMETRIC_DEFAULT")), "unwrap")
+                # Taken out of the body by the capture; the parsed Plaintext is then empty. Only a client
+                # botocore sent nothing through (a Stubber, a fake) leaves it to the parsed response.
+                revealed: Buffer | None = capture.plaintext if capture.plaintext is not None else response.get("Plaintext")
+                if revealed is None or memoryview(revealed).nbytes == 0:
+                    raise CryptographicError(f"AWS KMS unwrap for key '{self._key_id}' returned no plaintext.")
+                return self._copy_revealed(revealed, result)
+            finally:
+                ArrayUtility.zero_memory(capture.plaintext)
         except BaseException:
             # Whatever a failed call left in the DEK buffer is erased.
             ArrayUtility.zero_memory(result)

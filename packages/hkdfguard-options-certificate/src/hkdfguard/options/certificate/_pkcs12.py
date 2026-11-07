@@ -48,8 +48,15 @@ def decode(data: bytes | bytearray, password: bytearray | None) -> Pkcs12Content
     """Reads a PKCS#12 file with a UTF-8 password - ``None`` for a file without one, which is tried as
     both the empty password and no password, as tools write either.
 
+    Given a password, the file must be protected by it, as an encrypted PEM key must: it must carry
+    the integrity MAC - the only thing that proves the password, and without which its encrypted
+    contents could be probed for their padding - and every key outside encrypted contents must be in
+    a shrouded (password-encrypted) bag. A file that isn't is refused, so a configuration naming a
+    password never silently loads a key held in the clear.
+
     :raises WrongPasswordError: the file's MAC doesn't verify, or its contents don't decrypt
-    :raises InvalidCertificateFileError: it isn't a PKCS#12 file
+    :raises InvalidCertificateFileError: it isn't a PKCS#12 file, or a password was given and the file
+        has no MAC or holds a key in the clear
     :raises UnsupportedCertificateError: legacy RC2/RC4, PBMAC1, or public-key (enveloped) contents
     """
     try:
@@ -63,20 +70,31 @@ def decode(data: bytes | bytearray, password: bytearray | None) -> Pkcs12Content
     except DerError as error:
         raise InvalidCertificateFileError(f"Not a PKCS#12 file: {error}") from None
 
-    budget = _pbe.IterationBudget()
-    # The passwords to try: the one given; for none, the empty BMPString (00 00) and no bytes at all.
-    candidates: list[bytearray | None] = [password] if password else [None, bytearray()]
-    if len(pfx) == 3:
-        candidates = [_verify_mac(pfx[2], auth_safe, candidates, budget)]
+    try:
+        budget = _pbe.IterationBudget()
+        protected = bool(password)
+        # The passwords to try: the one given; for none, the empty BMPString (00 00) and no bytes at all.
+        candidates: list[bytearray | None] = [password] if password else [None, bytearray()]
+        if len(pfx) == 3:
+            candidates = [_verify_mac(pfx[2], auth_safe, candidates, budget)]
+        elif protected:
+            raise InvalidCertificateFileError(_UNPROTECTED.format(what="has no integrity check (MAC) to prove the password by"))
 
-    failure: WrongPasswordError | None = None
-    for candidate in candidates:
-        try:
-            return _read_authenticated_safe(auth_safe, candidate, budget)
-        except WrongPasswordError as wrong:
-            failure = wrong
-    assert failure is not None
-    raise failure
+        failure: WrongPasswordError | None = None
+        for candidate in candidates:
+            try:
+                return _read_authenticated_safe(auth_safe, candidate, budget, protected)
+            except WrongPasswordError as wrong:
+                failure = wrong
+        assert failure is not None
+        raise failure
+    finally:
+        # Unencrypted contents - certificates, and a key in the clear - are in it.
+        _pbe.wipe(auth_safe)
+
+
+_UNPROTECTED: Final = ("The PKCS#12 file {what}, but File.PasswordSecretName names a password for it; re-export it protected by that "
+                       "password, or leave PasswordSecretName unset and set AllowUnprotectedPrivateKey.")
 
 
 def _content_info(element: Element) -> tuple[str, Element | None]:
@@ -120,7 +138,7 @@ def _verify_mac(mac_data: Element, auth_safe: bytearray, candidates: list[bytear
     raise WrongPasswordError("The PKCS#12 file's integrity check fails: the password is wrong, or the file is corrupt.")
 
 
-def _read_authenticated_safe(auth_safe: bytearray, password: bytearray | None, budget: _pbe.IterationBudget) -> Pkcs12Contents:
+def _read_authenticated_safe(auth_safe: bytearray, password: bytearray | None, budget: _pbe.IterationBudget, protected: bool) -> Pkcs12Contents:
     contents = Pkcs12Contents()
     try:
         try:
@@ -140,14 +158,15 @@ def _read_authenticated_safe(auth_safe: bytearray, password: bytearray | None, b
                 except DerError as error:
                     raise InvalidCertificateFileError(f"The PKCS#12 data is malformed: {error}") from None
                 try:
-                    _read_safe_contents(contents, safe, password, budget, 0)
+                    _read_safe_contents(contents, safe, password, budget, 0, clear_keys_allowed=not protected)
                 finally:
                     _pbe.wipe(safe)
             elif content_type == _ENCRYPTED_DATA:
                 algorithm, ciphertext = _encrypted_data(content)
                 plaintext = _pbe.decrypt(algorithm, password, ciphertext, budget)
                 try:
-                    _read_safe_contents(contents, plaintext, password, budget, 0)
+                    # Encrypted under the password, so a key bag in it is protected by it too.
+                    _read_safe_contents(contents, plaintext, password, budget, 0, clear_keys_allowed=True)
                 except InvalidCertificateFileError as error:
                     # Contents that decrypted to nonsense were decrypted with the wrong password.
                     raise WrongPasswordError(f"The password doesn't decrypt the file's contents ({error}).") from None
@@ -173,7 +192,7 @@ def _encrypted_data(content: Element) -> tuple[Element, bytearray]:
 
 
 def _read_safe_contents(contents: Pkcs12Contents, safe: bytearray | memoryview, password: bytearray | None, budget: _pbe.IterationBudget,
-                        depth: int) -> None:
+                        depth: int, *, clear_keys_allowed: bool) -> None:
     if depth > _MAX_SAFE_DEPTH:
         raise InvalidCertificateFileError("The PKCS#12 safe contents are nested too deep.")
     try:
@@ -196,11 +215,13 @@ def _read_safe_contents(contents: Pkcs12Contents, safe: bytearray | memoryview, 
             if certificate is not None:
                 contents.certificates.append(certificate)
         elif bag_type == _KEY_BAG:
+            if not clear_keys_allowed:
+                raise InvalidCertificateFileError(_UNPROTECTED.format(what="holds its key in the clear"))
             contents.keys.append(bytearray(value.encoding))
         elif bag_type == _SHROUDED_KEY_BAG:
             contents.keys.append(decrypt_pkcs8(value.encoding, password, budget))
         elif bag_type == _SAFE_CONTENTS_BAG:
-            _read_safe_contents(contents, value.encoding, password, budget, depth + 1)
+            _read_safe_contents(contents, value.encoding, password, budget, depth + 1, clear_keys_allowed=clear_keys_allowed)
         # CRL and secret bags hold nothing a certificate needs.
 
 
@@ -217,7 +238,7 @@ def _certificate(value: Element) -> x509.Certificate | None:
         raise InvalidCertificateFileError(f"A PKCS#12 certificate bag is malformed: {error}") from None
     try:
         return x509.load_der_x509_certificate(der)
-    except ValueError as error:
+    except (ValueError, x509.InvalidVersion) as error:  # InvalidVersion isn't a ValueError
         raise InvalidCertificateFileError(f"A PKCS#12 certificate isn't one: {error}") from None
 
 
@@ -237,7 +258,8 @@ def decrypt_pkcs8(encrypted: bytes | bytearray | memoryview, password: bytearray
         key = _der.sequence(_der.read(plaintext), "A private key", 3)
         _der.integer(key[0], "A private key's version")
     except DerError:
-        # A key that decrypted to nonsense was decrypted with the wrong password.
+        # A key that decrypted to nonsense was decrypted with the wrong password. The same message as
+        # bad padding, so the two can't be told apart.
         _pbe.wipe(plaintext)
-        raise WrongPasswordError("The password doesn't decrypt the key to one.") from None
+        raise WrongPasswordError(_pbe.WRONG_PASSWORD) from None
     return plaintext

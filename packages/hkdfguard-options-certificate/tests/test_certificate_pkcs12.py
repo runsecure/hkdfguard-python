@@ -8,6 +8,7 @@ port's fixtures):
     openssl pkcs12 -export -in ec.crt -inkey ec.key -out openssl-ec.pfx -passout file:pw.txt
     openssl pkcs12 -export ... -out openssl-nopass.pfx -passout pass: -keypbe NONE -certpbe NONE
     openssl pkcs12 -export ... -out openssl-rc2.pfx -passout file:pw.txt -legacy                    # RC2-40 certificates
+    openssl pkcs12 -export ... -out openssl-plainkey.pfx -passout file:pw.txt -keypbe NONE -certpbe NONE  # a MAC, the key in the clear
     openssl pkcs8 -topk8 -in rsa.key -out rsa-encrypted.key -v2 aes-256-cbc -v2prf hmacWithSHA256 -iter 100000 -passout file:pw.txt
     openssl pkcs8 -topk8 -in ec.key -out ec-encrypted.key -v2 aes-128-cbc -passout file:pw.txt
 
@@ -16,10 +17,12 @@ writes), dotnet-nopassword.pfx, dotnet-aes.pfx (PBES2 AES-256 SHA-256) and dotne
 
 from __future__ import annotations
 
+import base64
 import hashlib
 
 import pytest
 from certificate_test_support import PASSWORD, ec_key, fixture, fixture_certificate, rsa_key, self_signed
+from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.serialization import BestAvailableEncryption, PrivateFormat, pkcs12
 from hkdfguard.options.certificate import InvalidCertificateFileError, UnsupportedCertificateError, WrongPasswordError, _der, _files, _pbe, _pkcs12
@@ -62,6 +65,72 @@ def test_other_tools_encrypted_pkcs8_keys_are_read(file: str, certificate: str) 
     assert _files.private_key_of(key).public_key() == fixture_certificate(certificate).public_key()
     with pytest.raises(WrongPasswordError):
         _files.decrypt_pem_key(data, password("wrong"), file)
+
+
+def _without_mac(data: bytes) -> bytes:
+    """The PFX ``data`` with its MacData left out: version and contents only, as ``-nomac`` writes it."""
+    pfx = _der.sequence(_der.read(data), "A PKCS#12 file", 3, 3)
+    body = bytes(pfx[0].encoding) + bytes(pfx[1].encoding)
+    length = len(body)
+    header = bytes([0x30, length]) if length < 0x80 else bytes([0x30, 0x80 | ((length.bit_length() + 7) // 8)]) + length.to_bytes(
+        (length.bit_length() + 7) // 8, "big")
+    return header + body
+
+
+@pytest.mark.parametrize("file", ["openssl-aes.pfx", "openssl-nopass.pfx", "openssl-plainkey.pfx"])
+def test_a_file_without_a_mac_is_refused_when_a_password_is_given(file: str) -> None:
+    # The MAC is what proves the password: without one, a wrong password wouldn't be noticed for a key
+    # in the clear, and an encrypted key's padding could be probed.
+    data = _without_mac(fixture(file).read_bytes())
+    for given in (password(), password("wrong")):
+        with pytest.raises(InvalidCertificateFileError, match="has no integrity check"):
+            _pkcs12.decode(data, given)
+
+
+def test_a_file_without_a_mac_or_a_password_is_still_read_without_one() -> None:
+    contents = _pkcs12.decode(_without_mac(fixture("openssl-nopass.pfx").read_bytes()), None)
+    try:
+        assert contents.certificates == [fixture_certificate("rsa.crt")]
+        assert len(contents.keys) == 1
+    finally:
+        contents.wipe()
+
+
+def test_a_key_in_the_clear_is_refused_when_a_password_is_given() -> None:
+    # The MAC verifies, but the key it covers isn't encrypted: refused, as a plain PEM key is.
+    with pytest.raises(InvalidCertificateFileError, match="holds its key in the clear"):
+        _pkcs12.decode(fixture("openssl-plainkey.pfx").read_bytes(), password())
+    with pytest.raises(WrongPasswordError):
+        _pkcs12.decode(fixture("openssl-plainkey.pfx").read_bytes(), password("wrong"))
+
+
+def test_every_failed_decryption_says_the_same() -> None:
+    # Bad padding and a plaintext that isn't a key read alike, so neither can be told from the other.
+    not_a_key = _pbe.encrypt_pkcs8(bytearray(b"padded correctly, but no key"), password())
+    for data, given in ((not_a_key, password()), (not_a_key, password("wrong"))):
+        with pytest.raises(WrongPasswordError) as error:
+            _pkcs12.decrypt_pkcs8(data, given, _pbe.IterationBudget())
+        assert str(error.value) == _pbe.WRONG_PASSWORD
+
+
+def version_9(certificate: x509.Certificate) -> bytes:
+    """``certificate``'s DER claiming X.509 version 9 - which ``cryptography`` refuses with
+    ``InvalidVersion``, not a ``ValueError`` - its signature no longer matching."""
+    der = certificate.public_bytes(serialization.Encoding.DER)
+    v3 = b"\xa0\x03\x02\x01\x02"  # [0] EXPLICIT INTEGER 2: version 3
+    assert der.count(v3) == 1
+    return der.replace(v3, b"\xa0\x03\x02\x01\x09")
+
+
+def test_a_certificate_with_an_unknown_version_is_an_invalid_file() -> None:
+    bad = version_9(fixture_certificate("rsa.crt"))
+    with pytest.raises(x509.InvalidVersion):
+        x509.load_der_x509_certificate(bad)
+    with pytest.raises(InvalidCertificateFileError, match="isn't a PEM or DER certificate"):
+        _files.parse_certificates(bytearray(bad), "bad.cer")
+    pem = b"-----BEGIN CERTIFICATE-----\n" + base64.encodebytes(bad) + b"-----END CERTIFICATE-----\n"
+    with pytest.raises(InvalidCertificateFileError, match="isn't one"):
+        _files.parse_certificates(bytearray(pem), "bad.pem")
 
 
 def test_a_legacy_rc2_file_is_refused_saying_how_to_re_export_it() -> None:
@@ -177,6 +246,17 @@ def test_an_iteration_count_is_bounded() -> None:
         budget.spend(_pbe.MAX_ITERATIONS)
     with pytest.raises(InvalidCertificateFileError):
         budget.spend(1)
+
+
+def test_a_derivation_is_charged_per_hash_block() -> None:
+    # PKCS#12's own KDF runs the iterations once per 20 bytes it makes: a 3DES key and its IV are three
+    # runs, so a file can't buy three times the work the budget allows by using it.
+    budget = _pbe.IterationBudget()
+    budget.spend(_pbe.MAX_ITERATIONS, 3)
+    assert budget.spent == 3 * _pbe.MAX_ITERATIONS
+    with pytest.raises(InvalidCertificateFileError):
+        budget.spend(_pbe.MAX_ITERATIONS // 3 + 1, 3)
+    budget.spend(_pbe.MAX_ITERATIONS)
 
 
 def test_the_der_reader_refuses_what_isnt_der() -> None:
