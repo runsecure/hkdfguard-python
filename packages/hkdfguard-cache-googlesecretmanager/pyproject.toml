@@ -1,6 +1,6 @@
 [project]
 name = "hkdfguard-cache-googlesecretmanager"
-version = "0.9.0"
+version = "0.9.1"
 description = "A protected read-only cache over Google Cloud Secret Manager: each secret is read on its first lookup, taken out of the response before the client can parse it, encrypted under the key ring's current key and cached only as ciphertext."
 license = "MPL-2.0"
 readme = "README.md"

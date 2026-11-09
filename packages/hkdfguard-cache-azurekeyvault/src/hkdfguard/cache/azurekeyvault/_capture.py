@@ -56,7 +56,7 @@ class SecretCapturePolicy(HTTPPolicy[HttpRequest, HttpResponse]):
     socket reads). Every bytearray this library makes is zeroed.
     """
 
-    def send(self, request: PipelineRequest[HttpRequest]) -> PipelineResponse[HttpRequest, HttpResponse]:
+    def send(self, request: PipelineRequest[HttpRequest]) -> PipelineResponse[HttpRequest, HttpResponse]:  # NOSONAR - a policy returns the response
         capture = _streamed(request)
         response = self.next.send(request)
         if capture is None:

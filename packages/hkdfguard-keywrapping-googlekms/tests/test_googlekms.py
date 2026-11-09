@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import base64
+import contextlib
+import logging
 import os
 import shutil
 import subprocess
@@ -176,6 +179,33 @@ def kms() -> Iterator[FakeCloudKms]:
 def wrapper_over(client: CloudKmsClient, key_name: str = KEY_NAME, context: str | None = CONTEXT,
                  key_file_trust: KeyFileTrust | None = None) -> GoogleKmsKeyWrapper:
     return GoogleKmsKeyWrapper(client, key_name, context, key_file_trust)
+
+
+_TRANSPORT_LOGGER = "google.cloud.kms_v1.services.key_management_service.transports.grpc"
+
+
+def test_over_grpc_no_dek_reaches_the_clients_debug_log(kms: FakeCloudKms, caplog: pytest.LogCaptureFixture) -> None:
+    # The client's logging interceptor writes every request and response it sees to its DEBUG log, as
+    # JSON - the client's own call below shows it does. The wrapper's calls go past it.
+    logger = logging.getLogger(_TRANSPORT_LOGGER)
+    logger.addHandler(caplog.handler)  # google's loggers may not propagate to the root
+    try:
+        with caplog.at_level(logging.DEBUG, logger=_TRANSPORT_LOGGER):
+            dek = os.urandom(32)
+            wrapper = wrapper_over(kms.client)
+            wrapped = bytearray(WrappedKeyLimits.MAX_BYTES)
+            length = wrapper.wrap(dek, wrapped)
+            revealed = bytearray(32)
+            assert wrapper.unwrap(wrapped[:length], revealed) == 32
+            assert revealed == dek
+            with contextlib.suppress(GoogleAPICallError):
+                kms.client.encrypt(request=EncryptRequest(name=KEY_NAME, plaintext=b"logged by the client"))
+    finally:
+        logger.removeHandler(caplog.handler)
+
+    logged = "\n".join(f"{record.getMessage()} {record.__dict__}" for record in caplog.records)
+    assert base64.b64encode(b"logged by the client").decode() in logged
+    assert base64.b64encode(dek).decode() not in logged
 
 
 def wrap_new(wrapper: GoogleKmsKeyWrapper) -> bytes:

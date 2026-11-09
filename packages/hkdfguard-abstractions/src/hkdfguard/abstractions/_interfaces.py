@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from abc import ABC, abstractmethod
-from collections.abc import Buffer
+from collections.abc import Buffer, Mapping
 from dataclasses import dataclass
 from types import TracebackType
 from typing import NamedTuple, Self
 
 from hkdfguard.abstractions._buffers import WritableBuffer
 from hkdfguard.abstractions._rules import RefreshFailurePolicy
+from hkdfguard.abstractions._streams import AsyncBinaryDestination, BinaryDestination
 
 
 class _Closable(ABC):
@@ -263,8 +265,23 @@ class PipelineDataProtector(_Closable):
         """The version stamped on every value - the version this key will be registered under."""
 
     @abstractmethod
-    def encrypt(self, plaintext: str, secret_identifier: str) -> str:
-        """:raises ValueError: ``secret_identifier`` is empty or not valid UTF-16"""
+    def encrypt(self, plaintext: str | Buffer, secret_identifier: str) -> str:
+        """Encrypts ``plaintext`` bound to ``secret_identifier`` and formats the result.
+
+        :param plaintext: the secret to protect: a ``str``, or its UTF-8 bytes in a buffer
+            (``bytes``, ``bytearray``, ``memoryview``) - checked to be well-formed UTF-8 where it
+            lies, never decoded into a ``str``, so a secret that must not become one can be
+            encrypted. Read, never written: the caller owns it, and should zero a writable buffer
+            once done (the copy encrypted from inside this call is zeroed). A ``str`` can't be
+            zeroed, nor can the temporary ``bytes`` CPython makes while encoding it; an unpaired
+            surrogate in it becomes U+FFFD, as everywhere else.
+        :param secret_identifier: the configuration key the value will be stored under (full
+            path, e.g. ``"ConnectionStrings:Admin"``); :meth:`decrypt` must name the same secret
+        :returns: the formatted, encrypted value
+        :raises TypeError: ``plaintext`` is neither a ``str`` nor a buffer
+        :raises ValueError: ``secret_identifier`` is empty or not valid UTF-16, or a buffer
+            ``plaintext`` isn't well-formed UTF-8
+        """
 
     @abstractmethod
     def decrypt(self, encrypted: str, secret_identifier: str, result: WritableBuffer) -> int:
@@ -282,6 +299,141 @@ class PipelineDataProtector(_Closable):
         """The key, base64-encoded as ASCII, for handing to the native platform's wrap process: a
         read-only view of a buffer the protector zeroes on close. Pass it on standard input
         (``--dek-stdin``), never as a command-line argument or environment variable."""
+
+    @abstractmethod
+    def write_dek(self, destination: BinaryDestination) -> None:
+        """Writes the key to ``destination`` exactly as the wrap tool's ``--dek-stdin`` reads it -
+        its base64 form as ASCII, with no line ending - and flushes it. For the wrap tool's standard
+        input, local or remote: the stdin of ``hkdfguard wrap ... --dek-stdin``, or of
+        ``ssh -T host sudo -n hkdfguard wrap ... --dek-stdin``, from :class:`subprocess.Popen`. The
+        bytes are written from a ``bytearray`` zeroed once the write and flush complete, or fail; no
+        ``str`` is ever made of them. ``destination`` is left open: close it afterwards, so the tool
+        sees the end of its input. Blocks until the write and flush return.
+
+        :param destination: where to write the key: a process's standard input
+        :raises TypeError: ``destination`` is ``None``
+        :raises ObjectClosedError: the protector has been closed; nothing is written
+        """
+
+    @abstractmethod
+    async def write_dek_async(self, destination: AsyncBinaryDestination) -> None:
+        """:meth:`write_dek` to an asyncio stream - the stdin of
+        :func:`asyncio.create_subprocess_exec` - drained rather than flushed, without blocking the
+        event loop (.NET's ``WriteDekAsync``). Cancelling the awaiting task stops the drain; the
+        buffer is zeroed all the same.
+
+        :param destination: where to write the key: a process's standard input
+        :raises TypeError: ``destination`` is ``None``
+        :raises ObjectClosedError: the protector has been closed; nothing is written
+        """
+
+
+class SecretPipelineWriter(_Closable):
+    """The end of a provisioning pipeline that delivers secrets from a secret store as one encrypted
+    file per secret - the folder layout ``FilePerSecretCache`` reads at runtime - before a durable KEK
+    exists. An implementation is given the secrets to pull and a :class:`PipelineDataProtector` when
+    it is created; :meth:`pull_secrets` reads each secret and encrypts it at once, bound to its file
+    name, keeping only the encrypted value; :meth:`write_protected_secret_files` then writes one
+    file per secret, or :meth:`write_json_secrets` one JSON file of them all - each also to a
+    process's standard input, as a tar archive of the files or as the JSON. No key ring is involved: the protector's key is the only one, and it is handed
+    to the native platform's wrap process once the files are written.
+
+    The protector belongs to the caller and is never closed by the writer. Closing the writer (or
+    leaving its ``with`` block) releases its connection to the secret store.
+    """
+
+    @property
+    @abstractmethod
+    def protected_secrets(self) -> Mapping[str, str]:
+        """Every secret pulled, by file name: its value encrypted by the protector and formatted, as
+        its file will hold it. Empty until :meth:`pull_secrets` (or :meth:`pull_secrets_async`)
+        completes. A read-only view, which a later pull changes."""
+
+    @abstractmethod
+    def pull_secrets(self) -> None:
+        """Reads every secret the writer was created with and encrypts each value, keeping it in
+        :attr:`protected_secrets` - replacing whatever an earlier pull kept. Blocks the calling
+        thread until the store has answered every read.
+
+        :raises KeyNotFoundError: a secret has no value; every other secret is kept
+        """
+
+    async def pull_secrets_async(self) -> None:
+        """:meth:`pull_secrets` without blocking the event loop. The default runs pull_secrets in a
+        worker thread (:func:`asyncio.to_thread`); a writer with an asyncio-capable client overrides
+        it. Cancel it by cancelling the task awaiting it: nothing is kept then.
+
+        :raises KeyNotFoundError: a secret has no value; every other secret is kept
+        """
+        await asyncio.to_thread(self.pull_secrets)
+
+    @abstractmethod
+    def write_protected_secret_files(self, folder_path: str | os.PathLike[str]) -> None:
+        """Writes every secret in :attr:`protected_secrets` as a file in ``folder_path``, creating the
+        folder if it doesn't exist: the file named for it, holding its encrypted, formatted value as
+        UTF-8.
+
+        :param folder_path: the folder to write to, absolute or relative to the working directory
+        :raises TypeError: ``folder_path`` is ``None``
+        :raises ValueError: ``folder_path`` is empty
+        :raises RuntimeError: no pull has completed
+        """
+
+    @abstractmethod
+    def write_json_secrets(self, file_path: str | os.PathLike[str]) -> None:
+        """Writes every secret in :attr:`protected_secrets` to one JSON file at ``file_path``,
+        creating its folder if it doesn't exist: a single object with a member per secret, its file
+        name mapped to its encrypted, formatted value. A file already there is replaced.
+
+        :param file_path: the file to write, absolute or relative to the working directory
+        :raises TypeError: ``file_path`` is ``None``
+        :raises ValueError: ``file_path`` is empty
+        :raises RuntimeError: no pull has completed
+        """
+
+    @abstractmethod
+    def write_protected_secret_files_to_stream(self, destination: BinaryDestination) -> None:
+        """Writes every secret in :attr:`protected_secrets` to ``destination`` as a tar archive of
+        the files :meth:`write_protected_secret_files` would write - for a remote tar to unpack, e.g.
+        the stdin of ``ssh -T host sudo -n tar -x --no-same-owner -f - -C folder``. ``destination`` is
+        flushed and left open: close it afterwards, so tar sees the end of its input.
+
+        :param destination: where to write the archive: a process's standard input
+        :raises TypeError: ``destination`` is ``None``
+        :raises RuntimeError: no pull has completed
+        """
+
+    @abstractmethod
+    async def write_protected_secret_files_async(self, destination: AsyncBinaryDestination) -> None:
+        """:meth:`write_protected_secret_files_to_stream` to an asyncio stream, drained rather than
+        flushed, without blocking the event loop (.NET's ``WriteProtectedSecretFilesAsync``).
+        Cancelling the awaiting task stops the drain.
+
+        :raises TypeError: ``destination`` is ``None``
+        :raises RuntimeError: no pull has completed
+        """
+
+    @abstractmethod
+    def write_json_secrets_to_stream(self, destination: BinaryDestination) -> None:
+        """Writes every secret in :attr:`protected_secrets` to ``destination`` as the JSON object
+        :meth:`write_json_secrets` would write - for a remote command to store, e.g. the stdin of
+        ``ssh -T host sudo -n tee /etc/app/secrets.json``. ``destination`` is flushed and left open:
+        close it afterwards, so the remote command sees the end of its input.
+
+        :param destination: where to write the JSON: a process's standard input
+        :raises TypeError: ``destination`` is ``None``
+        :raises RuntimeError: no pull has completed
+        """
+
+    @abstractmethod
+    async def write_json_secrets_async(self, destination: AsyncBinaryDestination) -> None:
+        """:meth:`write_json_secrets_to_stream` to an asyncio stream, drained rather than flushed,
+        without blocking the event loop (.NET's ``WriteJsonSecretsAsync``). Cancelling the awaiting
+        task stops the drain.
+
+        :raises TypeError: ``destination`` is ``None``
+        :raises RuntimeError: no pull has completed
+        """
 
 
 class ProtectedReadOnlyCache(ABC):

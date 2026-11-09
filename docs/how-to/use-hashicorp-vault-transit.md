@@ -95,7 +95,7 @@ bytearray, zeroed by `close()` (it is a context manager):
 ```python
 import os
 
-from hkdfguard.keywrapping.hashicorpvault import StaticVaultTokenSource
+from hkdfguard.integration.hashicorpvault import StaticVaultTokenSource
 
 token = StaticVaultTokenSource(os.environ["VAULT_TOKEN"])
 ```
@@ -165,24 +165,65 @@ response's headers and its whole body), and retries: a request that gets no answ
 connection, times out, or is answered 429 or a 5xx other than 501 is retried 3 times by default
 (`retry_count`, 3-10), waiting 200 ms (`retry_delay`) and doubling up to 10 seconds, plus up to
 100 ms of jitter. The token is asked for once per call, not per retry. To trust a private CA, or
-present a client certificate, give an `ssl_context`:
+present a client certificate (Vault's cert auth method, or a Vault requiring mutual TLS), give `tls`,
+a `VaultTlsOptions` - the same settings the .NET and Java wrappers and Vault's own `VAULT_CACERT`,
+`VAULT_CLIENT_CERT`, `VAULT_CLIENT_KEY` and `VAULT_TLS_SERVER_NAME` take:
 
 ```python
-import ssl
-
+from hkdfguard.integration.hashicorpvault import VaultTlsOptions
 from hkdfguard.keywrapping.hashicorpvault import HashiCorpVaultTransitKeyWrapperOptions
 
 options = HashiCorpVaultTransitKeyWrapperOptions(
     mount_path="transit/team-a",
     namespace="team-a/prod",
-    ssl_context=ssl.create_default_context(cafile="vault-ca.pem"))
+    tls=VaultTlsOptions(server_certificate_file="vault-ca.pem",
+                        client_certificate_file="myapp.pem",
+                        client_certificate_key_file="myapp-key.pem"))
 wrapper = HashiCorpVaultTransitKeyWrapper("https://vault.example.com:8200", "myapp-kek", token,
                                           "com.example.myapp", options=options)
 ```
 
-Without one, the system's trust store verifies the certificate and host name. There is no HTTP
-client or handler option, as there is in .NET: `http.client` never follows redirects, so there is
-nothing to refuse, and `ssl_context` covers what a supplied handler is for there.
+### Certificates in a password-protected key store
+
+The CA certificates and the client key can come from PKCS#12 stores instead: a trust store in place
+of the PEM CA certificates, a client key store in place of the PEM certificate and key. A store's
+password is never held in the clear. Protect it once with a protector on a key ring, and give the
+options the result and that protector:
+
+```python
+from hkdfguard.integration.hashicorpvault import VaultTlsOptions
+
+protector = key_ring.create_protector(VaultTlsOptions.PASSWORD_PURPOSE)
+password = VaultTlsOptions.protect_password(protector, os.environ["MYAPP_KEYSTORE_PASSWORD"])
+
+tls = VaultTlsOptions(trust_store_file="vault-trust.p12", trust_store_password=password,
+                      client_key_store_file="myapp.p12", client_key_store_password=password,
+                      client_key_store_alias="myapp",         # only if the store holds several keys
+                      password_protector=protector)
+```
+
+Store `password` - the protected form - in your configuration, not the password. The stores are read
+once, when the wrapper is created: each password is decrypted into a bytearray only while its store
+is read, and zeroed at once. A password that `protector` didn't protect is refused without being
+quoted. The alias is matched ignoring case, as Java's PKCS#12 key store does.
+
+Some things to know:
+
+- The key ring that protects the password can't be the one this wrapper unwraps keys for, since that
+  ring isn't built until the wrapper exists. Use an earlier ring - for example one whose wrapper is
+  the native platform's - or pass PEM files, protected by file permissions, instead.
+- Only PKCS#12 is read. A JKS or JCEKS store is refused; convert one with
+  `keytool -importkeystore -srckeystore myapp.jks -destkeystore myapp.p12 -deststoretype PKCS12`.
+- Python's `ssl` module loads a client key only from a file. The key is therefore written,
+  PEM-encrypted under a random one-time password that never leaves the process, to a temporary file
+  only the current user can read, loaded, and deleted at once. The key never reaches the disk in the
+  clear.
+
+Without `tls`, the system's trust store verifies the certificate and host name. An `ssl_context` of
+your own (`ssl.create_default_context(cafile="vault-ca.pem")`, say) can be given instead of `tls`, but not
+with it. There is no HTTP client or handler option, as there is in .NET: `http.client` never
+follows redirects, so there is nothing to refuse, and `tls` or `ssl_context` covers what a supplied
+handler is for there.
 
 ## 5. Build a key ring with an ephemeral key
 

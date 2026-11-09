@@ -85,6 +85,17 @@ class Utf8:
         return bytearray(Utf8._normalize(text, "strict"), "utf-8")
 
     @staticmethod
+    def is_valid(data: Buffer) -> bool:
+        """Whether ``data`` is well-formed UTF-8 (RFC 3629): no overlong forms, surrogates, code
+        points past U+10FFFF or truncated sequences - checked byte by byte, never decoded into a
+        ``str``, so a secret can be checked where it lies. Empty is valid.
+
+        :raises TypeError: ``data`` isn't a buffer
+        """
+        with memoryview(data) as raw, raw.cast("B") as view:
+            return _is_utf8(view)
+
+    @staticmethod
     def require_well_formed(text: str) -> None:
         """:raises ValueError: ``text`` holds an unpaired surrogate"""
         Utf8._normalize(text, "strict")
@@ -99,3 +110,32 @@ class Utf8:
             return text.encode("utf-16-le", "surrogatepass").decode("utf-16-le", errors)
         except UnicodeDecodeError as error:
             raise ValueError(f"The text is not valid UTF-16: it has an unpaired surrogate near index {error.start // 2}.") from None
+
+
+def _is_utf8(view: memoryview) -> bool:
+    # Each lead byte, then its continuation bytes, the second's range narrowed where RFC 3629's
+    # table narrows it: E0 (no overlong), ED (no surrogates), F0 (no overlong) and F4 (no code
+    # point past U+10FFFF).
+    i, end = 0, len(view)
+    while i < end:
+        b = view[i]
+        if b < 0x80:
+            i += 1
+            continue
+        if 0xC2 <= b <= 0xDF:
+            count, low, high = 1, 0x80, 0xBF
+        elif 0xE0 <= b <= 0xEF:
+            count = 2
+            low, high = (0xA0, 0xBF) if b == 0xE0 else (0x80, 0x9F) if b == 0xED else (0x80, 0xBF)
+        elif 0xF0 <= b <= 0xF4:
+            count = 3
+            low, high = (0x90, 0xBF) if b == 0xF0 else (0x80, 0x8F) if b == 0xF4 else (0x80, 0xBF)
+        else:
+            return False
+        if i + count >= end or not low <= view[i + 1] <= high:
+            return False
+        for k in range(2, count + 1):
+            if not 0x80 <= view[i + k] <= 0xBF:
+                return False
+        i += count + 1
+    return True

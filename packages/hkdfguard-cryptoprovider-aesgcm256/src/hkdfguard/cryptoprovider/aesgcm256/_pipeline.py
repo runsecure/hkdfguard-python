@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import os
 import threading
+from collections.abc import Buffer
 
 from hkdfguard.abstractions import (
     ArrayUtility,
+    AsyncBinaryDestination,
+    BinaryDestination,
     EncryptedFormatProvider,
     KeyNotFoundError,
     KeyTrackingValue,
@@ -40,6 +43,31 @@ def _base64_into(data: bytearray) -> bytearray:
         output[position + 3] = _BASE64_ALPHABET[b2 & 0x3F] if count > 2 else _PAD
         position += 4
     return output
+
+
+def _utf8_view(plaintext: object) -> memoryview:
+    """``plaintext``'s bytes, as a flat view.
+
+    :raises TypeError: ``plaintext`` isn't a buffer
+    """
+    if not isinstance(plaintext, Buffer):
+        raise TypeError("plaintext must be a str or a buffer of UTF-8 bytes.")
+    return memoryview(plaintext).cast("B")
+
+
+def _code_points(view: memoryview | None) -> int:
+    # What len() would give for the str these UTF-8 bytes decode to: every byte but a continuation byte.
+    return 0 if view is None else sum(1 for b in view if b & 0xC0 != 0x80)
+
+
+def _copy_utf8(view: memoryview | None) -> bytearray:
+    """A copy of ``view``'s bytes of the protector's own, which the session zeroes as it encrypts.
+
+    :raises ValueError: they aren't well-formed UTF-8
+    """
+    if view is None or not Utf8.is_valid(view):
+        raise ValueError("The plaintext isn't well-formed UTF-8: the pipeline protector encrypts text.")
+    return bytearray(view)
 
 
 class AesGcmPipelineDataProtector(PipelineDataProtector):
@@ -99,16 +127,73 @@ class AesGcmPipelineDataProtector(PipelineDataProtector):
                     ArrayUtility.zero_memory(copy)
             return memoryview(self._base64).toreadonly()
 
-    def encrypt(self, plaintext: str, secret_identifier: str) -> str:
+    def write_dek(self, destination: BinaryDestination) -> None:
+        """Encoded afresh, straight from a copy of the key into a ``bytearray`` of its own - never
+        through a ``str``, nor the buffer :meth:`get_key_as_base64` returns - which is zeroed once
+        the write and flush return or raise. What ``destination`` buffers is its own (see
+        :class:`~hkdfguard.abstractions.BinaryDestination`).
+
+        :raises TypeError: ``destination`` is ``None``
+        :raises ObjectClosedError: the protector has been closed; nothing is written
+        """
+        if destination is None:
+            raise TypeError("destination must not be None.")
+        ascii_key = self._encode_key()
+        try:
+            destination.write(ascii_key)
+            destination.flush()
+        finally:
+            ArrayUtility.zero_memory(ascii_key)
+
+    async def write_dek_async(self, destination: AsyncBinaryDestination) -> None:
+        """:meth:`write_dek`, drained rather than flushed. The ``bytearray`` is zeroed once the
+        drain completes, fails or is cancelled.
+
+        :raises TypeError: ``destination`` is ``None``
+        :raises ObjectClosedError: the protector has been closed; nothing is written
+        """
+        if destination is None:
+            raise TypeError("destination must not be None.")
+        ascii_key = self._encode_key()
+        try:
+            destination.write(ascii_key)
+            await destination.drain()
+        finally:
+            ArrayUtility.zero_memory(ascii_key)
+
+    def _encode_key(self) -> bytearray:
+        # The key's base64 in a bytearray the caller zeroes; the copy it is encoded from is zeroed here.
+        with self._gate:
+            self._current()
+            copy = bytearray(self._key)
+            try:
+                return _base64_into(copy)
+            finally:
+                ArrayUtility.zero_memory(copy)
+
+    def encrypt(self, plaintext: str | Buffer, secret_identifier: str) -> str:
+        """A ``str`` is encoded into a bytearray; a buffer's bytes are checked to be well-formed
+        UTF-8 where they lie - never decoded into a ``str`` - and copied into one. That bytearray is
+        what is encrypted, and it is zeroed once encrypted, as it is if the encryption fails: the
+        caller's buffer is only read.
+
+        :raises TypeError: ``plaintext`` is neither a ``str`` nor a buffer
+        :raises ValueError: ``secret_identifier`` is empty or not valid UTF-16, or a buffer
+            ``plaintext`` isn't well-formed UTF-8
+        :raises ObjectClosedError: the protector has been closed
+        """
         telemetry = HkdfGuardTelemetry.DATA_PROTECTION
         with telemetry.start_span(SpanNames.DataProtection.PROTECTOR_ENCRYPT) as span:
+            text = plaintext if isinstance(plaintext, str) else None
+            source = None if text is not None else _utf8_view(plaintext)
             if telemetry.sensitive_logging_enabled:
+                length = len(text) if text is not None else _code_points(source)
                 telemetry.log_sensitive_operation(span, SpanNames.DataProtection.PROTECTOR_ENCRYPT,
-                                                  {AttributeNames.NAME: str(secret_identifier), AttributeNames.PLAINTEXT_LENGTH: len(plaintext)})
+                                                  {AttributeNames.NAME: str(secret_identifier), AttributeNames.PLAINTEXT_LENGTH: length})
 
             session = self._current()
             aad = ProtectedConfigurationPurpose.aad_for(secret_identifier)
-            plaintext_bytes = Utf8.encode(plaintext)
+            plaintext_bytes = Utf8.encode(text) if text is not None else _copy_utf8(source)
             try:
                 ciphertext = bytearray(NONCE_SIZE + len(plaintext_bytes) + TAG_SIZE)
                 session.encrypt(plaintext_bytes, ciphertext, aad=aad)

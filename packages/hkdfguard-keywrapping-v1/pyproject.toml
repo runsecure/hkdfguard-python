@@ -1,13 +1,13 @@
 [project]
 name = "hkdfguard-keywrapping-v1"
-version = "0.9.0"
+version = "0.9.1"
 description = "Wraps DEKs under a KEK held by the platform's native HkdfGuard KMS library (TPM, Platform Crypto Provider, Secure Enclave)."
 license = "MPL-2.0"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "hkdfguard-abstractions",
-    "cryptography>=45",
+    "cryptography>=50",
 ]
 classifiers = [
     "Programming Language :: Python :: 3",

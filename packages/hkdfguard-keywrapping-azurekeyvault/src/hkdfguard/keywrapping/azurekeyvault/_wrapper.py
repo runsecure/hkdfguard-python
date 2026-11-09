@@ -26,6 +26,24 @@ from hkdfguard.keywrapping.azurekeyvault import _envelope
 from hkdfguard.keywrapping.azurekeyvault._key_id import KeyVaultKeyId
 from hkdfguard.securefile import KeyFileTrust, TrustedKeyFile
 
+# Client options refused: each puts application code where it sees request and response bodies - the
+# key sent to wrap when the client falls back to Key Vault, and every key unwrap reveals - or logs them.
+_REFUSED_OPTIONS: Final = {
+    "key": "the wrapper gives each client its own key",
+    "credential": "the wrapper gives each client the credential itself",
+    "logging_enable": "network trace logging writes every request and response body to the log, and the unwrap response holds the DEK",
+    "logging_policy": "it could log every request and response body, and the unwrap response holds the DEK",
+    "http_logging_policy": "it could log every request and response body, and the unwrap response holds the DEK",
+    "raw_request_hook": "it sees every request body, which holds the DEK when wrap is sent to Key Vault",
+    "raw_response_hook": "it sees every response body, and the unwrap response holds the DEK",
+    "custom_hook_policy": "it sees every request and response body, and the unwrap response holds the DEK",
+    "per_call_policies": "a policy sees every request and response body, and the unwrap response holds the DEK",
+    "per_retry_policies": "a policy sees every request and response body, and the unwrap response holds the DEK",
+    "authentication_policy": "it sees every request and response body, and the unwrap response holds the DEK",
+    "policies": "it replaces the client's pipeline",
+    "generated_client": "it replaces the client",
+}
+
 
 class KeyVaultCryptoClient(Protocol):
     """The calls :class:`AzureKeyVaultKeyWrapper` makes on a Key Vault client for one key version: an
@@ -116,19 +134,25 @@ class AzureKeyVaultKeyWrapper(KeyWrapper):
             file :meth:`read_key_file` reads; ``None`` trusts administrators only
             (:attr:`KeyFileTrust.ADMINISTRATORS_ONLY`)
         :param client_options: (keyword only) keyword arguments for each Key Vault ``CryptographyClient`` - its
-            ``api_version``, ``transport``, retry and logging options; copied at construction. The
-            wrapper gives each client its key and the credential itself.
+            ``api_version``, ``transport`` and retry options; copied at construction. The wrapper gives
+            each client its key and the credential itself. Anything that would see or log request and
+            response bodies - ``logging_enable``, a logging policy, a request or response hook, extra
+            policies - is refused: the unwrap response holds the DEK.
         :raises TypeError: a key identifier or the credential is ``None``, or an argument is of the wrong type
         :raises ValueError: a key identifier isn't a Key Vault key's, both name the same key, the context
-            is too long or not well-formed text, or ``client_options`` names ``key`` or ``credential``
+            is too long or not well-formed text, or ``client_options`` names an option it refuses
         """
         if credential is None:
             raise TypeError("credential must not be None.")
         if client_options is not None and not isinstance(client_options, Mapping):
             raise TypeError("client_options must be a mapping of keyword arguments.")
         options = dict(client_options or {})
-        if "key" in options or "credential" in options:
-            raise ValueError("client_options must not name key or credential: the wrapper gives each client its own.")
+        for name, reason in _REFUSED_OPTIONS.items():
+            # logging_enable=False only says what is already the default.
+            if name in options and not (name == "logging_enable" and options[name] is False):
+                raise ValueError(f"client_options must not name {name}: {reason}.")
+        # Said explicitly, so no default a later SDK picks turns network trace logging on.
+        options["logging_enable"] = False
 
         def create(key_id: str) -> KeyVaultCryptoClient:
             return CryptographyClient(key_id, credential, **options)

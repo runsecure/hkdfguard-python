@@ -30,14 +30,8 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from hkdfguard.abstractions import CryptographicError, KeyWrapper, ObjectClosedError, WrappedKeyLimits
 from hkdfguard.cryptoprovider.aesgcm256 import AesGcmCryptoProviderFactory
-from hkdfguard.keywrapping.hashicorpvault import (
-    HashiCorpVaultTransitKeyWrapper,
-    HashiCorpVaultTransitKeyWrapperOptions,
-    KeyFileTrust,
-    StaticVaultTokenSource,
-    VaultRequestError,
-    VaultTokenSource,
-)
+from hkdfguard.integration.hashicorpvault import StaticVaultTokenSource, VaultRequestError, VaultTlsOptions, VaultTokenSource
+from hkdfguard.keywrapping.hashicorpvault import HashiCorpVaultTransitKeyWrapper, HashiCorpVaultTransitKeyWrapperOptions, KeyFileTrust
 from hkdfguard.keywrapping.hashicorpvault._wrapper import _decode_base64, _encode_base64, is_vault_ciphertext
 from hkdfguard_test_support import long_path
 
@@ -1024,6 +1018,35 @@ def test_a_refused_vault_certificate_is_not_retried(vault: FakeTransit, create: 
 
     assert isinstance(raised.value.__cause__, ssl.SSLCertVerificationError)
     assert attempts == ["127.0.0.1"]
+
+
+def test_tls_options_say_how_every_https_request_connects(vault: FakeTransit, create: Create, monkeypatch: pytest.MonkeyPatch) -> None:
+    names: list[str | None] = []
+    real = ssl.SSLContext.wrap_socket
+
+    def recording(self: ssl.SSLContext, *args: Any, **kwargs: Any) -> ssl.SSLSocket:
+        names.append(kwargs.get("server_hostname"))
+        assert self.minimum_version is ssl.TLSVersion.TLSv1_2
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(ssl.SSLContext, "wrap_socket", recording)
+    # The fake speaks plain http, so the handshake fails - after verifying against the server name.
+    wrapper = create(address=f"https://127.0.0.1:{vault.port}/", retry_count=Options.MIN_RETRY_COUNT, tls=VaultTlsOptions(server_name="vault.internal"))
+
+    with pytest.raises(CryptographicError):
+        generate(wrapper)
+
+    assert names == ["vault.internal"] * (1 + Options.MIN_RETRY_COUNT)
+
+
+def test_tls_options_are_read_when_the_wrapper_is_created_and_refused_beside_an_ssl_context(create: Create) -> None:
+    with pytest.raises(ValueError, match="Could not read"):
+        create(address="https://vault.example.com:8200", tls=VaultTlsOptions(server_certificate_file="missing-ca.pem"))
+    with pytest.raises(ValueError, match="can't be given together"):
+        create(address="https://vault.example.com:8200", ssl_context=ssl.create_default_context(), tls=VaultTlsOptions())
+    with pytest.raises(TypeError, match="tls must be VaultTlsOptions"):
+        create(address="https://vault.example.com:8200", tls="tls")
+    assert Options().tls is None
 
 
 def test_the_namespace_mount_and_path_prefix_are_used(transits: Callable[..., FakeTransit], create: Create) -> None:

@@ -1,6 +1,6 @@
 [project]
 name = "hkdfguard-cache-awssecretsmanager"
-version = "0.9.0"
+version = "0.9.1"
 description = "A protected read-only cache over AWS Secrets Manager: each secret is read on its first lookup, taken out of the response before botocore can make it a str, encrypted under the key ring's current key and cached only as ciphertext."
 license = "MPL-2.0"
 readme = "README.md"

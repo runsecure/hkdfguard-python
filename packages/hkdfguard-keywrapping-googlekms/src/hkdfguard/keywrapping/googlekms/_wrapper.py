@@ -7,8 +7,13 @@ import re
 from collections.abc import Buffer, Callable
 from typing import Any, Final, Protocol
 
+from google.api_core import exceptions as core_exceptions
+from google.api_core import gapic_v1
+from google.api_core import retry as retries
 from google.api_core.exceptions import GoogleAPICallError
 from google.cloud.kms_v1 import DecryptRequest, DecryptResponse, EncryptRequest, EncryptResponse
+from google.cloud.kms_v1.services.key_management_service.transports import KeyManagementServiceGrpcTransport
+from google.cloud.kms_v1.services.key_management_service.transports.base import DEFAULT_CLIENT_INFO
 from hkdfguard.abstractions import ArrayUtility, CryptographicError, KeyWrapper, WrappedKeyLimits, WritableBuffer
 from hkdfguard.securefile import KeyFileTrust, TrustedKeyFile
 
@@ -29,6 +34,19 @@ _KEY_NAME: Final = re.compile(r"projects/[^/]+/locations/[^/]+/keyRings/[^/]+/cr
 # Prefixed to every wrapped DEK's additional authenticated data. Changing it makes every existing key
 # file unreadable.
 _AAD_LABEL: Final = b"HkdfGuard-GoogleKms-wrap-v1\0"
+
+_SERVICE: Final = "/google.cloud.kms.v1.KeyManagementService/"
+
+
+def _direct(channel: Any, method: str, request_type: Any, response_type: Any) -> Callable[..., Any]:
+    """``method`` called on the gRPC transport's own channel - not the logged channel the client's
+    methods go through, whose interceptor serializes every request and response, a DEK included, to
+    JSON for its DEBUG log - with the retries and timeout the client gives Encrypt and Decrypt (its
+    transport's ``_prep_wrapped_messages``), and the client's errors (``GoogleAPICallError``)."""
+    stub = channel.unary_unary(_SERVICE + method, request_serializer=request_type.serialize, response_deserializer=response_type.deserialize)
+    retry = retries.Retry(initial=0.1, maximum=60.0, multiplier=1.3, timeout=60.0,
+                          predicate=retries.if_exception_type(core_exceptions.DeadlineExceeded, core_exceptions.ServiceUnavailable))
+    return gapic_v1.method.wrap_method(stub, default_retry=retry, default_timeout=60.0, client_info=DEFAULT_CLIENT_INFO)  # type: ignore[no-any-return,no-untyped-call]
 
 
 def _crc32c_table() -> tuple[int, ...]:
@@ -91,8 +109,15 @@ class GoogleKmsKeyWrapper(KeyWrapper):
     (``hkdfguard-keywrapping-v1``'s ``NativeProcessHardening``) is what keeps such copies out of reach of
     a debugger or a crash dump.
 
-    The client is the application's: it creates it (credentials, transport, retries), keeps it for as
-    long as anything uses this wrapper - a key ring's background refresh included - and closes it. This
+    **No DEK reaches the client's debug log.** Over gRPC (the default transport) the wrapper calls
+    Encrypt and Decrypt on the transport's own channel, as the client would - same retries, timeout and
+    routing header - but past the client's logging interceptor, which, whenever DEBUG is enabled for it,
+    serializes each request and response to JSON for its log: the key sent to Encrypt and the key
+    Decrypt reveals included. A REST transport, or any other client, is called through its own
+    ``encrypt`` and ``decrypt``; keep its debug logging off (``GOOGLE_SDK_PYTHON_LOGGING_SCOPE`` unset).
+
+    The client is the application's: it creates it (credentials, transport), keeps it for as long as
+    anything uses this wrapper - a key ring's background refresh included - and closes it. This
     wrapper never closes it. Every call blocks until Cloud KMS answers, the client's own retries
     included. Argument errors raise ``ValueError`` or ``TypeError``; a Cloud KMS refusal, an unreachable
     service or a credential that can't get a token raises :class:`CryptographicError` naming the
@@ -142,6 +167,19 @@ class GoogleKmsKeyWrapper(KeyWrapper):
 
         self._client = client
         self._key_name = key_name
+        self._encrypt: Callable[[EncryptRequest], EncryptResponse]
+        self._decrypt: Callable[[DecryptRequest], DecryptResponse]
+        transport = getattr(client, "transport", None)
+        if isinstance(transport, KeyManagementServiceGrpcTransport):
+            encrypt: Callable[..., EncryptResponse] = _direct(transport.grpc_channel, "Encrypt", EncryptRequest, EncryptResponse)
+            decrypt: Callable[..., DecryptResponse] = _direct(transport.grpc_channel, "Decrypt", DecryptRequest, DecryptResponse)
+            # The routing header the client adds for a request naming this key.
+            metadata = (gapic_v1.routing_header.to_grpc_metadata((("name", key_name),)),)  # type: ignore[no-untyped-call]
+            self._encrypt = lambda request: encrypt(request, metadata=metadata)
+            self._decrypt = lambda request: decrypt(request, metadata=metadata)
+        else:
+            self._encrypt = lambda request: client.encrypt(request=request)
+            self._decrypt = lambda request: client.decrypt(request=request)
         self._aad = _AAD_LABEL + self._encode_context(context)
         self._aad_crc32c = crc32c(self._aad)
         self._key_file_trust = key_file_trust if key_file_trust is not None else KeyFileTrust.ADMINISTRATORS_ONLY
@@ -185,7 +223,7 @@ class GoogleKmsKeyWrapper(KeyWrapper):
     def _wrap(self, key: bytes, result: WritableBuffer) -> int:
         request = EncryptRequest(name=self._key_name, plaintext=key, plaintext_crc32c=crc32c(key),
                                  additional_authenticated_data=self._aad, additional_authenticated_data_crc32c=self._aad_crc32c)
-        response = self._call(lambda: self._client.encrypt(request=request), "wrap")
+        response = self._call(lambda: self._encrypt(request), "wrap")
 
         # The version that made it must be one of this key's: a response for any other key would
         # produce a key file this wrapper can't read back.
@@ -230,7 +268,7 @@ class GoogleKmsKeyWrapper(KeyWrapper):
 
             request = DecryptRequest(name=self._key_name, ciphertext=ciphertext, ciphertext_crc32c=crc32c(ciphertext),
                                      additional_authenticated_data=self._aad, additional_authenticated_data_crc32c=self._aad_crc32c)
-            response = self._call(lambda: self._client.decrypt(request=request), "unwrap")
+            response = self._call(lambda: self._decrypt(request), "unwrap")
 
             # Immutable bytes from the client: copied into result, but it can't be zeroed (see the class comment).
             revealed = response.plaintext

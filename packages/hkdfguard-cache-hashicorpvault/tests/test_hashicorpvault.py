@@ -21,18 +21,12 @@ from urllib.parse import urlsplit
 import pytest
 from hkdfguard.abstractions import DataProtector, KeyWrapper, ObjectClosedError, ProtectedReadOnlyCache, WritableBuffer
 from hkdfguard.cache import InvalidSecretDataError, ProtectedCache, ProtectedCacheCollection
-from hkdfguard.cache.hashicorpvault import (
-    HashiCorpVaultSecretCache,
-    HashiCorpVaultSecretCacheOptions,
-    StaticVaultToken,
-    VaultKvVersion,
-    VaultRequestError,
-    VaultTokenProvider,
-)
+from hkdfguard.cache.hashicorpvault import HashiCorpVaultSecretCache, HashiCorpVaultSecretCacheOptions, VaultKvVersion
 from hkdfguard.cryptoprovider.aesgcm256 import AesGcmCryptoProvider
 from hkdfguard.dataencryptionkey import DataEncryptionKey, DefaultFormatProvider
 from hkdfguard.dataencryptionkey import KeyRing as DefaultKeyRing
 from hkdfguard.diagnostics import AttributeNames, HkdfGuardEventId, HkdfGuardLog, HkdfGuardTelemetry, MetricNames, SpanNames
+from hkdfguard.integration.hashicorpvault import StaticVaultToken, VaultRequestError, VaultTlsOptions, VaultTokenProvider
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader, NumberDataPoint
 from opentelemetry.sdk.trace import TracerProvider
@@ -945,12 +939,12 @@ def test_a_response_that_cant_be_trusted_is_refused_and_not_retried(vault: FakeV
 
 @pytest.mark.parametrize(("status", "body", "expected"), [
     (404, '{"errors":["no handler for route \\"nope/data/item\\". route entry not found."]}', "no handler for route"),
-    (404, "<html>Not Found</html>", "HTTP 404"),
+    (404, "<html>Not Found</html>", "Vault refused to read 'item': 404 Not Found"),
     (503, '{"errors":["Vault is sealed"]}', "Vault is sealed"),
-    (500, '["internal"]', "HTTP 500"),
-    (500, '{"errors":"internal"}', "HTTP 500"),
-    (307, "", "HTTP 307"),
-    (502, '{"request_id":"x"}', "HTTP 502"),
+    (500, '["internal"]', "Vault refused to read 'item': 500 Internal Server Error"),
+    (500, '{"errors":"internal"}', "Vault refused to read 'item': 500 Internal Server Error"),
+    (307, "", "Vault refused to read 'item': 307 Temporary Redirect"),
+    (502, '{"request_id":"x"}', "Vault refused to read 'item': 502 Bad Gateway"),
 ])
 def test_any_other_answer_raises_with_vaults_status_and_errors(vault: FakeVault, create: Create, status: int, body: str, expected: str) -> None:
     cache = create()
@@ -1225,6 +1219,35 @@ def test_an_ssl_context_given_is_the_one_every_https_request_uses(vault: FakeVau
         cache.decrypt("item", bytearray(16))
 
     assert wrapped == ["127.0.0.1"] * (1 + Options.MIN_RETRY_COUNT)
+
+
+def test_tls_options_say_how_every_https_request_connects(vault: FakeVault, create: Create, monkeypatch: pytest.MonkeyPatch) -> None:
+    names: list[str | None] = []
+    real = ssl.SSLContext.wrap_socket
+
+    def recording(self: ssl.SSLContext, *args: Any, **kwargs: Any) -> ssl.SSLSocket:
+        names.append(kwargs.get("server_hostname"))
+        assert self.minimum_version is ssl.TLSVersion.TLSv1_2
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(ssl.SSLContext, "wrap_socket", recording)
+    # The fake speaks plain http, so the handshake fails - after verifying against the server name.
+    cache = create(address=f"https://127.0.0.1:{vault.port}/", tls=VaultTlsOptions(server_name="vault.internal"))
+
+    with pytest.raises(OSError):
+        cache.decrypt("item", bytearray(16))
+
+    assert names == ["vault.internal"] * (1 + Options.MIN_RETRY_COUNT)
+
+
+def test_tls_options_are_read_when_the_cache_is_created_and_refused_beside_an_ssl_context(make_ring: Callable[..., DefaultKeyRing]) -> None:
+    with pytest.raises(ValueError, match="Could not read"):
+        new_cache(make_ring, options=Options(tls=VaultTlsOptions(server_certificate_file="missing-ca.pem")))
+    with pytest.raises(ValueError, match="can't be given together"):
+        new_cache(make_ring, options=Options(ssl_context=ssl.create_default_context(), tls=VaultTlsOptions()))
+    with pytest.raises(TypeError, match="tls must be VaultTlsOptions"):
+        new_cache(make_ring, options=Options(tls="tls"))  # type: ignore[arg-type]
+    assert Options().tls is None
 
 
 def test_a_refused_vault_certificate_is_not_retried(vault: FakeVault, create: Create) -> None:

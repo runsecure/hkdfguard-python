@@ -280,9 +280,11 @@ def _accept(response: AccessedSecretVersion, name: str, value: SecretValueSink) 
 
 def _check_response(response: AccessedSecretVersion, name: str) -> None:
     # The response must be a version of the secret asked for (its project comes back as a number, so
-    # only the secret ID can be compared), and match its checksum when it has one.
+    # only the secret ID can be compared), and a payload must match its checksum.
     reported = _SECRET_VERSION_NAME.fullmatch(response.name)
     if reported is None or reported.group(1) != name:
         raise CryptographicError(f"Secret Manager answered a request for secret '{name}' with '{response.name}'.")
-    if response.data_crc32c is not None and response.data_crc32c != crc32c(response.data):
-        raise CryptographicError(f"The payload of secret '{name}' doesn't match its CRC32C: it was corrupted in transit.")
+    # Secret Manager sends a checksum with every payload: data without one can't be told from data
+    # corrupted in transit. No data at all (an empty or absent payload) is a missing secret.
+    if response.data and (response.data_crc32c is None or response.data_crc32c != crc32c(response.data)):
+        raise CryptographicError(f"The payload of secret '{name}' doesn't match its CRC32C, or has none: it was corrupted in transit.")
