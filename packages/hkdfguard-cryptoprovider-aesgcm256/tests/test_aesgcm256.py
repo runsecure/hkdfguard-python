@@ -14,6 +14,7 @@ import time
 from collections.abc import Buffer, Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
 
 import pytest
 from hkdfguard.abstractions import (
@@ -36,6 +37,7 @@ from hkdfguard.cryptoprovider.aesgcm256 import (
     AesGcmPipelineDataProtector,
     EncryptionBudget,
 )
+from hkdfguard.cryptoprovider.aesgcm256 import _provider as provider_module
 from hkdfguard.diagnostics import AttributeNames, EventNames, HkdfGuardEventId, HkdfGuardLog, HkdfGuardTelemetry, SpanNames
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
@@ -1273,6 +1275,35 @@ def test_fail_closed_counts_each_timed_out_refresh_while_the_key_wrapper_hangs_w
         result = bytearray(8)
         provider.decrypt(ciphertext, result)
         assert result == b"survives"
+
+
+def test_close_between_a_refresh_starting_its_reveal_and_waiting_on_it_doesnt_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    # close runs just after the refresh started its reveal but before registering it as the one to
+    # wake: the refresh must see the provider closing rather than wait out its whole timeout.
+    wrapper = FakeKeyWrapper()
+    gate = threading.Event()
+    provider = AesGcmCryptoProvider.create(wrapper, bytearray(WRAPPED), 300, 3, _refresh_timeout=30)
+    wrapper.block = gate
+    real_reveal = provider_module._Reveal
+
+    def reveal_then_close(*args: Any) -> Any:
+        started = real_reveal(*args)
+        with provider._gate:  # what close does first, before it looks for a reveal to wake
+            provider._closed = True
+        provider._stop.set()
+        return started
+
+    monkeypatch.setattr(provider_module, "_Reveal", reveal_then_close)
+    started = time.monotonic()
+    try:
+        provider._refresh_once()
+        elapsed = time.monotonic() - started
+    finally:
+        gate.set()
+        provider._closed = False
+        provider.close()
+    assert elapsed < 2, f"the refresh waited {elapsed:.2f} s"
+    assert provider._consecutive_failures == 0  # closing isn't a failed refresh
 
 
 def test_close_does_not_wait_for_a_key_wrapper_that_hangs() -> None:

@@ -258,6 +258,9 @@ def _decode_base64(encoded: memoryview, destination: memoryview) -> int:
     # Standard base64 (RFC 4648 section 4) into destination, as strictly as Java's Base64.getDecoder():
     # no whitespace or other characters, and padding, if any, complete. Decoded here rather than by
     # binascii, which returns immutable bytes. Returns the bytes written, or -1 if encoded isn't base64.
+    #
+    # Four characters at a time, so every intermediate value is below 256: CPython hands out its cached
+    # small ints for those, where a wider accumulator would leave pieces of the secret in heap ints.
     length = len(encoded)
     padding = 0
     if length > 0 and encoded[length - 1] == _PAD:
@@ -266,18 +269,22 @@ def _decode_base64(encoded: memoryview, destination: memoryview) -> int:
     if (padding > 0 and length % 4 != 0) or data_length % 4 == 1:
         return -1
 
-    accumulated = 0
-    bits = 0
     written = 0
-    for i in range(data_length):
-        sextet = _BASE64_VALUES.get(encoded[i])
-        if sextet is None:
+    for i in range(0, data_length, 4):
+        count = min(4, data_length - i)  # 2, 3 or 4: a final group of 1 was refused above
+        s0 = _BASE64_VALUES.get(encoded[i])
+        s1 = _BASE64_VALUES.get(encoded[i + 1])
+        s2 = _BASE64_VALUES.get(encoded[i + 2]) if count > 2 else 0
+        s3 = _BASE64_VALUES.get(encoded[i + 3]) if count > 3 else 0
+        if s0 is None or s1 is None or s2 is None or s3 is None:
             return -1
-        accumulated = ((accumulated << 6) | sextet) & 0xFFFF
-        bits += 6
-        if bits >= 8:
-            bits -= 8
-            destination[written] = (accumulated >> bits) & 0xFF
+        destination[written] = ((s0 << 2) & 0xFC) | (s1 >> 4)
+        written += 1
+        if count > 2:
+            destination[written] = ((s1 & 0x0F) << 4) | (s2 >> 2)
+            written += 1
+        if count > 3:
+            destination[written] = ((s2 & 0x03) << 6) | s3
             written += 1
     return written
 

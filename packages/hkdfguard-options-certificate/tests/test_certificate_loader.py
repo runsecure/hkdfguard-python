@@ -375,6 +375,20 @@ def test_a_pem_certificate_with_a_plain_key_is_opened_when_allowed(tmp_path: Pat
             handshake(loaded.create_ssl_context(ssl.Purpose.CLIENT_AUTH), ssl.create_default_context(cadata=pem(certificate).decode()))
 
 
+def test_a_plain_key_file_replaced_after_loading_changes_nothing(tmp_path: Path) -> None:
+    # Read once and checked against the certificate when loaded, then held: a file swapped in afterwards
+    # never becomes the key the certificate signs with.
+    key, other = rsa_key(0), rsa_key(1)
+    certificate = self_signed(key)
+    cert_path = write(tmp_path, "tls.crt", pem(certificate))
+    key_path = write(tmp_path, "tls.key", plain_key(key))
+    with loader(None).load(pem_options(cert_path, key_path, None, allow_unprotected=True)) as loaded:
+        key_path.write_bytes(plain_key(other))
+        signature = loaded.sign(b"to sign", hashes.SHA256(), padding.PKCS1v15())
+        key.public_key().verify(signature, b"to sign", padding.PKCS1v15(), hashes.SHA256())  # the certificate's key, not the swapped one
+        handshake(loaded.create_ssl_context(ssl.Purpose.CLIENT_AUTH), ssl.create_default_context(cadata=pem(certificate).decode()))
+
+
 def test_a_pem_key_for_no_certificate_in_the_file_is_refused(tmp_path: Path) -> None:
     cert_path = write(tmp_path, "tls.crt", pem(self_signed(rsa_key())))
     key_path = write(tmp_path, "other.key", encrypted_key(rsa_key(1)))

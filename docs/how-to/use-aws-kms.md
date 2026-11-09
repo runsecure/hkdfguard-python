@@ -139,7 +139,11 @@ wrapper = AwsKmsKeyWrapper(kms,
   rotation keeps the ARN, so you can turn it on without changing anything here.
 - **The encryption context** is bound into every wrapped DEK and must be given again, exactly, to
   reveal it. Use the same value on every wrapper that handles one application's key files.
-  CloudTrail logs it in plaintext, so it must never hold a secret.
+  CloudTrail logs it in plaintext, so it must never hold a secret. **Always set one**, naming the
+  application and purpose (`{"hkdfguard:purpose": "dek", "app": "orders"}`): without it, any
+  ciphertext anyone made under the key, for any purpose, is accepted as a DEK, and one application's
+  key file works for every other sharing the key. The Google and Azure wrappers bind a fixed label
+  themselves; this one can't without breaking key files the .NET and Java wrappers wrote.
 - **The wrapper doesn't close the client.** Keep the client for as long as anything uses the
   wrapper, including a `KeyRing`'s background refresh, and close it (`kms.close()`) after the ring.
 - **Retries and timeouts are the client's.** botocore retries throttling and transient errors by

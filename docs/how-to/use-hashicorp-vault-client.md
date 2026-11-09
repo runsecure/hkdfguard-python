@@ -209,13 +209,15 @@ except VaultResponseError as error:
 | Login and wrapping tokens in responses | Strings | Protected as they're read (`StaticVaultToken`) |
 | Address | Any scheme | `https`, or `http` on loopback; any other `http` needs `allow_unencrypted_http` |
 | Unix domain sockets | Yes | No |
-| Redirects | Follows one, never `https` to `http` | Refused (`VaultRedirectError`) unless `follow_redirects` is set; then as vault-client-go |
+| Redirects | Follows one, never `https` to `http`, to any host | Refused (`VaultRedirectError`) unless `follow_redirects` is set; then one, never `https` to `http`, and only to the address's host or one listed in `redirect_hosts` (an HA cluster's other nodes) |
 | Address with a path | Path dropped | Kept as a prefix, for Vault behind a reverse proxy |
 | Free-form values | `map[string]interface{}` | `dict[str, object]` sent, `dict[str, JsonValue]` returned |
 | Optional fields | Zero values left out (`omitempty`) | `None` by default and left out, so `False` and `0` can be sent |
 | Response fields Vault types differently from its spec | Decoding fails | A number where the spec says string is read as its text |
 | Rate limiting | `rate.Limiter` | `VaultRateLimiter`, the same token bucket |
-| Retries, MFA, namespaces, replication, callbacks, TLS | Yes | Yes, as vault-client-go |
+| Retries | Yes | Yes, as vault-client-go - except `sys/wrapping/unwrap` and `rewrap`, which use up their token: retried only if the request never left the process, or Vault answered 412 or 429 |
+| Response size | Unlimited | At most `VaultClient.MAX_RESPONSE_LENGTH` (32 MiB, Vault's own request limit); `read_raw` streams larger bodies |
+| MFA, namespaces, replication, callbacks, TLS | Yes | Yes, as vault-client-go |
 | Every request | | Sends `X-Vault-Request: true`, as the `vault` CLI does |
 | Typed endpoints | All 907 | The 103 `generator.json` names: logins and tokens, KV, cubbyhole, transit, and a few of `sys/` |
 

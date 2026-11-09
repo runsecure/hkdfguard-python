@@ -112,8 +112,15 @@ class VaultClientOptions:
     standby that hasn't caught up forwards it to the active node: read-your-writes consistency
     across a cluster, at a cost on every request. Requires Vault Enterprise."""
     follow_redirects: bool = False
-    """Follows one redirect (301, 302 or 307) per request, never from https to http. Off: a redirect
-    fails with :class:`VaultRedirectError`, since it would carry the token wherever it points."""
+    """Follows one redirect (301, 302 or 307) per request, never from https to http, and only to the
+    address's own host or one of :attr:`redirect_hosts`. Off: a redirect fails with
+    :class:`VaultRedirectError`, since it would carry the token wherever it points."""
+    redirect_hosts: Sequence[str] = ()
+    """Hosts besides the address's own that :attr:`follow_redirects` may follow a redirect to - the
+    other nodes of an HA cluster, whose standbys redirect to the active node. Names as the redirect's
+    location gives them (``vault-2.example.com``, ``10.0.0.12``), compared ignoring case; any port.
+    A redirect anywhere else fails with :class:`VaultRedirectError`: it would carry the token, any
+    MFA credentials and the request body to that host."""
     token: VaultTokenProvider | None = None
     """The token every request is made with unless the request sets its own; ``None`` for none
     until :meth:`VaultClient.set_token`."""

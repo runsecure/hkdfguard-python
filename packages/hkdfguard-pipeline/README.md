@@ -45,7 +45,11 @@ caches:
   loop. `protected_secrets` maps each file name (found ignoring case) to its encrypted value.
 - **Writing.** `write_protected_secret_files(folder)` creates the folder if need be and writes each
   value as UTF-8, with no byte order mark, replacing a file of the same name and leaving every other
-  file alone; before a pull it raises `RuntimeError`. Write where the deployment can make the folder
+  file alone; before a pull it raises `RuntimeError`. Each file is written to a temporary file beside
+  it and renamed over it, so a failed or interrupted write never leaves a half-written file, and is
+  created `rw-r--r--` less the umask. Names are matched only within one writer: two writers sharing a
+  folder can both write `prod__app` (from `prod/app` and `prod__app`), and the last wins - give each
+  writer a folder of its own. Write where the deployment can make the folder
   and files modifiable only by administrators and the principals `FilePerSecretCache` trusts.
   `write_json_secrets(path)` writes them all as one JSON object instead - each file name mapped to
   its value, in file-name order, laid out byte for byte as .NET's `WriteJsonSecrets` writes it - the

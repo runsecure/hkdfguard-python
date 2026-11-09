@@ -132,32 +132,12 @@ def _throwaway_password() -> bytearray:
     return password
 
 
-class PlainKeyFileSource(_KeySource):
-    """An unprotected key file, allowed for development: read from its path at each use, as it is on disk."""
+class PlainKeyFileSource(EncryptedKeySource):
+    """An unprotected key file, allowed for development: read once, when the certificate is loaded and
+    its key checked against it, then held as :class:`EncryptedKeySource` holds any key - so a file
+    replaced afterwards can't change the key the certificate signs and decrypts with."""
 
     description = "an unprotected key file"
-
-    def __init__(self, path: str) -> None:
-        self._path = path
-
-    def load_tls(self, context: ssl.SSLContext, directory: _private_files.PrivateDirectory, chain_file: str) -> None:
-        context.load_cert_chain(chain_file, self._path)
-
-    @contextmanager
-    def _key(self) -> Iterator[object]:
-        data = _files.read_file(self._path)
-        try:
-            yield _files.plain_pem_key(data, self._path)
-        finally:
-            ArrayUtility.zero_memory(data)
-
-    def sign(self, data: Buffer, algorithm: HashChoice, scheme: AsymmetricPadding | None, public_key: _keys.PublicKey) -> bytes:
-        with self._key() as key:
-            return _sign_with(key, data, algorithm, scheme)
-
-    def decrypt(self, ciphertext: Buffer, scheme: AsymmetricPadding, public_key: _keys.PublicKey) -> bytearray:
-        with self._key() as key:
-            return _decrypt_with(key, ciphertext, scheme)
 
 
 class ProviderKeySource(_KeySource):

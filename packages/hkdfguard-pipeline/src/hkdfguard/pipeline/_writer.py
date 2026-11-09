@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import io
 import json
 import os
+import secrets
 import tarfile
 import time
 from abc import abstractmethod
@@ -29,7 +31,7 @@ _KEY_SEPARATOR: Final = "#"
 _FILE_NAME_SEPARATOR: Final = "__"
 _JSON_INDENT: Final = "  "
 _SECRET_FILE_MODE: Final = 0o644
-"""rw-r--r--: what each file in a tar archive is unpacked as."""
+"""rw-r--r--: what each file in a tar archive is unpacked as, and what a written file is created as."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,7 +182,13 @@ class SecretPipelineWriter(abstractions.SecretPipelineWriter):
         """Writes every secret in :attr:`protected_secrets` as a file in ``folder_path``, creating the
         folder if it doesn't exist: the file named for it, holding its encrypted, formatted value as
         UTF-8, with no byte order mark. A file already there by that name is replaced; any other file
-        is left as it is.
+        is left as it is. Each file is written whole to a temporary file beside it and then renamed
+        over it, so a reader - or a write that fails part-way - never leaves it half written. Files
+        are created ``rw-r--r--`` (less whatever the umask removes), as the tar archive unpacks them.
+
+        File names are matched only within one writer: two writers sharing a folder can each write a
+        secret to the same file - ``prod/app`` and ``prod__app`` are both ``prod__app`` - and the last
+        one wins. Give each writer a folder of its own, or names that can't meet.
 
         Only encrypted values are written, but FilePerSecretCache refuses a folder or file anyone but
         administrators and the principals it trusts can modify: write them where the deployment can
@@ -201,8 +209,7 @@ class SecretPipelineWriter(abstractions.SecretPipelineWriter):
         folder = os.path.abspath(folder_path)
         os.makedirs(folder, exist_ok=True)
         for file_name, value in self._protected_secrets.items():
-            with open(os.path.join(folder, file_name), "wb") as file:
-                file.write(value.encode("utf-8"))
+            _write_atomically(os.path.join(folder, file_name), value.encode("utf-8"))
 
     def write_json_secrets(self, file_path: str | os.PathLike[str]) -> None:
         """Writes every secret in :attr:`protected_secrets` to one JSON file at ``file_path``,
@@ -233,8 +240,7 @@ class SecretPipelineWriter(abstractions.SecretPipelineWriter):
 
         path = os.path.abspath(file_path)
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "wb") as file:
-            file.write(self._json_secrets())
+        _write_atomically(path, self._json_secrets())
 
     def write_protected_secret_files_to_stream(self, destination: BinaryDestination) -> None:
         """Writes every secret in :attr:`protected_secrets` to ``destination`` as a tar archive of
@@ -460,6 +466,31 @@ class SecretPipelineWriter(abstractions.SecretPipelineWriter):
             file_names.add(file_name.lower())
 
             self._requests.setdefault(name, []).append(SecretRequest(secret_name, key, file_name))
+
+
+def _write_atomically(path: str, data: Buffer) -> None:
+    """Writes ``data`` to ``path`` whole or not at all: to a new file beside it, flushed to disk, then
+    renamed over it (``os.replace``, atomic on one file system). The temporary file is created
+    exclusively, never through a link, and removed if anything fails."""
+    folder, name = os.path.split(path)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    while True:
+        temporary = os.path.join(folder, f".{name}.{secrets.token_hex(8)}.tmp")
+        try:
+            descriptor = os.open(temporary, flags, _SECRET_FILE_MODE)
+            break
+        except FileExistsError:
+            continue
+    try:
+        with os.fdopen(descriptor, "wb") as file:
+            file.write(data)
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.remove(temporary)
+        raise
 
 
 def _json_string(text: str) -> str:

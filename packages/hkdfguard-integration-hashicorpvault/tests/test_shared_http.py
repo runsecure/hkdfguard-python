@@ -229,6 +229,29 @@ def test_a_late_result_times_out_and_is_handed_to_abandoned() -> None:
     assert abandoned == [late]
 
 
+def test_a_token_source_that_times_out_leaves_nothing_it_wrote_behind() -> None:
+    # A source that writes part of a token and then never returns: what it wrote is zeroed when the
+    # wait gives up, not left until (if ever) it returns.
+    from hkdfguard.integration.hashicorpvault._token_source import VaultTokenSource, copy_token_within
+
+    release = threading.Event()
+    written: list[memoryview] = []
+
+    class Stuck(VaultTokenSource):
+        def copy_token(self, destination: memoryview) -> int:
+            destination[:6] = b"hvs.AB"
+            written.append(destination)
+            release.wait(5)
+            return 6
+
+    try:
+        with pytest.raises(TimeoutError, match="no token within"):
+            copy_token_within(Stuck(), bytearray(64), timedelta(milliseconds=50))
+        assert written and not any(written[0])
+    finally:
+        release.set()
+
+
 def test_the_action_runs_on_a_named_daemon_thread() -> None:
     thread = run_within(threading.current_thread, timedelta(seconds=5), thread_name="hkdfguard-vault-token", timeout_message="late")
     assert thread.name == "hkdfguard-vault-token"

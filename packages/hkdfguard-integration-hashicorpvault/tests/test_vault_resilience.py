@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import http.client
+import io
 import logging
 import ssl
 import threading
@@ -15,6 +16,7 @@ from hkdfguard.integration.hashicorpvault import (
     StaticVaultToken,
     VaultClient,
     VaultClientOptions,
+    VaultJsonError,
     VaultRateLimiter,
     VaultRedirectError,
     VaultResponseError,
@@ -133,7 +135,8 @@ def test_an_http_redirect_is_followed_on_loopback(vault: FakeVault, make_client:
     other = FakeVault()
     try:
         vault.then(301, Location=f"http://localhost:{other.port}/v1/moved")
-        make_client(follow_redirects=True).read("a")
+        # localhost isn't the address's host (127.0.0.1), so it is followed only once it is listed.
+        make_client(follow_redirects=True, redirect_hosts=["LOCALHOST"]).read("a")
         assert other.single().target == "/v1/moved"
     finally:
         other.close()
@@ -143,6 +146,108 @@ def test_a_redirect_off_loopback_over_http_or_downgrading_https_fails(vault: Fak
     vault.then(307, Location="http://vault.example.com/v1/a")
     with pytest.raises(VaultRedirectError, match="unencrypted http"):
         make_client(follow_redirects=True).read("a")
+
+
+def test_a_redirect_to_another_host_fails_unless_it_is_listed(vault: FakeVault, make_client: MakeClient) -> None:
+    # The token, any MFA credentials and the body would follow the redirect: to the address's own
+    # host, or one of redirect_hosts (the other nodes of an HA cluster), and nowhere else.
+    other = FakeVault()
+    try:
+        vault.then(307, Location=f"http://localhost:{other.port}/v1/a")
+        with pytest.raises(VaultRedirectError, match="to another host") as raised:
+            make_client(follow_redirects=True, redirect_hosts=["vault-2.example.com"]).read("a")
+        assert raised.value.redirect_location == f"http://localhost:{other.port}/v1/a"
+        assert other.requests == []
+    finally:
+        other.close()
+
+
+def test_a_redirect_to_the_same_host_on_another_port_is_followed(vault: FakeVault, make_client: MakeClient) -> None:
+    other = FakeVault()
+    try:
+        vault.then(307, Location=f"http://127.0.0.1:{other.port}/v1/b")
+        make_client(follow_redirects=True).read("a")
+        assert other.single().target == "/v1/b"
+    finally:
+        other.close()
+
+
+def test_redirect_hosts_must_be_names(make_client: MakeClient) -> None:
+    for bad in ("vault-2.example.com", [""], [3]):
+        with pytest.raises(TypeError, match="redirect_hosts"):
+            make_client(redirect_hosts=bad)
+
+
+def test_a_redirect_to_a_port_out_of_range_is_a_redirect_error(vault: FakeVault, make_client: MakeClient) -> None:
+    vault.then(302, Location="https://127.0.0.1:99999/v1/a")
+    with pytest.raises(VaultRedirectError, match="could not read the redirect location"):
+        make_client(follow_redirects=True).read("a")
+
+
+@pytest.mark.parametrize("path", ["unwrap", "rewrap"])
+def test_a_request_using_up_its_token_isnt_retried_once_vault_may_have_acted_on_it(vault: FakeVault, make_client: MakeClient,
+                                                                                 protector: DataProtector, path: str) -> None:
+    # Vault uses up a wrapping token on the first attempt it acts on: a retry would find it gone, and
+    # the wrapped secret lost - which response wrapping's guidance treats as a sign of interception.
+    client = make_client()
+
+    def request() -> object:
+        if path == "unwrap":
+            return client.unwrap(StaticVaultToken.protect(protector, "hvs.wrapping"))
+        return client.write("sys/wrapping/rewrap", {"token": "hvs.wrapping"})
+
+    vault.respond = lambda _: Answer(500, '{"errors":["internal error"]}')
+    with pytest.raises(VaultResponseError):
+        request()
+    assert len(vault.requests) == 1
+
+    vault.requests.clear()
+    vault.respond = lambda _: DROP
+    with pytest.raises((OSError, http.client.HTTPException)):
+        request()
+    assert len(vault.requests) == 1
+
+
+def test_a_request_using_up_its_token_is_retried_when_vault_turned_it_away(vault: FakeVault, make_client: MakeClient, protector: DataProtector) -> None:
+    vault.then(429).then(412).then(200, '{"data":{"a":"b"}}')
+    response = make_client(retry=VaultRetryOptions(retry_max=2, retry_wait_min=timedelta(0), retry_wait_max=timedelta(0))).unwrap(
+        StaticVaultToken.protect(protector, "hvs.wrapping"))
+    assert response is not None and response.data is not None
+    assert len(vault.requests) == 3
+
+
+def test_a_response_larger_than_the_limit_is_refused(vault: FakeVault, make_client: MakeClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(VaultClient, "MAX_RESPONSE_LENGTH", 64)
+    vault.respond = lambda _: Answer(200, '{"data":{"a":"' + "x" * 100 + '"}}')
+    with pytest.raises(VaultJsonError, match="more than the 64"):
+        make_client().read("a")
+    vault.respond = lambda _: Answer(200, '{"data":{"a":"b"}}')
+    assert make_client().read("a") is not None
+
+
+def test_a_stream_without_a_length_is_read_no_further_than_the_limit() -> None:
+    from hkdfguard.integration.hashicorpvault._json import SecureBuffer
+
+    source = io.BytesIO(b"x" * 100_000)
+    with SecureBuffer() as buffer, pytest.raises(VaultJsonError, match="larger than 1000 bytes"):
+        buffer.read_from(source.readinto, 1000)
+    assert source.tell() == 1001
+    with SecureBuffer() as buffer:
+        buffer.read_from(io.BytesIO(b"y" * 1000).readinto, 1000)
+        assert buffer.length == 1000
+
+
+def test_a_client_that_doesnt_verify_vaults_certificate_says_so(protector: DataProtector, caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.WARNING, logger="hkdfguard.integration.hashicorpvault"):
+        VaultClient(protector, VaultClientOptions(address="https://vault.example.com:8200", tls=VaultTlsOptions(insecure_skip_verify=True))).close()
+        unverified = ssl.create_default_context()
+        unverified.check_hostname = False
+        unverified.verify_mode = ssl.CERT_NONE
+        VaultClient(protector, VaultClientOptions(address="https://vault.example.com:8200", ssl_context=unverified)).close()
+        VaultClient(protector, VaultClientOptions(address="https://vault.example.com:8200")).close()
+    warnings = [record for record in caplog.records if "isn't verified" in record.getMessage()]
+    assert len(warnings) == 2
+    assert all(getattr(record, "event_id", None) == 3 for record in warnings)
 
 
 def test_a_redirect_without_a_location_fails(vault: FakeVault, make_client: MakeClient) -> None:
