@@ -130,8 +130,13 @@ class GoogleSecretManagerSecretCache(RemoteSecretCache):
         """A cache reading secrets through a new gRPC client, which :meth:`close` closes: by default
         to the global endpoint, signed in with Application Default Credentials.
 
+        :param project_id: the project whose secrets are read: its ID or number
+        :param key_ring: supplies the key every fetched secret is encrypted under; owned by the
+            caller - the cache never closes keys
+        :param logger: optional; see :class:`RemoteSecretCache`
         :param credentials: ``None`` for Application Default Credentials
         :param client_options: the client's options, e.g. ``{"api_endpoint": "secretmanager.europe-west1.rep.googleapis.com"}``
+        :param timeout: how long a fetch may take, retries included, in seconds
         :raises TypeError: ``project_id`` or ``key_ring`` is ``None``
         :raises ValueError: as the constructor - checked before a client is created
         :raises google.auth.exceptions.DefaultCredentialsError: no credentials were given or found

@@ -58,6 +58,7 @@ class ConfigurationItemReader(KeyReader):
         """Reads ``stream`` to its end as text and extracts the keys of the configuration items it
         contains. It is read from its current position and is left open.
 
+        :param stream: a binary stream, read from its current position to its end and left open
         :param encoding: the stream's encoding, UTF-8 by default; a UTF-8, UTF-16 or UTF-32 byte
             order mark in the stream takes precedence
         :returns: the trimmed keys, in the order they appear

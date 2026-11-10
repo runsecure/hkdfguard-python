@@ -149,6 +149,7 @@ class AwsKmsKeyWrapper(KeyWrapper):
 
         :param plaintext: the key, 1 to :attr:`MAX_PLAINTEXT_LENGTH` bytes; not modified - it is the
             caller's to zero
+        :param result: receives the wrapped key
         :returns: the number of bytes written to ``result``
         :raises ValueError: ``plaintext`` is empty or over :attr:`MAX_PLAINTEXT_LENGTH` bytes, or
             ``result`` is too small for the wrapped DEK

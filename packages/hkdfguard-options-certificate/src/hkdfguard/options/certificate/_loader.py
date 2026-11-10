@@ -120,6 +120,7 @@ class CertificateOptionsLoader:
         """Opens the certificate ``options`` describes, reading a file's password synchronously -
         blocking, for a remote password source, until it answers.
 
+        :param options: describes the certificate to open; validated before anything is opened
         :param name: the options' name, for named options; only reported in a validation failure
         :raises CertificateOptionsValidationError: the options aren't valid on this operating system
         :raises CertificateNotFoundError: a store holds no certificate valid now (with its key, when required)

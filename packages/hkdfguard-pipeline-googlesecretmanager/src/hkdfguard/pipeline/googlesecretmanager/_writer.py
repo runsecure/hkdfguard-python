@@ -131,8 +131,13 @@ class GoogleSecretManagerSecretPipelineWriter(SecretPipelineWriter):
         """A writer reading secrets through a new gRPC client, which :meth:`close` closes: by default
         to the global endpoint, signed in with Application Default Credentials (Workload Identity on GKE).
 
+        :param project_id: the project whose secrets are read: its ID or number
+        :param protector: encrypts every value read. Owned by the caller: the writer never closes it.
+        :param secret_names: the secrets to pull, each a secret ID with the key to read after ``#``
+            if any. Copied: a later change to the sequence isn't seen.
         :param credentials: ``None`` for Application Default Credentials
         :param client_options: the client's options, e.g. ``{"api_endpoint": "secretmanager.europe-west1.rep.googleapis.com"}``
+        :param timeout: how long a read may take, retries included, in seconds
         :raises TypeError: ``project_id``, ``protector`` or ``secret_names`` is ``None``
         :raises ValueError: as the constructor - the project ID checked before a client is created
         :raises google.auth.exceptions.DefaultCredentialsError: no credentials were given or found

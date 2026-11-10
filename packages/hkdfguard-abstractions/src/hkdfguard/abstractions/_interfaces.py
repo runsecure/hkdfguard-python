@@ -112,7 +112,9 @@ class CryptoProvider(_Closable):
     def encrypt(self, plaintext: WritableBuffer, result: WritableBuffer, *, aad: Buffer = b"") -> int:
         """Encrypts ``plaintext`` (zeroed before this returns or raises), bound to ``aad``.
 
+        :param plaintext: the data to encrypt; zeroed before this returns or raises
         :param result: receives the encrypted data; at least :meth:`get_encrypted_allocation_length` bytes
+        :param aad: additional authenticated data, which decrypt must be given again; empty by default
         :returns: the number of bytes written to ``result``
         """
 

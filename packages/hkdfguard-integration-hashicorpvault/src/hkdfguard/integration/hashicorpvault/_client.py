@@ -412,6 +412,7 @@ class VaultClient(VaultApis):
         """Reads the value at ``path`` (GET /v1/path).
 
         :param path: the path under /v1/, with or without that prefix
+        :param options: Settings for this request; ``None`` for none.
         :returns: Vault's response; ``None`` if it has no body
         """
         return send(self, "GET", v1_path(_require_str(path, "path")), None, query_parameters(options), options, JsonValue.read_json_dict)
@@ -498,6 +499,9 @@ class VaultClient(VaultApis):
 
         :param wrapping_token: the wrapping token - :attr:`VaultResponseWrapInfo.token`, or one
             protected with :meth:`protect_token`
+        :param reader: reads the unwrapped response's data; :meth:`JsonValue.read_json_dict` by default
+        :param options: Settings for this request; ``None`` for none. Its ``token`` is replaced by
+            ``wrapping_token``.
         :raises VaultResponseError: Vault refuses the token: unknown, expired or already used
         """
         return send(self, "PUT", "/v1/sys/wrapping/unwrap", None, None, _with_token(wrapping_token, options), reader)

@@ -79,6 +79,9 @@ class TrustedFile:
         read into is zeroed once parse returns or raises, and the read-only view parse is given is
         released then, so parse must not keep it, and should zero any copy it makes.
 
+        :param path: the file's path, absolute or relative to the working directory
+        :param trust: who besides administrators is trusted; :attr:`KeyFileTrust.ADMINISTRATORS_ONLY` for no one
+        :param max_bytes: the longest file accepted
         :param parse: turns the contents, which may be empty, into the result
         :returns: what ``parse`` returned
         :raises TypeError: ``parse`` isn't callable, or as :meth:`read`

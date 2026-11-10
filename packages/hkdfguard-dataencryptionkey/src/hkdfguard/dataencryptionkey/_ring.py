@@ -55,7 +55,9 @@ class DataEncryptionKey(abstractions.DataEncryptionKey):
     output via the provider and records telemetry. Owns its provider: close closes it."""
 
     def __init__(self, provider: CryptoProvider, deadline: EncryptionDeadline | None = None) -> None:
-        """:param deadline: when this key stops encrypting; it encrypts without a time limit when ``None``"""
+        """:param provider: performs the AEAD with the key it owns; owned by this key from here on, and closed by :meth:`close`
+        :param deadline: when this key stops encrypting; it encrypts without a time limit when ``None``
+        """
         if provider is None:
             raise TypeError("provider must not be None.")
         self._provider = provider

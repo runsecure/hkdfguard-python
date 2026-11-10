@@ -168,6 +168,7 @@ class AesGcmCryptoProvider(CryptoProvider):
                _refresh_timeout: float | None = None) -> AesGcmCryptoProvider:
         """Reveals the DEK through ``key_wrapper`` and starts the background refresh.
 
+        :param key_wrapper: reveals ``wrapped`` now, and again on every refresh
         :param wrapped: the wrapped DEK payload. A ``bytearray`` is owned by the provider from here
             on and zeroed when it closes; other buffers are copied.
         :param expiry_seconds: how long each session is used before the next refresh, 1-300
